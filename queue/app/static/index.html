@@ -1,0 +1,1329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OSVplat</title>
+<style>
+:root{
+  --bg:#f7f7f5; --panel:#fff; --ink:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+  --accent:#3b6ea5; --ok:#2e7d4f; --warn:#a8681a; --err:#a63232; --run:#3b6ea5;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#16161a; --panel:#1e1e23; --ink:#e8e8e4; --muted:#9a9a94; --line:#33333a;
+  --accent:#7aa8dc; --ok:#6bbd8c; --warn:#d9a35a; --err:#e08585; --run:#7aa8dc;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;gap:16px;align-items:center;padding:10px 16px;
+  border-bottom:1px solid var(--line);background:var(--panel);
+  position:sticky;top:0;z-index:10;flex-wrap:wrap}
+h1{font-size:15px;margin:0;font-weight:650;letter-spacing:-.01em}
+.grow{flex:1}
+button{font:inherit;padding:5px 11px;border:1px solid var(--line);
+  border-radius:6px;background:var(--panel);color:var(--ink);cursor:pointer}
+a{color:var(--accent)}
+a.dl{display:inline-block;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;text-decoration:none;font-weight:600}
+a.dl:hover{background:color-mix(in srgb,var(--accent) 15%,transparent)}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.danger{color:var(--err)}
+button:disabled{opacity:.45;cursor:default}
+main{display:grid;grid-template-columns:minmax(380px,460px) 1fr;gap:16px;
+  padding:16px;align-items:start}
+@media(max-width:940px){main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;margin-bottom:16px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--muted);margin:0 0 12px;font-weight:600}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
+input,select,textarea{width:100%;font:inherit;padding:5px 8px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg);
+  color:var(--ink)}
+textarea{font-family:var(--mono);font-size:12px;min-height:52px}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.chip{padding:4px 10px;border:1px solid var(--line);border-radius:999px;
+  cursor:pointer;font-size:12px;background:var(--bg)}
+.chip.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);
+  vertical-align:top}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--muted);font-weight:600}
+tr.sel td{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.mono{font-family:var(--mono);font-size:12px}
+.muted{color:var(--muted)}
+.pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;
+  border:1px solid currentColor;font-weight:600}
+.s-queued{color:var(--muted)} .s-running{color:var(--run)}
+.s-done,.s-cached{color:var(--ok)} .s-failed{color:var(--err)}
+.s-cancelled{color:var(--warn)} .s-pending{color:var(--muted)}
+.s-awaiting_review{color:var(--warn)} .s-skipped{color:var(--muted)}
+.s-approved{color:var(--ok)} .s-rejected{color:var(--err)}
+.s-waiting{color:var(--warn)}
+.bar{height:5px;background:var(--line);border-radius:3px;overflow:hidden;
+  margin-top:4px}
+.bar>i{display:block;height:100%;background:var(--accent)}
+/* One segment per stage the job will actually run, widths in proportion to
+   what each was estimated to cost -- so the bar shows where the time goes, not
+   just how many stages are left. */
+.seg{display:flex;gap:2px;height:7px;margin-top:4px;min-width:120px}
+.seg>span{background:var(--line);border-radius:2px;overflow:hidden;
+  min-width:2px}
+.seg>span>i{display:block;height:100%;width:0;background:var(--accent);
+  transition:width .8s linear}
+.seg>span.s_done>i,.seg>span.s_cached>i{background:var(--ok)}
+.seg>span.s_failed>i,.seg>span.s_cancelled>i{background:var(--err)}
+/* A cached stage cost nothing, so it gets a sliver rather than a share. */
+.seg>span.s_cached{background:repeating-linear-gradient(45deg,
+  var(--ok) 0 2px,transparent 2px 4px);opacity:.6}
+/* Two reserved single-line rows, never wrapping. The caption is rewritten
+   every second, and letting it reflow made the whole queue table breathe in and
+   out: a digit more or less changed the line count, the row height and -- with
+   an auto table layout -- every column width with it. */
+.cap{font-size:11.5px;color:var(--muted);font-family:var(--mono);margin-top:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.4em;
+  font-variant-numeric:tabular-nums}
+.cap b{color:var(--ink);font-weight:600}
+/* Digits of equal width, so a ticking counter cannot change its own length. */
+.mono,td{font-variant-numeric:tabular-nums}
+/* Fixed layout stops the content deciding the column widths, but it will also
+   crush a column to nothing rather than overflow -- the job name went to 13px
+   in a narrow window. So the table keeps a floor and its wrapper scrolls. */
+table.queue{table-layout:fixed;width:100%;min-width:820px}
+table.queue td{overflow:hidden}
+table.queue td.name{white-space:nowrap;text-overflow:ellipsis}
+.tscroll{overflow-x:auto}
+/* Equirectangular frames are 2:1, so the thumbnail is too. */
+img.thumb{width:64px;height:32px;object-fit:cover;display:block;border-radius:3px;
+  border:1px solid var(--line);background:var(--line);cursor:zoom-in}
+/* The enlarged preview is fixed-positioned and lives on <body>, not in the
+   cell: the queue table scrolls horizontally, and anything absolutely
+   positioned inside it gets clipped by that scroll container. */
+#peek{position:fixed;width:420px;height:210px;object-fit:cover;z-index:80;
+  border-radius:6px;border:1px solid var(--line);
+  box-shadow:0 10px 30px rgba(0,0,0,.5);pointer-events:none}
+.eta{color:var(--accent)}
+.eta.soft{color:var(--muted)}      /* from the plan, not from a counter */
+pre.log{background:#0e0e11;color:#d6d6d0;padding:10px;border-radius:8px;
+  max-height:420px;overflow:auto;font-family:var(--mono);font-size:11.5px;
+  line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.warnbox{border:1px solid var(--warn);color:var(--warn);border-radius:8px;
+  padding:8px 10px;margin:8px 0;font-size:12.5px}
+.errbox{border:1px solid var(--err);color:var(--err);border-radius:8px;
+  padding:8px 10px;margin:8px 0;font-size:12.5px;white-space:pre-wrap;
+  font-family:var(--mono)}
+.gpu{display:flex;gap:8px;align-items:center;font-size:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.dot.busy{background:var(--warn)} .dot.foreign{background:var(--err)}
+.est{font-size:12px;color:var(--muted);margin-top:8px;font-family:var(--mono)}
+details{margin-top:10px}
+summary{cursor:pointer;font-size:12px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.small{font-size:12px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px}
+.kv b{font-weight:600;color:var(--muted)}
+/* Settings help. The icon is a hover target only -- the panel itself is
+   fixed-positioned on <body> so a long note is never clipped by the card. */
+.i{display:inline-flex;align-items:center;justify-content:center;width:13px;
+  height:13px;border-radius:50%;border:1px solid var(--muted);color:var(--muted);
+  font-size:9px;font-style:normal;font-weight:700;margin-left:5px;cursor:help;
+  vertical-align:middle;line-height:1;font-family:ui-sans-serif,system-ui,sans-serif}
+.i:hover{border-color:var(--accent);color:var(--accent)}
+#tip{position:fixed;z-index:90;max-width:390px;background:var(--panel);
+  color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px;
+  font-size:12.5px;line-height:1.5;box-shadow:0 10px 30px rgba(0,0,0,.45);
+  pointer-events:none}
+#tip b{color:var(--accent)}
+#tip code{font-family:var(--mono);font-size:11.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>OSVplat</h1>
+  <div id="gpus" class="gpu"></div>
+  <div class="grow"></div>
+  <span id="queueEta" class="muted small mono"></span>
+  <span id="counts" class="muted small"></span>
+  <label class="muted small" style="margin:0;display:flex;gap:5px;align-items:center">
+    max concurrent
+    <select id="conc" style="width:auto;padding:3px 6px">
+      <option value="1">1</option><option value="2">2</option>
+    </select>
+  </label>
+  <button id="pauseBtn"></button>
+</header>
+
+<div id="schedErr" style="padding:0 16px"></div>
+<div id="toast" style="padding:0 16px"></div>
+
+<main>
+  <div>
+    <div class="card">
+      <h2>New job</h2>
+      <label>Input clip<span class="i" data-tip="input">i</span></label>
+      <select id="input"></select>
+      <div id="clipinfo" class="muted small" style="margin-top:4px"></div>
+
+      <div class="row">
+        <div><label>Trim start (s)<span class="i" data-tip="trim">i</span></label><input id="trimStart" type="number" step="0.5" placeholder="none"></div>
+        <div><label>Trim end (s)</label><input id="trimEnd" type="number" step="0.5" placeholder="none"></div>
+      </div>
+
+      <label>Preset<span class="i" data-tip="preset">i</span></label>
+      <div class="chips" id="presets"></div>
+
+      <div class="row">
+        <div><label>Candidate fps<span class="i" data-tip="fps">i</span></label><input id="fps" type="number" step="1" value="10"></div>
+        <div id="windowField"><label>Sharpness window<span class="i" data-tip="window">i</span></label><input id="window" type="number" step="1" value="5"></div>
+      </div>
+      <label>Frame selection</label>
+      <select id="selectionMode">
+        <option value="window">Time windows · sharpest frame</option>
+        <option value="distance" id="distanceOption" disabled>Avata distance · sharpest nearby frame</option>
+      </select>
+      <div id="distanceFields" hidden>
+        <div class="row">
+          <div><label>Shot spacing (m)</label><input id="distanceM" type="number" min="0.01" step="0.5" value="5"></div>
+          <div><label>Maximum time gap (s)</label><input id="maxGapS" type="number" min="0.01" step="0.1" value="2"></div>
+        </div>
+        <div class="muted small">Uses Avata velocity to estimate distance travelled. Picks sharp lens pairs near each target and keeps extra shots during slow movement. Experimental; spacing does not guarantee visual overlap.</div>
+      </div>
+
+      <label>Training budget (steps-scaler)<span class="i" data-tip="budget">i</span></label>
+      <select id="budget">
+        <option value="1">1.0 — 30k iterations (full)</option>
+        <option value="0.5">0.5 — 15k iterations</option>
+        <option value="0.25">0.25 — 7.5k iterations</option>
+        <option value="0.1">0.1 — 3k iterations (smoke test)</option>
+      </select>
+      <div class="muted small" style="margin-top:3px">
+        Scales iterations <em>and</em> every schedule together. Never combined with a raw <span class="mono">--iter</span>.
+      </div>
+
+      <div class="row">
+        <div><label>Max cap<span class="i" data-tip="maxcap">i</span></label><input id="maxCap" type="number" step="100000" value="3000000"></div>
+        <div><label>Max width<span class="i" data-tip="maxwidth">i</span></label>
+          <select id="maxWidth">
+            <option value="1920">1920</option>
+            <option value="3840" selected>3840 (LichtFeld default)</option>
+            <option value="7680">7680 (full 8K)</option>
+          </select></div>
+      </div>
+
+      <div class="row">
+        <div><label>SH degree<span class="i" data-tip="sh">i</span></label><input id="shDegree" type="number" min="0" max="3" value="1"></div>
+        <div><label>Strategy<span class="i" data-tip="strategy">i</span></label>
+          <select id="strategy"><option>mrnf</option><option>mcmc</option></select></div>
+      </div>
+
+      <details>
+        <summary>Quality flags</summary>
+        <div class="small" style="margin-top:8px">
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="evalOn" checked style="width:auto"> <span>--eval (held-out PSNR/SSIM)<span class="i" data-tip="eval">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="maskOn" style="width:auto"> <span>Person masking (operator / people)<span class="i" data-tip="mask">i</span></span></label>
+          <div id="maskNote" class="muted small" style="margin-left:22px;margin-bottom:6px"></div>
+          <div id="maskOpts" style="margin-left:22px;margin-bottom:8px">
+            <label>Mask backend<span class="i" data-tip="maskBackend">i</span></label>
+            <select id="maskBackend"></select>
+            <div id="maskBackendNote" class="muted small"></div>
+            <div id="maskPromptsRow" style="display:none;margin-top:6px">
+              <label>Mask these (comma-separated)</label>
+              <input id="maskPrompts" type="text" value="person" placeholder="person, dog">
+            </div>
+          </div>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="imuOn" style="width:auto" disabled> <span>Gyro blur veto (raw .OSV only)<span class="i" data-tip="imu">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="mip" style="width:auto"> <span>--enable-mip<span class="i" data-tip="mip">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bgimp" style="width:auto" disabled> <span class="muted">--background-improvements (crashes on the pinned LichtFeld)<span class="i" data-tip="bgimp">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="expcorr" style="width:auto"> <span>--exposure-correction<span class="i" data-tip="expcorr">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bilat" style="width:auto"> <span>--bilateral-grid<span class="i" data-tip="bilat">i</span></span></label>
+        </div>
+        <label>Extra args (verbatim)<span class="i" data-tip="extra">i</span></label>
+        <textarea id="extra" placeholder="--far-seed-dose 4000"></textarea>
+      </details>
+
+      <details>
+        <summary>Sweep</summary>
+        <label>Axes (JSON: field → list of values)<span class="i" data-tip="axes">i</span></label>
+        <textarea id="axes" placeholder='{"train.sh_degree":[1,3],"train.enable_mip":[false,true]}'></textarea>
+        <div class="muted small">Leave empty for a single job. One shared SfM covers every variant.</div>
+      </details>
+
+      <label>Name<span class="i" data-tip="name">i</span></label>
+      <input id="name" placeholder="auto">
+      <div id="est" class="est"></div>
+      <div id="createMsg"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="primary" id="createBtn">Queue</button>
+        <button id="estBtn">Estimate</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Cache</h2>
+      <div id="cache" class="small muted">—</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Queue
+        <button style="float:right;font-size:11px;padding:2px 8px"
+                title="Hides finished jobs. Their metrics and history are kept."
+                onclick="clearFinished()">clear finished</button></h2>
+      <div class="tscroll">
+        <table class="queue"><colgroup>
+          <col style="width:30px"><col style="width:46px"><col class="thumbcol" style="width:76px">
+          <col><col style="width:96px"><col style="width:250px">
+          <col style="width:120px"><col style="width:62px"></colgroup>
+        <thead><tr><th></th><th>#</th><th class="thumbcol"></th><th>Job</th><th>State</th>
+        <th>Progress</th><th>Metrics</th><th></th></tr></thead>
+        <tbody id="jobs"></tbody></table>
+      </div>
+    </div>
+    <div class="card" id="detailCard" hidden>
+      <h2>Detail</h2>
+      <div id="review" hidden></div>
+      <div id="detail"></div>
+      <details open style="margin-top:10px">
+        <summary>Live log — <span id="logStage" class="mono">train</span></summary>
+        <pre class="log" id="logbox">…</pre>
+      </details>
+    </div>
+    <div class="card" id="compareCard" hidden>
+      <h2>Compare</h2>
+      <div id="compare"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (p, o) => {
+  const r = await fetch(p, o);
+  if (!r.ok) throw new Error((await r.text()).slice(0, 400));
+  return r.json();
+};
+const fmtT = s => s == null ? '—'
+  : s < 90 ? `${Math.round(s)}s`
+  : s < 5400 ? `${(s/60).toFixed(1)}m` : `${(s/3600).toFixed(2)}h`;
+// Deliberately coarser than fmtT. An ETA good to +/-20% must not be printed
+// as "1h47m", which reads as a measurement rather than an estimate.
+const fmtETA = s => s == null ? null
+  : s < 60 ? '<1m'
+  : s < 3600 ? `${Math.round(s/60)}m`
+  : s < 36000 ? `${Math.floor(s/3600)}h${String(Math.round(s%3600/60)).padStart(2,'0')}`
+  : `${Math.round(s/3600)}h`;
+// From the DURATION the server computed, never from its clock: the service runs
+// may be on a different machine from the browser, and the clocks need not agree.
+const fmtDone = s => s == null ? '' : new Date(Date.now() + s*1000)
+  .toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+const fmtB = b => b == null ? '—'
+  : b > 1e9 ? (b/1e9).toFixed(2)+' GB'
+  : b > 1e6 ? (b/1e6).toFixed(1)+' MB' : (b/1e3).toFixed(0)+' kB';
+
+const PRESETS = {
+  // Smoke test saves time by using 30 s of the clip and training briefly, NOT
+  // by thinning frames: at 5 fps / window 8 the frames were 1.6 s apart and
+  // neither a handheld rig nor a stitched drone clip could be reconstructed.
+  'Smoke test': {budget:0.1, maxCap:300000, maxWidth:1920, fps:10, window:3, shDegree:1, trim:30},
+  'Draft':      {budget:0.5, maxCap:1000000, maxWidth:1920, fps:10, window:5, shDegree:1},
+  'Standard':   {budget:1, maxCap:3000000, maxWidth:3840, fps:10, window:5, shDegree:1},
+  'Max':        {budget:1, maxCap:3000000, maxWidth:7680, fps:10, window:5, shDegree:3},
+};
+let inputs = [], selectedJobs = new Set(), curLog = null, presetTrimEnd = null;
+// The compare panel is rebuilt by the 4-second poll. Without these, every poll
+// threw away a finished contact sheet and re-enabled the button mid-request.
+let renderBusy = false, lastRenderHTML = '', lastCompareHTML = '';
+// Same reason as the compare panel: the 4-second poll must not
+// rebuild the review panel underneath a half-typed note, or reload
+// the contact sheet image every tick.
+let reviewBusy = null, lastReviewHTML = '';
+// The detail pane refreshes with the queue. curDetail/curStage say what is open
+// so the poll knows what to re-render and the log tail knows when to give up.
+let curDetail = null, curStage = null, logRetry = null;
+// Bumped by every tailLog call. The follow stream now opens after an
+// await, so a second tail starting meanwhile has to be able to win.
+let tailSeq = 0;
+
+function buildConfig() {
+  const sel = inputs.find(i => i.file === $('#input').value) || {};
+  const budget = parseFloat($('#budget').value);
+  const cfg = {
+    name: $('#name').value.trim() ||
+          `${(sel.name||'job').replace(/\.[^.]+$/,'')}-${$('#budget').value}x`,
+    input: {
+      file: $('#input').value,
+      trim_start: $('#trimStart').value === '' ? null : +$('#trimStart').value,
+      trim_end: $('#trimEnd').value === '' ? null : +$('#trimEnd').value,
+    },
+    frames: {fps: +$('#fps').value, jpeg_q: 2},
+    // select.imu only exists for raw .OSV; a stitched job that sends it is refused.
+    select: {mode: $('#selectionMode').value, window: +$('#window').value,
+             ...($('#selectionMode').value === 'distance'
+               ? {distance_m: +$('#distanceM').value, max_gap_s: +$('#maxGapS').value} : {}),
+             ...(sel.pipeline === 'fisheye_rig' ? {imu: $('#imuOn').checked} : {})},
+    sfm: {render: 'spherical', mapper: 'incremental'},
+    train: {
+      strategy: $('#strategy').value,
+      steps_scaler: budget,
+      max_cap: +$('#maxCap').value,
+      sh_degree: +$('#shDegree').value,
+      max_width: +$('#maxWidth').value,
+      eval: $('#evalOn').checked,
+      enable_mip: $('#mip').checked,
+      background_improvements: $('#bgimp').checked,
+      exposure_correction: $('#expcorr').checked,
+      bilateral_grid: $('#bilat').checked,
+      extra_args: $('#extra').value.trim(),
+    },
+    // All three, matching the backend default: PLY is the lossless
+    // master, SOG is what the viewer streams, SPZ is the interchange
+    // container. They cost seconds at the end of a 75-minute run.
+    export: {formats: ['ply','sog','spz']},
+    mask: {
+      enabled: $('#maskOn').checked,
+      backend: $('#maskBackend').value || 'maskrcnn',
+      ...(maskBackendInfo()?.prompts
+          ? {prompts: $('#maskPrompts').value.split(',').map(x => x.trim()).filter(Boolean)}
+          : {}),
+    },
+  };
+  // steps_scaler and iter must never both be non-default.
+  if (budget === 1) { cfg.train.iter = 30000; cfg.train.steps_scaler = 1.0; }
+  return cfg;
+}
+
+// Mask backends come from the server (app/mask_backends.py), which also knows
+// whether each one's weights are installed. An unavailable one stays listed but
+// disabled, with how to install it, so the option is discoverable.
+let maskBackends = [];
+const maskBackendInfo = () => maskBackends.find(b => b.name === $('#maskBackend').value);
+function renderMaskBackends(list) {
+  const key = JSON.stringify(list);
+  if (key === renderMaskBackends.last) return;      // keep the user's selection
+  renderMaskBackends.last = key;
+  maskBackends = list;
+  const sel = $('#maskBackend'), cur = sel.value || 'maskrcnn';
+  sel.innerHTML = list.map(b => `<option value="${esc(b.name)}"${b.available ? '' : ' disabled'}
+      title="${esc(b.available ? b.licence : b.reason)}">${esc(b.label)}${
+      b.available ? '' : ' (not installed)'}</option>`).join('');
+  const ok = list.find(b => b.name === cur && b.available);
+  sel.value = ok ? cur : 'maskrcnn';
+  showMaskBackend();
+}
+function showMaskBackend() {
+  const b = maskBackendInfo();
+  $('#maskPromptsRow').style.display = b && b.prompts ? '' : 'none';
+  const off = maskBackends.filter(x => !x.available);
+  $('#maskBackendNote').textContent = b ? b.licence : '';
+  if (off.length) $('#maskBackendNote').textContent +=
+    ` · ${off.map(x => x.name).join(', ')} not installed: hover it for how`;
+}
+
+async function refreshStatus() {
+  const s = await api('/api/status');
+  if (s.mask_backends) renderMaskBackends(s.mask_backends);
+  $('#pauseBtn').textContent = s.paused ? '▶ Resume queue' : '⏸ Pause queue';
+  $('#pauseBtn').className = s.paused ? 'primary' : '';
+  $('#pauseBtn').onclick = async () => {
+    await api('/api/pause', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({paused: !s.paused})});
+    refreshStatus();
+  };
+  $('#gpus').innerHTML = s.gpus.map(g => {
+    const foreign = g.busy_foreign;
+    const cls = (foreign || g.probe_ok === false) ? 'dot foreign'
+      : (g.held || g.util > 5) ? 'dot busy' : 'dot';
+    // Report what the scheduler will actually do, not just whether a foreign
+    // process is present: a GPU held by one of our own jobs, or one nvidia-smi
+    // could not be probed, is not free either.
+    const note = g.probe_ok === false ? 'unreadable — treated as busy'
+      : foreign ? `foreign pid ${g.foreign.map(p=>p.pid).join(',')}`
+      : !g.schedulable ? 'not scheduled'
+      : g.held ? 'held by this queue'
+      : g.available ? 'free' : 'busy';
+    return `<span class="${cls}"></span><span class="mono">gpu${g.index}
+      ${g.mem_used||0}/${g.mem_total||0}MiB ${g.util||0}% <span class="muted">${note}</span></span>`;
+  }).join(' &nbsp; ');
+  const shown = $('#jobs').children.length;
+  $('#counts').textContent = Object.entries(s.counts||{})
+    .map(([k,v]) => `${v} ${k}`).join(' · ')
+    + (s.visible_jobs > shown ? `  ·  showing ${shown} of ${s.visible_jobs}` : '');
+  // A dispatcher that is throwing looks exactly like an idle one from the
+  // queue table, so say so where the pause state is.
+  $('#schedErr').innerHTML = s.scheduler_error
+    ? `<div class="errbox">scheduler: ${esc(s.scheduler_error)}</div>` : '';
+  const conc = $('#conc');
+  // Options were hardcoded to 1 and 2. A stored max_concurrent of 3+ matched
+  // nothing, left the select blank, and the next change posted +'' === 0.
+  // Offer one per schedulable GPU, and never fewer than the stored value.
+  const top = Math.max(2, (s.schedulable_gpus || []).length, s.max_concurrent || 1);
+  if (conc.options.length !== top) {
+    conc.innerHTML = Array.from({length: top},
+      (_, i) => `<option value="${i+1}">${i+1}</option>`).join('');
+  }
+  if (document.activeElement !== conc) conc.value = String(s.max_concurrent||1);
+  const q = s.queue || {};
+  $('#queueEta').textContent = q.jobs
+    ? (q.drains_in == null ? `${q.jobs} active · waiting for scheduling`
+       : `${q.jobs} active · ~${fmtETA(q.drains_in)} · drains ~${fmtDone(q.drains_in)}`)
+    : '';
+  conc.title = 'Training jobs in flight. Defaults to one per schedulable GPU.';
+  conc.onchange = async () => {
+    await api('/api/concurrency', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({max_concurrent: +conc.value})});
+    refreshStatus();
+  };
+}
+
+// One segment per stage, sized by what that stage was estimated to cost. A
+// cached stage costs nothing and gets a fixed sliver instead of a share --
+// otherwise a job whose whole front half came from the cache would show a bar
+// that was already three-quarters full before it started.
+// A cached stage costs nothing, so it cannot have a share of the time -- as a
+// weight it came out at 0.07% of the bar, which is no pixels at all. It gets a
+// fixed sliver instead, and the stages that will actually run divide up the
+// rest between them.
+const CACHED_PX = 7;
+function segBar(j) {
+  const plan = j.plan || {};
+  const runnable = (j.stages || []).filter(s => s.state !== 'skipped');
+  if (!runnable.length) return '';
+  const priced = runnable.filter(s => s.state !== 'cached');
+  const cost = s => Math.max(plan[s.stage] || 0, 1);
+  const total = priced.reduce((a, s) => a + cost(s), 0) || 1;
+  const fill = s => s.state === 'done' || s.state === 'cached' ? 1
+    : s.state === 'running' ? (s.fraction || 0) : 0;
+  return `<div class="seg" data-seg="${j.id}">` + runnable.map(s =>
+    `<span class="s_${s.state}" style="flex:${s.state === 'cached'
+        ? `0 0 ${CACHED_PX}px` : `1 1 ${100*cost(s)/total}%`}"
+           title="${s.stage} — ${s.state}${s.state === 'cached'
+             ? ' (reused, no cost)'
+             : s.est != null ? `, est ${fmtT(s.est)}` : ''}">
+       <i data-fill="${s.stage}" style="width:${100*fill(s)}%"></i></span>`
+  ).join('') + '</div>';
+}
+
+// The caption under the bar. Split into a static half and a ticking half so the
+// per-second update can rewrite the times without redrawing the row (and
+// without fighting the checkbox in it).
+// The two caption lines, as EMPTY shells. Their text is written by patchRow
+// and by the per-second tick, never rebuilt -- rebuilding is what made the
+// whole cell repaint, which is the blink.
+function captionShell(j) {
+  return `<div class="cap"><b data-stage="${j.id}"></b><span data-head="${j.id}"></span></div>
+    <div class="cap"><span data-el="${j.id}"></span><span data-rem="${j.id}"></span></div>`;
+}
+
+function captionText(j) {
+  const e = j.eta || {};
+  if (j.state === 'queued') return {stage: '', head: 'waiting'};
+  if (j.state !== 'running') {
+    const n = j.stages.filter(s => s.state === 'cached').length;
+    return {stage: '', head: `${n} cached`};
+  }
+  return {stage: e.stage || '', head: e.detail ? ` · ${e.detail}` : ''};
+}
+
+// Server numbers are a snapshot; `age` is how long ago that snapshot was taken,
+// measured on THIS machine's clock. Adding it locally is what lets the counters
+// move every second on a four-second poll, without trusting the two clocks to
+// agree on anything but a duration.
+function tickTimes(age) {
+  // Assigning textContent replaces the text node even when the string is
+  // identical, and "starts in ~34m" is identical for sixty consecutive ticks.
+  const put = (el, val) => { if (el && el.textContent !== val) el.textContent = val; };
+  for (const j of lastJobs) {
+    if (j.state !== 'running' && j.state !== 'queued') continue;
+    const e = j.eta || {};
+    put(document.querySelector(`[data-el="${j.id}"]`),
+        e.elapsed != null ? fmtT(e.elapsed + age) : '');
+    const rem = document.querySelector(`[data-rem="${j.id}"]`);
+    if (rem) {
+      const left = e.remaining == null ? null : Math.max(0, e.remaining - age);
+      const starts = e.starts_in == null ? null : Math.max(0, e.starts_in - age);
+      put(rem, j.state === 'queued'
+        ? (starts != null ? `starts in ~${fmtETA(starts)}` : '')
+        : left != null ? ` · ~${fmtETA(left)} left · done ~${fmtDone(left)}`
+        : (e.stage === 'train' ? ' · starting…' : ''));
+    }
+    // Advance the running segment between polls at the rate the remaining time
+    // implies, so the bar creeps instead of stepping once every four seconds.
+    const live = (j.stages || []).find(s => s.state === 'running');
+    if (!live || e.remaining == null) continue;
+    const bar = document.querySelector(
+      `[data-seg="${j.id}"] [data-fill="${live.stage}"]`);
+    if (!bar) continue;
+    const f = live.fraction;
+    if (f == null || f >= 1) continue;
+    const grown = f + age * (1 - f) / Math.max(1, e.remaining);
+    bar.style.width = `${100 * Math.min(grown, 1)}%`;
+  }
+  setDocTitle();
+}
+
+function setDocTitle() {
+  const run = lastJobs.filter(j => j.state === 'running');
+  if (run.length !== 1) {
+    document.title = run.length ? `${BASE_TITLE} (${run.length} running)`
+                                : BASE_TITLE;
+    return;
+  }
+  const j = run[0], e = j.eta || {};
+  const age = (performance.now() - jobsAt) / 1000;
+  const left = e.remaining == null ? null : Math.max(0, e.remaining - age);
+  document.title = [
+    e.fraction != null ? `${Math.round(e.fraction * 100)}%` : null,
+    `#${j.id}`, fmtETA(left)].filter(Boolean).join(' · ');
+}
+
+// Kill switch for the thumbnail column. Off removes the column outright
+// rather than leaving an empty gap -- one constant so the markup, the header
+// and the rows agree. Needs the /api/jobs/{id}/thumb.jpg endpoint.
+const THUMBS = true;
+
+function metricsText(j) {
+  const m = j.metrics || {};
+  return [
+    m.psnr != null ? `PSNR ${(+m.psnr).toFixed(2)}` : null,
+    m.ssim != null ? `SSIM ${(+m.ssim).toFixed(3)}` : null,
+    m.splats != null ? `${(+m.splats/1e6).toFixed(2)}M` : null,
+    m.mean_reproj != null ? `${(+m.mean_reproj).toFixed(2)}px` : null,
+    m.train_seconds != null ? fmtT(+m.train_seconds) : null,
+  ].filter(Boolean).join(' · ') || '—';
+}
+
+function rowShell(j) {
+  return `<tr data-job="${j.id}">
+    <td><input type="checkbox" onchange="toggleSel(${j.id})" style="width:auto"></td>
+    <td class="mono">${j.id}</td>
+    ${THUMBS ? `<td><a href="/api/jobs/${j.id}/thumb.jpg?w=1600" target="_blank"
+         title="opening frame — click for full size"><img class="thumb"
+         src="/api/jobs/${j.id}/thumb.jpg?w=480" alt="" loading="lazy"
+         onerror="this.style.visibility='hidden'"></a></td>` : ''}
+    <td class="name"><a href="#" onclick="showJob(${j.id});return false">${esc(j.name)}</a><span
+        class="muted mono" data-gpu="${j.id}"></span></td>
+    <td data-state="${j.id}"></td>
+    <td><div class="seg" data-seg="${j.id}"></div>${captionShell(j)}</td>
+    <td class="mono small" data-met="${j.id}"></td>
+    <td data-act="${j.id}"></td>
+  </tr>`;
+}
+
+// Write only what actually differs. Assigning an identical string still
+// repaints, so every write is guarded by a comparison -- that guard is the
+// whole point of this function.
+function patchRow(tr, j) {
+  const e = j.eta || {};
+  const put = (el, val) => { if (el && el.textContent !== val) el.textContent = val; };
+  const putHTML = (el, val) => { if (el && el.innerHTML !== val) el.innerHTML = val; };
+  const q = a => tr.querySelector(`[data-${a}="${j.id}"]`);
+
+  const on = selectedJobs.has(j.id);
+  if (tr.classList.contains('sel') !== on) tr.classList.toggle('sel', on);
+  const cb = tr.querySelector('input[type=checkbox]');
+  if (cb && cb.checked !== on) cb.checked = on;
+
+  put(q('gpu'), j.gpu != null ? ` gpu${j.gpu}` : '');
+  putHTML(q('state'), `<span class="pill s-${j.state}">${j.state}</span>`);
+  put(q('met'), metricsText(j));
+  putHTML(q('act'), ['queued', 'running', 'awaiting_review'].includes(j.state)
+    ? `<button class="danger" onclick="cancelJob(${j.id})">stop</button>` : '');
+
+  const t = captionText(j);
+  put(q('stage'), t.stage);
+  put(q('head'), t.head);
+  const rem = q('rem');
+  if (rem) {
+    const cls = 'eta' + (e.source === 'measured' ? '' : ' soft');
+    if (rem.className !== cls) rem.className = cls;
+    // Finished jobs are skipped by the tick, so their leftover countdown has
+    // to be cleared here or it freezes at whatever it last said.
+    if (j.state !== 'running' && j.state !== 'queued') put(rem, '');
+  }
+
+  // The segment strip is only rebuilt when a stage actually changes state.
+  // Its fill widths move every second, and those are set on the <i> directly.
+  const seg = tr.querySelector(`[data-seg="${j.id}"]`);
+  const sig = (j.stages || []).map(s => `${s.stage}:${s.state}`).join('|');
+  if (seg && seg.dataset.sig !== sig) {
+    // outerHTML replaces the node, so the signature has to be stamped on the
+    // element that survives -- stamping the old one rebuilt the strip on every
+    // single poll, which is the flicker this whole function exists to remove.
+    seg.outerHTML = segBar(j);
+    const fresh = tr.querySelector(`[data-seg="${j.id}"]`);
+    if (fresh) fresh.dataset.sig = sig;
+  } else if (seg) {
+    for (const s of j.stages || []) {
+      const i = seg.querySelector(`[data-fill="${s.stage}"]`);
+      if (!i) continue;
+      const w = `${100 * (s.state === 'done' || s.state === 'cached' ? 1
+        : s.state === 'running' ? (s.fraction || 0) : 0)}%`;
+      if (i.style.width !== w) i.style.width = w;
+    }
+  }
+}
+
+// Reconcile the table against lastJobs. Rows are created once and then patched;
+// only a change in which jobs are listed, or their order, rebuilds the tbody.
+function paintJobs() {
+  const body = $('#jobs');
+  const ids = lastJobs.map(j => j.id).join(',');
+  if (!lastJobs.length) {
+    const empty = `<tr><td colspan="${THUMBS ? 8 : 7}" class="muted">Queue is empty.</td></tr>`;
+    if (body.innerHTML !== empty) { body.innerHTML = empty; body.dataset.ids = ''; }
+    return;
+  }
+  if (body.dataset.ids !== ids) {
+    body.dataset.ids = ids;
+    body.innerHTML = lastJobs.map(rowShell).join('');
+  }
+  for (const j of lastJobs) {
+    const tr = body.querySelector(`tr[data-job="${j.id}"]`);
+    if (tr) patchRow(tr, j);
+  }
+  tickTimes((performance.now() - jobsAt) / 1000);
+}
+
+async function refreshJobs() {
+  const jobs = await api('/api/jobs');
+  lastJobs = jobs; jobsAt = performance.now();
+  paintJobs();
+  if (selectedJobs.size > 1) showCompare();
+  if (curDetail != null) renderDetail(false);
+}
+
+let lastJobs = [], jobsAt = 0;
+// Captured before anything writes to the title, so the idle state can restore it.
+const BASE_TITLE = document.title;
+
+// What each setting does and what it costs. The measured numbers are this
+// project's own, from the flag comparison and the runs in the project notes -- a
+// tooltip repeating the flag's name back at you would not be worth the hover.
+const TIPS = {
+  input: `The clip to reconstruct. A stitched equirectangular MP4 runs the
+    spherical path. A raw DJI <code>.OSV</code> (Osmo 360, Avata 360) is
+    reconstructed <b>without stitching</b>: both fisheye lenses go to SfM as a rig
+    calibrated from the file itself and train as fisheye cameras, which measured
+    better than stitching first (docs/how-it-works.md, "Fisheye rig"). <code>.insv</code> is still refused:
+    its calibration has not been decoded.`,
+  trim: `Which seconds of the clip to use, and the cheapest lever here — every
+    stage downstream scales with clip length. Trim is part of the cache key, so
+    changing it rebuilds from the frame dump.`,
+  maskBackend: `Which model finds what to mask. <b>Mask R-CNN</b> masks people only,
+    with nothing to install. <b>SAM 3</b> masks whatever you name (people, dogs,
+    a selfie stick), and is slightly faster and tighter, but its weights are
+    gated behind Meta's licence and have to be downloaded once; see
+    docs/how-it-works.md, "Person masking".`,
+  preset: `Sets fps, sharpness window, budget, cap, width and SH degree together.
+    <b>Smoke test</b> is for proving the pipeline runs end to end; it is not
+    meant to be looked at. It uses only 30 s of the clip (from Trim start) and
+    trains briefly, but keeps the normal frame spacing, because frames too far
+    apart cannot be reconstructed at all.`,
+  fps: `How many frames per second are pulled out of the clip as <em>candidates</em>,
+    before sharpness picking. More candidates give the sharpness pass more to
+    choose from, and a longer frame dump. Every run in the project notes used 10.`,
+  window: `Keeps the sharpest frame out of every W candidates — Laplacian variance
+    on a quarter-scale grey decode. Smaller W means more panoramas: better
+    coverage, but a longer SfM and a bigger training set. Run 3 used 3 (265
+    panoramas); runs 1–2 used 5 (284).`,
+  imu: `Raw .OSV only. Before the Laplacian picks the sharpest candidate of each
+    window, the clip's own gyro predicts each candidate's motion smear (focal
+    length × rotation rate × exposure) and drops any predicted more than 0.5 px
+    blurrier than the stillest in its window. The quarter-scale Laplacian barely
+    sees a smear of a few pixels, which is what 1/100 s indoor exposures produce:
+    on an indoor clip it swapped 78 of 330 frames and cut those predicted over
+    4 px from 101 to 85. In daylight nothing is that blurred, and it changes no frame.`,
+  budget: `Scales iterations <em>and</em> every schedule with them — densification
+    pacing, SH warm-up, refine interval. <b>Never combine it with a raw
+    <code>--iter</code></b>: the scaler is applied after the CLI assignment, so
+    <code>--iter 15000 --steps-scaler 0.5</code> gives 7,500 iterations, not 15,000.`,
+  maxcap: `Ceiling on the number of Gaussians, and the dominant lever on VRAM and
+    file size. 3M is the standard here and exports about 312 MB of PLY.`,
+  maxwidth: `Longest edge each panorama is resampled to before training. LichtFeld's
+    own default is 3840, so an 8K equirect is halved unless you say otherwise.
+    <b>Measured:</b> 7680 was visually indistinguishable from 3840 at 21 px per
+    degree, for 2.75× the time and 2.5× the VRAM (14.1 GB vs 5.7 GB) — and its
+    PSNR cannot be compared, since it is scored against a harder 7680-wide target.`,
+  sh: `Spherical-harmonic bands for view-dependent colour. <b>Measured:</b> degree 3
+    was the only flag that beat the control, by 0.21 dB and 0.0045 SSIM — at 2.9×
+    the training time and 2.4× the PLY size (744 MB vs 312 MB). Marginal.`,
+  strategy: `Densification strategy. <b>mrnf</b> is the default and what every run in
+    the project notes used. <b>mcmc collapses on rig datasets</b> where most Gaussians are
+    unseen in most iterations: its per-step opacity and scale regularisers plus
+    noise injection outweigh the rare photometric gradient, opacities fall to zero
+    and the model renders flat grey. If you do use it, zero <code>opacity_reg</code>
+    and <code>scale_reg</code> and lower <code>noise-lr</code>.`,
+  eval: `Holds out a slice of the views, scores against them and writes
+    <code>metrics.csv</code>. Worth leaving on: it is where the queue's PSNR column
+    comes from, and where the ETA gets the iteration rate it fits per config.`,
+  mip: `Mip-splatting anti-aliasing. <b>Measured:</b> did nothing on the reference
+    clip — 0.12 dB below the control, at identical cost and identical VRAM.`,
+  bgimp: `<b>Crashes on build 04e4607.</b> At iteration 10,000 the Adam optimiser is
+    handed host memory where device memory is required
+    (<code>adam_api.cu:173</code>), then segfaults in cleanup. No PLY is written,
+    and it ran 2.3× slower until it died. Reproduced on fisheye rigs too, at the
+    first refinement after iteration 2,000 of a smoke run. Disabled until the
+    LichtFeld pin moves past the bug.`,
+  expcorr: `Per-photo exposure model, for clips whose lighting changes across the
+    flight. It scored 0.55 dB below the control on the backyard reference clip —
+    but that clip cannot answer the question, since the flag is aimed at the aerial
+    runs, where most of the scene sits near infinity.`,
+  bilat: `Per-image bilateral grid, for colour and white-balance drift between
+    frames. Not yet tested in this project — there is no measured result either way.`,
+  extra: `Passed to the trainer verbatim, split with <code>shlex</code>, so
+    <code>--far-seed-dose "4000 5000"</code> stays a single argument. Repeating a
+    flag this form already manages is rejected rather than quietly passed twice.`,
+  axes: `JSON of dotted config field to a list of values; the queue queues the full
+    cross product. Every variant shares one frame dump, selection and SfM through
+    the cache, so an N-way sweep costs N trainings, not N pipelines.`,
+  name: `Label shown in the queue. Left blank it becomes
+    <code>&lt;clip&gt;-&lt;budget&gt;x</code>.`,
+  mask: `Person segmentation to exclude people from photometric loss.
+    <b>Osmo 360:</b> operator is always in frame behind camera, so masking defaults <b>ON</b> (bakes person into splat if off).
+    <b>Avata 360:</b> aerial drone, nobody rides along, so defaults <b>OFF</b> (enable if flying near people).`,
+};
+
+const tipBox = document.createElement('div');
+tipBox.id = 'tip'; tipBox.hidden = true; document.body.appendChild(tipBox);
+document.addEventListener('mouseover', e => {
+  const el = e.target.closest && e.target.closest('.i[data-tip]');
+  if (!el || !TIPS[el.dataset.tip]) return;
+  tipBox.innerHTML = TIPS[el.dataset.tip];
+  tipBox.hidden = false;                     // measure it before placing it
+  const r = el.getBoundingClientRect();
+  const w = tipBox.offsetWidth, h = tipBox.offsetHeight;
+  tipBox.style.left = `${Math.max(8, Math.min(r.left - 6, innerWidth - w - 8))}px`;
+  // Below the icon when it fits, above it when the panel is near the bottom.
+  tipBox.style.top = r.bottom + 8 + h < innerHeight
+    ? `${r.bottom + 8}px` : `${Math.max(8, r.top - h - 8)}px`;
+});
+document.addEventListener('mouseout', e => {
+  if (e.target.closest && e.target.closest('.i[data-tip]')) tipBox.hidden = true;
+});
+
+const esc = s => String(s).replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+window.toggleSel = id => {
+  selectedJobs.has(id) ? selectedJobs.delete(id) : selectedJobs.add(id);
+  // The sheet belongs to a specific set of jobs; a different set needs a new one.
+  lastRenderHTML = ''; lastCompareHTML = '';
+  paintJobs();
+  if (selectedJobs.size < 2) $('#compareCard').hidden = true;
+  else showCompare();
+};
+// These two used bare fetch() and ignored the response, so a failed cancel or
+// clear looked exactly like a successful one: the table simply redrew unchanged.
+window.clearFinished = async () => {
+  try {
+    await api('/api/jobs/clear', {method:'POST'});
+    selectedJobs.clear(); $('#compareCard').hidden = true;
+    $('#detailCard').hidden = true; curDetail = null;
+    $('#review').hidden = true; lastReviewHTML = '';
+  } catch (err) { toast('clear failed: ' + err.message); }
+  refreshJobs();
+};
+window.cancelJob = async id => {
+  try { await api('/api/jobs/' + id, {method:'DELETE'}); }
+  catch (err) { toast(`cancelling #${id} failed: ` + err.message); }
+  refreshJobs();
+};
+// Its own element: #schedErr is rewritten unconditionally by the status poll,
+// so a toast sharing it vanished within the next four seconds.
+function toast(msg) {
+  const el = $('#toast');
+  el.innerHTML = `<div class="errbox">${esc(msg)}</div>`;
+  setTimeout(() => { if (el.textContent.includes(msg)) el.innerHTML = ''; }, 8000);
+}
+
+window.showJob = async id => {
+  curDetail = id; curStage = null; lastReviewHTML = '';
+  $('#detailCard').hidden = false;
+  await renderDetail(true);
+};
+
+window.tailStage = (id, stage) => { curStage = stage; tailLog(id, stage); };
+
+async function renderDetail(restartLog) {
+  const id = curDetail;
+  if (id == null) return;
+  let j;
+  try { j = await api('/api/jobs/' + id); }
+  catch (err) { $('#detail').innerHTML = `<div class="errbox">${esc(err.message)}</div>`; return; }
+  const sfm = j.stages.find(s => s.stage === 'sfm');
+  const warns = sfm && sfm.progress && sfm.progress.warnings || [];
+  const rows = j.stages.map(s => {
+    const p = s.progress || {};
+    // The server names what a RUNNING stage is counting; a finished one still
+    // falls back to whatever its result blob happens to hold.
+    const extra = s.detail || (p.pct != null
+      ? `${p.step}/${p.total} · loss ${p.loss}`
+      : Object.entries(p).filter(([k])=>!['warnings','models','artifacts'].includes(k))
+          .slice(0,4).map(([k,v])=>`${k} ${typeof v==='number'
+            ? (Number.isInteger(v) ? v : v.toFixed(3)) : v}`).join(' · '));
+    const on = s.stage === curStage ? ' style="font-weight:600"' : '';
+    // Elapsed carries a trailing ellipsis so a stage still running is never
+    // read as one that took that long.
+    const time = s.seconds != null ? fmtT(s.seconds)
+      : s.elapsed != null ? `${fmtT(s.elapsed)}…` : '—';
+    const bar = s.state === 'running' && s.fraction != null
+      ? `<div class="bar"><i style="width:${(100*s.fraction).toFixed(1)}%"></i></div>` : '';
+    return `<tr><td class="mono">${s.stage}</td>
+      <td><span class="pill s-${s.state}">${s.state}</span></td>
+      <td class="mono small muted">${fmtT(s.est)}</td>
+      <td class="mono small">${time}</td>
+      <td class="mono small">${esc(extra||'—')}${bar}</td>
+      <td class="small"><a href="#"${on} onclick="tailStage(${id},'${s.stage}');return false">tail</a>
+        · <a href="/api/jobs/${id}/log?stage=${s.stage}" target="_blank">raw</a></td></tr>`;
+  }).join('');
+  const e = j.eta || {};
+  const clock = j.state === 'running' && e.elapsed != null
+    ? `<div class="cap" style="margin:6px 0 0">elapsed <b>${fmtT(e.elapsed)}</b>${
+        e.remaining != null
+          ? ` · <span class="eta${e.source === 'measured' ? '' : ' soft'}">~${
+              fmtETA(e.remaining)} left · done ~${fmtDone(e.remaining)}</span>`
+          : ' · <span class="muted">too early to estimate</span>'}${
+        e.source === 'plan' ? ' <span class="muted">(from the estimate)</span>' : ''}</div>`
+    : '';
+  const m = j.metrics || {};
+  $('#detail').innerHTML = `
+    <div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">
+      <b>#${j.id} ${esc(j.name)}</b>
+      <span class="pill s-${j.state}">${j.state}</span>
+      <span class="muted mono small">${j.config.train.steps_scaler}x ·
+        cap ${(j.config.train.max_cap/1e6).toFixed(1)}M ·
+        w${j.config.train.max_width} · SH${j.config.train.sh_degree}</span>
+    </div>
+    ${j.error?`<div class="errbox">${esc(j.error)}</div>`:''}
+    ${warns.map(w=>`<div class="warnbox">⚠ ${esc(w)}</div>`).join('')}
+    ${clock}
+    <table style="margin-top:8px"><thead><tr><th>Stage</th><th>State</th>
+      <th>Est</th><th>Time</th><th>Detail</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <div class="kv" style="margin-top:10px">
+      ${Object.entries(m).map(([k,v])=>`<b>${esc(k)}</b><span class="mono">${
+        typeof v==='number'? (Number.isInteger(v)?v:v.toFixed(3)) : esc(v)}</span>`).join('')}
+    </div>`;
+  await renderFiles(j);
+  await renderReview(j);
+  // Follow the stage that is actually running. Opening a job during frame
+  // extraction used to tail "train", whose log does not exist yet -- a 404 that
+  // killed the stream for good, so the pane stayed empty for the whole run.
+  const live = j.stages.find(s => s.state === 'running');
+  const want = curStage || (live ? live.stage : 'train');
+  if (restartLog || want !== curStage) { curStage = want; tailLog(id, want); }
+}
+
+// The mask gate parks a job in awaiting_review and releases its GPU. Everything
+// needed to resolve it was API-only: the queue table had no colour for the
+// state, no stop button (DELETE refused it), and no way to see the contact
+// sheet -- so a job that reached the state sat there inert.
+// Download links for the finished splat. Plain <a download> links: the access
+// cookie rides along, and the browser streams a 200 MB PLY to disk itself.
+const filesCache = new Map();
+async function renderFiles(j) {
+  const ex = j.stages.find(s => s.stage === 'export');
+  if (!ex || !['done', 'cached'].includes(ex.state)) return;
+  // A finished job's exports do not change; fetch once, not on every refresh.
+  let files = filesCache.get(j.id);
+  if (!files) {
+    try { files = await api('/api/jobs/' + j.id + '/files'); } catch { return; }
+    if (files.length) filesCache.set(j.id, files);
+  }
+  if (!files.length || curDetail !== j.id) return;
+  const mb = b => b >= 1e9 ? (b/1e9).toFixed(2) + ' GB' : (b/1e6).toFixed(1) + ' MB';
+  // Right under the job header: for a finished job this is the thing you came for.
+  const head = $('#detail').firstElementChild;
+  if (!head) return;
+  head.insertAdjacentHTML('afterend', `
+    <div class="files" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <b class="small">Download</b>
+      ${files.map(f => `<a class="dl" href="${f.url}" download>${esc(f.name.split('.').pop().toUpperCase())}
+        <span class="muted small">${mb(f.bytes)}</span></a>`).join('')}
+      <span class="muted small">— .sog opens in the <a href="https://superspl.at/editor" target="_blank" rel="noopener">SuperSplat editor</a></span>
+    </div>`);
+}
+
+async function renderReview(j) {
+  const box = $('#review');
+  if (!(j.config.mask || {}).enabled) { box.hidden = true; return; }
+  let r;
+  try { r = await api(`/api/jobs/${j.id}/review`); }
+  catch (err) { box.hidden = true; return; }
+  const pct = v => v == null ? '—' : (100 * v).toFixed(2) + '%';
+  const miss = r.frames_without_detection || [];
+  const state = r.review_state || 'pending';
+  const label = r.review_state || 'not reviewed yet';
+  const html = `
+    <div class="warnbox" style="border-color:var(--accent);color:inherit">
+      <div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">
+        <b>Mask review</b><span class="pill s-${state}">${label}</span>
+        <span class="muted small">coverage ${pct(r.coverage_solid_angle_mean)}
+          mean, ${pct(r.coverage_solid_angle_max)} max of the sphere</span>
+      </div>
+      ${miss.length ? `<div class="small" style="margin-top:6px">⚠ ${miss.length}
+        frame(s) with nobody detected: <span class="mono">${
+          esc(miss.slice(0, 6).join(', '))}</span> — the operator is in shot in
+        every frame by construction, so these are detector misses, and each one
+        trains the person straight back in.</div>` : ''}
+      ${(r.warnings || []).map(w => `<div class="small">⚠ ${esc(w)}</div>`).join('')}
+      ${r.review_note ? `<div class="small muted" style="margin-top:4px">${
+        esc(r.review_note)}</div>` : ''}
+      <a href="${r.sheet_url}" target="_blank"><img src="${r.sheet_url}"
+        style="width:100%;margin-top:8px;border-radius:8px;border:1px solid var(--line)"
+        onerror="this.style.display='none'"></a>
+      ${r.awaiting ? `<div style="margin-top:8px;display:flex;gap:8px">
+        <button class="primary" onclick="review(${j.id},true)">Approve and train</button>
+        <button class="danger" onclick="review(${j.id},false)">Reject</button>
+        <input id="reviewNote" placeholder="note (optional)" style="flex:1">
+      </div>` : ''}
+    </div>`;
+  box.hidden = false;
+  if (html !== lastReviewHTML) { lastReviewHTML = html; box.innerHTML = html; }
+}
+
+window.review = async (id, approved) => {
+  if (reviewBusy) return;
+  reviewBusy = id;
+  const note = ($('#reviewNote') || {}).value || '';
+  try {
+    await api(`/api/jobs/${id}/review`, {method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({approved, note})});
+    toast(approved
+      ? `#${id} approved — re-queued; everything up to the masks is a cache hit`
+      : `#${id} rejected and cancelled`);
+  } catch (err) { toast(`review failed: ${err.message}`); }
+  reviewBusy = null; lastReviewHTML = '';
+  refreshJobs(); renderDetail(false);
+};
+
+function tailLog(id, stage) {
+  if (curLog) { curLog.close(); curLog = null; }
+  if (logRetry) { clearTimeout(logRetry); logRetry = null; }
+  const box = $('#logbox'); if (!box) return;
+  $('#logStage').textContent = stage;
+  // The snapshot and the stream have to agree on a boundary. The stream used to
+  // rewind 8 KB from the end of the file regardless, so every tail appended the
+  // last ~80 lines to a pane that had just rendered them. Hand the follow the
+  // byte count this snapshot ended at, and open it only once the snapshot has
+  // landed -- otherwise output written in between falls down the gap instead.
+  const mine = ++tailSeq;
+  fetch(`/api/jobs/${id}/log?stage=${stage}`)
+    .then(r => r.ok ? r.text().then(t => [t, +(r.headers.get('content-length') || 0)])
+                    : [null, 0])
+    .catch(() => ['', -1])
+    .then(([t, bytes]) => {
+      if (mine !== tailSeq) return;         // superseded while we were fetching
+      box.textContent = bytes < 0 ? '(log unavailable)'
+        : t == null ? `(${stage} has not started yet — waiting for its log)`
+        : t.split('\n').slice(-200).join('\n');
+      box.scrollTop = box.scrollHeight;
+      if (bytes < 0) return;
+      startFollow(id, stage, bytes);
+    });
+}
+
+function startFollow(id, stage, fromByte) {
+  const es = new EventSource(
+    `/api/jobs/${id}/log?stage=${stage}&follow=true&from=${fromByte}`);
+  curLog = es;
+  es.onmessage = e => {
+    const b = $('#logbox'); if (!b) return;
+    b.textContent += '\n' + e.data;
+    const lines = b.textContent.split('\n');
+    if (lines.length > 400) b.textContent = lines.slice(-300).join('\n');
+    b.scrollTop = b.scrollHeight;
+  };
+  es.addEventListener('end', () => { es.close(); if (curLog === es) curLog = null; });
+  es.onerror = () => {
+    es.close();
+    if (curLog !== es) return;              // superseded by another tail
+    curLog = null;
+    // EventSource does not retry a 404, and a stage that has not started yet
+    // answers exactly that. Poll back while the job is still going.
+    logRetry = setTimeout(async () => {
+      logRetry = null;
+      if (curDetail !== id || curStage !== stage) return;
+      try {
+        const j = await api('/api/jobs/' + id);
+        if (['queued','running'].includes(j.state)) tailLog(id, stage);
+      } catch (err) { /* the poll will surface it */ }
+    }, 4000);
+  };
+}
+
+async function showCompare() {
+  // A render takes up to 15 minutes. Rebuilding this panel underneath it wiped
+  // the "Rendering…" state and handed back an enabled button, so a second
+  // click could start a second GPU render on top of the first.
+  if (renderBusy) return;
+  const ids = [...selectedJobs].join(',');
+  const c = await api('/api/compare?ids=' + ids);
+  $('#compareCard').hidden = false;
+  // LichtFeld's eval reports PSNR and SSIM only -- there is no LPIPS.
+  const keys = ['psnr','ssim','splats','final_step','train_seconds',
+                'peak_vram_mib','ply_bytes','sog_bytes','mean_reproj',
+                'num_reg_frames','registration_pct','baseline_over_depth',
+                'panos','window'];
+  const head = c.jobs.map(j => `<th>#${j.id} ${esc(j.name)}</th>`).join('');
+  const diffRows = Object.entries(c.diff).map(([k, vals]) =>
+    `<tr><td class="mono muted">${esc(k)}</td>${
+      vals.map(v => `<td class="mono">${esc(JSON.stringify(v))}</td>`).join('')}</tr>`
+  ).join('');
+  const metRows = keys.map(k => {
+    const vals = c.jobs.map(j => j.metrics[k]);
+    if (vals.every(v => v == null)) return '';
+    const fmt = v => v == null ? '—'
+      : k.endsWith('_bytes') ? fmtB(v)
+      : k === 'train_seconds' ? fmtT(v)
+      : k === 'splats' ? (v/1e6).toFixed(2)+'M'
+      : typeof v === 'number' ? (Number.isInteger(v)?v:v.toFixed(3)) : v;
+    return `<tr><td class="mono"><b>${k}</b></td>${
+      vals.map(v => `<td class="mono">${fmt(v)}</td>`).join('')}</tr>`;
+  }).join('');
+  const html = `
+    <table><thead><tr><th>Metric</th>${head}</tr></thead>
+      <tbody>${metRows || '<tr><td class="muted">No metrics yet.</td></tr>'}</tbody></table>
+    <details open style="margin-top:12px"><summary>Config differences</summary>
+      <table><tbody>${diffRows || '<tr><td class="muted">Identical configs.</td></tr>'}</tbody></table>
+    </details>
+    <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+      <button id="renderBtn">Render same poses</button>
+      <span class="muted small">4 held-out poses, identical crop, one sheet</span>
+    </div>
+    <div id="renderOut"></div>`;
+  // Only touch the DOM when something actually changed, and put any finished
+  // sheet back afterwards.
+  if (html !== lastCompareHTML) {
+    lastCompareHTML = html;
+    $('#compare').innerHTML = html;
+    $('#renderOut').innerHTML = lastRenderHTML;
+  }
+  $('#renderBtn').onclick = renderCompare;
+}
+
+async function renderCompare() {
+  const btn = $('#renderBtn'); btn.disabled = true;
+  btn.textContent = 'Rendering…';
+  renderBusy = true;
+  lastRenderHTML = '<div class="muted small" style="margin:8px 0">rendering…</div>';
+  $('#renderOut').innerHTML = lastRenderHTML;
+  try {
+    const r = await api('/api/compare/render', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({ids: [...selectedJobs], n_poses: 4})});
+    lastRenderHTML =
+      `<div class="muted small" style="margin:8px 0">rendered on gpu${r.gpu}${
+         r.held_out === false
+           ? ' — <b>training views</b>: a selected job trained without --eval,'
+             + ' so nothing here was held out'
+           : ' · held-out views'}</div>
+       <a href="${r.url}" target="_blank">
+         <img src="${r.url}" style="width:100%;border-radius:8px;border:1px solid var(--line)">
+       </a>`;
+  } catch (err) {
+    lastRenderHTML = `<div class="errbox">${esc(err.message)}</div>`;
+  } finally {
+    renderBusy = false;
+    $('#renderOut').innerHTML = lastRenderHTML;
+    btn.disabled = false; btn.textContent = 'Render same poses';
+  }
+}
+
+async function doEstimate() {
+  try {
+    const e = await api('/api/estimate', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({config: buildConfig()})});
+    const a = e._assumptions;
+    $('#est').innerHTML =
+      `est ${fmtT(e.total)} — frames ${fmtT(e.frames)} · select ${fmtT(e.select)}
+       · sfm ${fmtT(e.sfm)} · <b>train ${fmtT(e.train)}</b><br>
+       ${a.candidates} candidates → ${a.panos} ${a.pipeline === 'fisheye_rig' ? 'rig frames' : 'panos'} · ${a.iterations} iters
+       @ ${a.it_per_s} it/s${a.selection_mode === 'distance' ? `<br>Estimated path ${a.path_length_m} m · shot spacing ${a.distance_m} m` : ''}
+       ${a.warning ? `<br><span style="color:var(--warn)">${esc(a.warning)}</span>` : ''}`;
+  } catch (err) { $('#est').textContent = 'estimate failed: ' + err.message; }
+}
+
+async function create() {
+  $('#createMsg').innerHTML = '';
+  const axesTxt = $('#axes').value.trim();
+  try {
+    let res;
+    if (axesTxt) {
+      res = await api('/api/jobs/sweep', {method:'POST',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({base: buildConfig(), axes: JSON.parse(axesTxt)})});
+      $('#createMsg').innerHTML =
+        `<div class="warnbox">Queued ${res.jobs.length} jobs (sweep ${res.sweep_id}).</div>`;
+    } else {
+      res = await api('/api/jobs', {method:'POST',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({config: buildConfig()})});
+      const hits = Object.entries(res.cached).filter(([,v])=>v).map(([k])=>k);
+      $('#createMsg').innerHTML =
+        `<div class="warnbox">Queued job #${res.id}${
+          hits.length?` — reusing cached: ${hits.join(', ')}`:''}</div>`;
+    }
+    refreshJobs(); refreshCache();
+  } catch (err) {
+    $('#createMsg').innerHTML = `<div class="errbox">${esc(err.message)}</div>`;
+  }
+}
+
+async function refreshCache() {
+  const c = await api('/api/cache');
+  const by = {};
+  for (const r of c.entries) { by[r.stage] = by[r.stage] || {n:0,b:0};
+    by[r.stage].n++; by[r.stage].b += r.bytes; }
+  const low = c.free < c.min_free;
+  $('#cache').innerHTML = (Object.keys(by).length
+    ? Object.entries(by).map(([s,v]) =>
+        `<span class="mono">${s}: ${v.n} entries, ${fmtB(v.b)}</span>`).join('<br>')
+    : 'empty')
+    + `<div class="mono" style="margin-top:6px${low?';color:var(--err)':''}">
+         ${fmtB(c.free)} free${low?` — below the ${fmtB(c.min_free)} floor, jobs will refuse to start`:''}
+       </div>
+       <button id="gcBtn" style="margin-top:8px;font-size:11px;padding:2px 8px"
+               title="Evicts least-recently-used entries until free space is back above the floor. Never touches a cache a queued or running job needs.">reclaim space</button>`;
+  $('#gcBtn').onclick = async () => {
+    const btn = $('#gcBtn'); btn.disabled = true; btn.textContent = 'evicting…';
+    try {
+      const r = await api('/api/cache/gc', {method:'POST'});
+      toast(r.n_evicted
+        ? `evicted ${r.n_evicted} entries, freed ${fmtB(r.freed)}`
+          + (r.skipped_in_use ? ` (${r.skipped_in_use} in use, kept)` : '')
+        : `nothing evicted — ${fmtB(r.free)} free is already above the floor`);
+    } catch (err) { toast('gc failed: ' + err.message); }
+    refreshCache();
+  };
+}
+
+async function loadInputs() {
+  inputs = await api('/api/inputs');
+  // Raw containers the pipeline cannot use (.insv) are listed so it is obvious
+  // why they cannot be picked, not silently hidden. A DJI .OSV is usable: the
+  // server reconstructs it as a fisheye rig, and says so in `pipeline`.
+  $('#input').innerHTML = inputs.map(i =>
+    i.usable === false
+      ? `<option value="${esc(i.file)}" disabled>${esc(i.name)} — needs stitching · ${fmtB(i.bytes)}</option>`
+      : `<option value="${esc(i.file)}">${esc(i.name)} — ${
+      i.duration?Math.round(i.duration)+'s':'?'} · ${i.width||'?'}×${i.height||'?'} · ${fmtB(i.bytes)}${
+      i.camera_name ? ` · ${esc(i.camera_name)}` : (i.pipeline === 'fisheye_rig' ? ' · fisheye rig' : '')}</option>`
+  ).join('');
+  const first = inputs.find(i => i.usable !== false);
+  if (first) $('#input').value = first.file;
+  showClip();
+}
+function showClip() {
+  const i = inputs.find(x => x.file === $('#input').value);
+  // Only a raw .OSV carries an orientation stream; the box follows the server's default.
+  const osv = !!i && i.usable !== false && i.pipeline === 'fisheye_rig';
+  $('#imuOn').disabled = !osv;
+  $('#imuOn').checked = osv && !!i.recommended_imu;
+  $('#distanceOption').disabled = !i?.supports_distance_selection;
+  if (!i?.supports_distance_selection) $('#selectionMode').value = 'window';
+  showSelection();
+  if (!i) {
+    $('#clipinfo').textContent = '';
+    $('#maskNote').textContent = '';
+    return;
+  }
+  $('#clipinfo').textContent = i.usable === false ? i.note
+    : `${i.camera_name ? i.camera_name + ' · ' : ''}${i.codec||'?'} · ${i.fps||'?'} fps · ${i.duration||'?'} s${
+      i.pipeline === 'fisheye_rig' ? ` · ${i.note}` : ''}`;
+
+  if (i.usable !== false && (i.camera || i.recommended_mask !== undefined)) {
+    $('#maskOn').checked = !!i.recommended_mask;
+    if (i.camera === 'osmo360') {
+      $('#maskNote').innerHTML = '<span class="pill s-cached">Osmo 360</span> Masking ON by default (operator in frame)';
+    } else if (i.camera === 'avata360') {
+      $('#maskNote').innerHTML = '<span class="pill s-pending">Avata 360</span> Masking OFF by default (enable if flying near people)';
+    } else {
+      $('#maskNote').textContent = '';
+    }
+  } else {
+    $('#maskNote').textContent = '';
+  }
+}
+
+function showSelection() {
+  const distance = $('#selectionMode').value === 'distance';
+  $('#distanceFields').hidden = !distance;
+  $('#windowField').hidden = distance;
+}
+$('#selectionMode').onchange = () => { showSelection(); doEstimate(); };
+$('#distanceM').onchange = doEstimate;
+$('#maxGapS').onchange = doEstimate;
+
+$('#presets').innerHTML = Object.keys(PRESETS).map((k,ix) =>
+  `<span class="chip${ix===2?' on':''}" data-p="${k}">${k}</span>`).join('');
+$('#presets').onclick = e => {
+  if (!e.target.dataset.p) return;
+  [...$('#presets').children].forEach(c => c.classList.toggle('on', c === e.target));
+  const p = PRESETS[e.target.dataset.p];
+  // A preset's trim is relative to Trim start. Clear it again when another
+  // preset is picked, but only if it is still the value a preset put there.
+  if (p.trim) {
+    presetTrimEnd = (+$('#trimStart').value || 0) + p.trim;
+    $('#trimEnd').value = presetTrimEnd;
+  } else if (presetTrimEnd != null && +$('#trimEnd').value === presetTrimEnd) {
+    $('#trimEnd').value = '';
+    presetTrimEnd = null;
+  }
+  $('#budget').value = p.budget; $('#maxCap').value = p.maxCap;
+  $('#maxWidth').value = p.maxWidth; $('#fps').value = p.fps;
+  $('#window').value = p.window; $('#shDegree').value = p.shDegree;
+  doEstimate();
+};
+$('#input').onchange = () => { showClip(); doEstimate(); };
+$('#maskOn').onchange = () => { doEstimate(); };
+$('#maskBackend').onchange = () => { showMaskBackend(); doEstimate(); };
+// LichtFeld refuses exposure correction together with the bilateral grid (the
+// first replaces the second), so ticking one clears the other.
+$('#expcorr').addEventListener('change', () => { if ($('#expcorr').checked) $('#bilat').checked = false; });
+$('#bilat').addEventListener('change', () => { if ($('#bilat').checked) $('#expcorr').checked = false; });
+$('#estBtn').onclick = doEstimate;
+$('#createBtn').onclick = create;
+
+(async () => {
+  await loadInputs(); await refreshStatus(); await refreshJobs();
+  await refreshCache(); doEstimate();
+  // Delegated to the tbody, which is never itself replaced -- only its rows
+  // are -- so the preview keeps working across every redraw. The popup reuses
+  // the thumbnail's own already-cached image rather than fetching a bigger one,
+  // so it appears instantly; the click-through is what serves full size.
+  if (!THUMBS) document.querySelectorAll('.thumbcol').forEach(e => e.remove());
+  const peek = document.createElement('img');
+  peek.id = 'peek'; peek.hidden = true; document.body.appendChild(peek);
+  $('#jobs').addEventListener('mouseover', e => {
+    const t = e.target.closest && e.target.closest('img.thumb');
+    if (!t || t.style.visibility === 'hidden') return;
+    const r = t.getBoundingClientRect();
+    peek.src = t.src;
+    peek.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 436))}px`;
+    peek.style.top = `${Math.max(8, Math.min(r.bottom + 6, innerHeight - 222))}px`;
+    peek.hidden = false;
+  });
+  $('#jobs').addEventListener('mouseout', e => {
+    if (e.target.closest && e.target.closest('img.thumb')) peek.hidden = true;
+  });
+
+  setInterval(refreshStatus, 4000);
+  setInterval(refreshJobs, 4000);
+  setInterval(refreshCache, 20000);
+  // Counters move every second between four-second polls. Only text and one
+  // bar width are touched, so this never rebuilds a row out from under a click.
+  setInterval(() => tickTimes((performance.now() - jobsAt) / 1000), 1000);
+})();
+</script>
+</body>
+</html>

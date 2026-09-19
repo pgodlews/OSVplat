@@ -1,0 +1,16 @@
+.git
+data
+samples
+models
+output
+docs/images
+**/__pycache__
+*.OSV
+*.osv
+*.mp4
+*.MP4
+*.ply
+*.sog
+*.spz
+.env
+cosign.key

@@ -1,0 +1,39 @@
+# docker compose up -d                 prebuilt image (IMAGE in .env)
+# docker compose up -d --build         or build it here
+# docker compose logs queue | grep token      the URL to open
+services:
+  queue:
+    image: ${IMAGE:-ghcr.io/pgodlews/osvplat:latest}
+    build:
+      context: .
+      args:
+        CUDA_ARCH: ${CUDA_ARCH:-7.5;8.0;8.6;8.9;9.0;12.0}
+        JOBS: ${BUILD_JOBS:-8}
+    restart: unless-stopped
+    # Files in ./data and anything the jobs write belong to you, not root.
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "${PORT:-8090}:8090"
+    environment:
+      PUBLIC_PORT: ${PORT:-8090}
+      QUEUE_TOKEN: ${QUEUE_TOKEN:-}
+      QUEUE_GPUS: ${QUEUE_GPUS:-all}
+      QUEUE_METRICS: ${QUEUE_METRICS:-0}
+      HF_TOKEN: ${HF_TOKEN:-}              # only for `get-weights`
+    volumes:
+      - ${SAMPLES_DIR:-./samples}:/opt/splat/samples     # your clips (.OSV, .mp4)
+      - ${DATA_DIR:-./data}:/data                        # queue database, cache, results
+      - ${MODELS_DIR:-./models}:/opt/splat/models        # optional mask model weights (SAM 3)
+    # The queue skips any GPU running a process it did not start, by PID.
+    # nvidia-smi reports host PIDs, so the container must share the host's PID
+    # namespace or every training job it launches would look foreign.
+    pid: host
+    # Frame extraction and training data loading want more than Docker's 64 MB.
+    shm_size: 8gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility, video]

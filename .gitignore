@@ -1,0 +1,19 @@
+# Clips and training outputs are large; they live on the GPU box, not in git.
+*.OSV
+*.osv
+*.LRF
+*.SRT
+*.mp4
+*.insv
+*.ply
+*.sog
+*.spz
+*.licht
+output/
+__pycache__/
+*.pyc
+.venv/
+venv*/
+.queue_env
+.DS_Store
+cosign.key

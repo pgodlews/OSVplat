@@ -1,0 +1,75 @@
+# Troubleshooting and known traps
+
+Things that went wrong while building this pipeline, and what to do about them.
+Code comments refer to these by number (`docs/troubleshooting.md #18`).
+
+1. `pkill -f` / `pgrep -f` match the shell running them if the pattern text appears anywhere in that same command line. During development this killed the shell sessions running it, three times. Kill by PID, use `pkill -x name`, or the `[s]elect` bracket trick with no plain mention of the name elsewhere in the command.
+2. pip treats `torch==2.9.1` as satisfied by `2.9.1+cu128`. Pin `torch==2.9.1+cu130` and pass the cu130 index, or nothing changes.
+3. gsplat's `examples/requirements.txt` pins torch 2.9.1 and installs CPU `pycolmap`, which overwrote `pycolmap-cuda12` in the same venv (same module name) and silently turned `has_cuda` off. Keep SfM and training in separate venvs.
+4. gsplat 1.5.3 from PyPI fails its JIT compile on torch 2.9.1 (`_jit_compile()` signature). Build from source: `pip install ./gsplat_src --no-build-isolation` with `MAX_JOBS=8`.
+5. A shallow `vcpkg` clone breaks LichtFeld's baseline lookup. Clone fully.
+6. Host cmake is 3.28; LichtFeld needs 3.30+. `pip install cmake` in a venv is the easiest fix.
+7. Uncapped vcpkg + gsplat builds + SfM pushed load to 40 and made the machine unresponsive. Cap builds with `VCPKG_MAX_CONCURRENCY=6` and `-j 8` while SfM runs.
+8. gsplat's repo vendors `glm` as a git submodule; a `--depth 1` clone without `--recursive` fails the CUDA build with `glm/gtc/type_ptr.hpp: No such file`. Run `git submodule update --init --recursive` first.
+9. COLMAP's incremental mapper is the wrong default for 3,400 rig images: 20 s per frame and rising. Use `--mapper global` (GLOMAP, integrated since COLMAP 4.0) or the CASPAR GPU bundle adjuster.
+10. gsplat non-packed rasterization at 1920² with 3M Gaussians exceeds 24 GB on a 3090 (OOM at step 11.9k). Use `--packed`, or cap 2M, or `--data_factor 2`. Always set `--ply_steps` with intermediate saves so a crash still leaves a usable PLY.
+11. Convergence budget: 3,408 training views at 30k steps means each image is seen only ~9 times (a normal 3DGS dataset sees each image 100–300 times). The 7k-step checkpoint is still fog and the loss sits at 0.2–0.4. Either use fewer panoramas (1 fps → 1,704 views), the 4-view non-overlapping rig, more steps (`--max_steps 60000`+), or train the 284 equirect frames natively in LichtFeld where every image covers the full sphere.
+12. LichtFeld's final link fails with `undefined reference to std::__stacktrace_impl::_S_current` (and `stacktrace_entry::_Info::_M_populate`): GCC 14's `<stacktrace>` lives in the static `libstdc++exp.a`. Pass it as `-DCMAKE_CXX_STANDARD_LIBRARIES=-lstdc++exp`, which CMake appends at the **end** of every link line. `CMAKE_EXE_LINKER_FLAGS`/`CMAKE_SHARED_LINKER_FLAGS` look equivalent but put it first, before the objects that need it, so a static archive contributes nothing and the link still fails. `setup_lichtfeld.sh` does this; build with `-- -k 0`, because the optional Python-typings step can still fail and is not needed for headless training.
+13. gsplat's `--data_factor N` expects a pre-made `images_N/` folder next to `images/`; it does not downscale for you.
+14. gsplat MCMC collapses on rig datasets where most Gaussians are unseen in most iterations: the per-step opacity/scale regularizers and noise outweigh the rare photometric gradient. Use the default strategy, or MCMC with `--opacity_reg 0 --scale_reg 0` and a lower `noise-lr`.
+15. LichtFeld trains the COLMAP `EQUIRECTANGULAR` camera model only through its 3DGUT path: add `--gut`, otherwise iteration 0 fails with an opaque `InvalidArgument/Training`.
+16. zsh does not word-split unquoted variables: `T="npx foo -w"; $T` runs a single command named `npx foo -w`. Spell commands out or use `${=T}`.
+17. Candidate extraction: put `fps=` before `v360` so only candidates get stitched; still, 8K JPEG encoding is single-threaded. Better: score sharpness on the fisheye frames first, stitch only winners.
+18. COLMAP can return **more than one model**. One spherical SfM wrote `sparse/0` (a 2-frame fragment) and `sparse/1` (the real 265-frame reconstruction). LichtFeld's `-d <dir>` reads `sparse/0` and would have trained on the fragment without complaining. After every SfM, `ls sparse/` and check `num_reg_frames` per model in the log; symlink the good one into place.
+19. **One camera registered in the wrong place corrupts every statistic taken from the camera *mean*.** A 33 s handheld Osmo 360 clip registered 110/110 frames at 1.16 px, but `pano_0008` (3 observations) landed 4.8e6 units from a trajectory 10 units long. The mean camera centre moved to 44042, so the post-SfM gate reported `baseline_over_depth: 110.0`, `depth_p50: 44042` and, because every point was then the same distance from that phantom centre, `depth_p90: 44046` and `depth_p99: 44055` — a depth histogram with no spread at all, and **zero warnings**. LichtFeld read `Scene scale: 44042` for a 10-unit scene. `32_pick_model.py` now measures around the **median** camera centre, which one outlier cannot move, drops cameras beyond 20x the median radius before training, and refuses to drop anything when more than 10% of cameras look like outliers (that is a split reconstruction, not stray registrations).
+
+    **What this cost in output quality: nothing measurable.** The obvious expectation is that a scene scale 7,000x too large wrecks training — it multiplies the position learning rate and every densification threshold. It was tested by training the same SfM twice, identical flags, one with the outlier and one without: the two finished within 1,300 splats of each other and render indistinguishably from the same poses. So this is a **diagnostic** bug, not a training bug. It matters because the gate exists to tell you a clip will reconstruct badly *before* you spend 75 minutes on it, and a single bad row silently turned its numbers into noise while reporting no warnings. Do not reintroduce the mean.
+
+20. **Temporal-variance masking assumes the rig is the only thing that holds still. On a walk it is not.** An early plan was a static-pixel mask: average many frames, and whatever does not change is bolted to the camera. That works for a drone body against sweeping terrain. On a handheld clip -- a walk down a footbridge -- it fails outright, because the parapets and deck occupy the same equirect pixels the whole way. Measured per-pixel temporal std over 110 panoramas: nadir band 24.0, horizon 44-50, and the *lowest* band of all was the zenith at 8.6, which is sky. Only 4.9% of the sphere fell below std 8 and almost all of it was sky. A low-variance mask would have deleted the bridge and kept the people. Use semantic segmentation instead (`scripts/70_person_masks.py`); see [how-it-works: person masking](how-it-works.md#person-masking).
+
+21. **A COCO detector cannot read an equirectangular image, and fails silently rather than loudly.** At the nadir a person is smeared across the full image width and nothing fires at any confidence. `70_person_masks.py` resamples each panorama into 13 overlapping 90-degree pinhole views, segments there, and carries the masks back. Related trap while writing it: the tangent-view pitch sign. With `Rx` as conventionally written a positive angle tilts the forward axis **up**, so an un-negated `pitch=-90` points the "nadir" view at the sky. Every view then contains only clouds, the detector finds nobody, the masks come out empty -- and the run still exits 0 with a summary that reads like a clean null result. The mask stage now refuses to cache a mask set that covered nothing, because that is indistinguishable from "masking does not help" at every later step.
+
+22. **A masked run's PSNR is not comparable to an unmasked run's.** `use_masking` is true in LichtFeld's metrics path for every mask mode, so the reported PSNR is computed only over unmasked pixels. On the handheld clip that turned a real +0.42 dB scene improvement into an apparent +4.8 dB, because the pixels masking removes are precisely the worst-fitting ones. This is the same shape of error as comparing two runs whose held-out splits differ: the metric is fine, the two numbers just describe different things. Evaluate over identical pixels before claiming a win.
+
+23. **COLMAP image ids are not capture order.** Ids are assigned as feature extraction completes, and extraction is multithreaded, so the order shifts run to run for reasons as incidental as how much work each image took. One masked reconstruction diverged from filename order at index 60. Anything that walks the trajectory -- `path_length`, `median_step` -- must sort by image **name**; sorted by id it measured a scrambled tour and reported a 12.4-unit path as 17.0, which briefly looked like masking had made the poses noisier. Fixed in `32_pick_model.py`. Related: a COLMAP reconstruction has arbitrary scale, so `path_length`, `median_step`, `baseline` and `depth_p*` cannot be compared between two runs at all. Only ratios can -- `baseline_over_depth`, or path/straight-line tortuosity.
+
+24. **In a masked-region metric, higher PSNR means the thing you were trying to remove is still there.** Comparing masking methods, the natural table has a "person pixels" column -- and it inverts. PSNR there measures agreement with the *photo*, which contains the people, so the unmasked model scores highest (14.31) precisely because it reconstructed them, and the backend that removes them most thoroughly scores lowest. Reading that column the usual way would rank the methods exactly backwards. Only the scene-pixel column is a quality measure; the person column is a removal measure with the sign flipped.
+
+## Fisheye rig traps
+
+- **Read every `DewarpParams` field.** Dropping `k5` (field 15) made an accurate calibration look wrong at the rim, and rebuilding the rig from yaw/pitch/roll instead of `cam_extri_q` (field 28) put the lenses 1.65° apart from where they are.
+- **COLMAP's `OPENCV_FISHEYE` cannot take a keypoint past 90° off-axis** (it works in `tan θ`), and a missing mask means "extract everywhere". `88_fisheye_sfm.py` masks to the radius of 88° on each lens's own polynomial: 1,744 px on the Osmo 360, 1,353–1,358 px on the Avata 360.
+- **`sparse/0` can be a fragment** (see #18). `85_fisheye_dataset.py` refuses a model that registers under 90% of the instants and names the siblings.
+- **LichtFeld matches masks by file stem across the whole dataset** and refuses duplicates, but a rig names both lenses of an instant alike (`lens0/frame_0001.jpg`, `lens1/frame_0001.jpg`). `85` flattens to `lens0_frame_0001.jpg`.
+- **A rig model's `images.bin` carries the composed per-image poses**, so LichtFeld needs no rig support. It loads the fisheye set as 2 `OPENCV_FISHEYE` cameras and trains through `--gut`.
+- **The Mask R-CNN masker never looks above +15° elevation** (views at −30°, −75°, nadir): an operator's cap and upper face can stay unmasked. SAM 3 reads the whole sphere.
+
+## Scaling limits
+
+- **COLMAP global bundle adjustment switches from a direct to an iterative solver past 1,000 images** — 500 frames of a two-lens rig — and gets dramatically slower (hours per pass on a 1,400-frame clip). `colmap_incremental.py` lifts that limit; still, keep fisheye jobs under ~500 selected frames with `select.window` or a trim, and the queue's time estimate prices SfM accordingly.
+
+## Host GPU setup
+
+- **`nvidia-smi` cannot talk to the driver although the GPU is in `lspci` and
+  the DKMS module is built:** on hybrid-graphics machines (laptops, NUCs, an
+  eGPU added later) `prime-select` may be set to `intel`, which writes
+  `/lib/modprobe.d/blacklist-nvidia.conf` and keeps the driver unloaded. Run
+  `sudo prime-select on-demand` and reboot. Found on a NUC with an RTX 3090
+  over OcuLink.
+
+## LichtFeld options (pinned commit 04e4607)
+
+Found by running every training option the UI offers. The queue refuses the
+first three at submit, so they only bite through `extra_args` or a changed pin.
+
+- **`--background-improvements` crashes** mid-training: the Adam optimiser is
+  handed host memory where device memory is required (`mean_step_far_mask`),
+  it saves an emergency project and segfaults, and no model is exported.
+  Reproduced on stitched and fisheye datasets.
+- **`--exposure-correction` and `--bilateral-grid` are exclusive**: exposure
+  correction replaces the bilateral grid. Either one alone works.
+- **`--strategy igs+` cannot train through GUT**, and every 360 camera model
+  here needs GUT. It is only usable on a stitched clip with a pinhole
+  `sfm.render` (`perspective_*`).
+- `mrnf` (default) and `mcmc`, SH degree 1 and 3, `--enable-mip` and the
+  bilateral grid all train and export normally.
