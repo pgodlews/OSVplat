@@ -83,7 +83,10 @@ while IFS= read -r p; do
   while IFS= read -r f; do report "'$p' in $f"; done < <(grep -rIlF -- "$p" \
       /opt/splat /etc /usr/local /root /home 2>/dev/null | head -5)
 done <<< "$FIXED"
-# The hostname as a whole word only, so "nuc3" does not match "nuc30".
+# The hostname as a whole word only, so a short name does not match a longer
+# one that merely starts with it. No example name here on purpose: this file
+# ships inside the image, and an example would match the scan on the machine
+# it names.
 if [ -n "$HOSTPAT" ]; then
   while IFS= read -r f; do report "hostname '$HOSTPAT' in $f"; done < <(grep -rIlwF -- "$HOSTPAT" \
       /opt/splat /etc /usr/local /root /home 2>/dev/null | head -5)
