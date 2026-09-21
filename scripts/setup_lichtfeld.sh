@@ -50,6 +50,24 @@ sed -i "s/-march=native>/-march=$LFS_MARCH>/" "$SPLAT_ROOT/LichtFeld-Studio/src/
 pin "$VCPKG_ROOT" "$VCPKG_REF"
 echo "LichtFeld $(git -C "$SPLAT_ROOT/LichtFeld-Studio" rev-parse --short HEAD), vcpkg $(git -C "$VCPKG_ROOT" describe --tags --always)"
 [ -x "$VCPKG_ROOT/vcpkg" ] || (cd "$VCPKG_ROOT" && ./bootstrap-vcpkg.sh -disableMetrics)
+# code.videolan.org's archive endpoint returns differently compressed bytes for
+# the same x264 commit (8 downloads, 8 SHA-512s on 2026-09-21), so vcpkg rejects
+# it and the build fails (troubleshooting #26). The pinned port's hash is plain
+# `git archive | gzip -n` output: make that file and leave it where vcpkg looks
+# before downloading.
+X264=31e19f92f00c7003fa115047ce50978bc98c3a0d
+X264_SHA512=707ff486677a1b5502d6d8faa588e7a03b0dee45491c5cba89341be4be23d3f2e48272c3b11d54cfc7be1b8bf4a3dfc3c3bb6d9643a6b5a2ed77539c85ecf294
+x264_tgz=$VCPKG_ROOT/downloads/videolan-x264-$X264.tar.gz
+if [ ! -f "$x264_tgz" ]; then
+  mkdir -p "$VCPKG_ROOT/downloads"
+  x264_src=$(mktemp -d)
+  git clone -q --filter=blob:none https://code.videolan.org/videolan/x264.git "$x264_src"
+  git -C "$x264_src" archive --format=tar --prefix="x264-$X264/" "$X264" | gzip -n > "$x264_tgz.part"
+  rm -rf "$x264_src"
+  [ "$(sha512sum < "$x264_tgz.part" | cut -d' ' -f1)" = "$X264_SHA512" ] \
+    || { echo "rebuilt x264 tarball does not match vcpkg's SHA-512" >&2; exit 1; }
+  mv "$x264_tgz.part" "$x264_tgz"
+fi
 cd "$SPLAT_ROOT/LichtFeld-Studio"
 nice -n 10 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja \
   -DCMAKE_CXX_STANDARD_LIBRARIES=-lstdc++exp   # GCC 14 <stacktrace>, troubleshooting #12
