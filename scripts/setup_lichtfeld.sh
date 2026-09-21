@@ -17,6 +17,12 @@ SPLAT_ROOT=${SPLAT_ROOT:-$HOME/splat}
 # for a build without a GPU: CUDA_ARCH="7.5;8.6;12.0". CMake wants it dotless.
 CUDA_ARCH=${CUDA_ARCH:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)}
 CUDA_ARCH=$(echo "$CUDA_ARCH" | tr -d .)
+# CPU target for lfs_core, whose Release flags hard-code -march=native: code for
+# whatever CPU runs the compile. That is right for a box building for itself and
+# wrong for an image, which then dies with SIGILL on any CPU lacking an
+# instruction set the build machine had (troubleshooting #25). The Dockerfile
+# sets x86-64-v3 (AVX2 + FMA, which the rest of LichtFeld already requires).
+LFS_MARCH=${LFS_MARCH:-native}
 export CC=gcc-14 CXX=g++-14 CUDACXX=/usr/local/cuda/bin/nvcc CUDA_HOME=/usr/local/cuda
 export VCPKG_ROOT=$SPLAT_ROOT/vcpkg VCPKG_MAX_CONCURRENCY=6
 export PATH=$SPLAT_ROOT/venv/bin:/usr/local/cuda/bin:$VCPKG_ROOT:$PATH
@@ -34,7 +40,12 @@ pin() {   # pin <dir> <ref>
 }
 # No --depth 1 on a fresh clone, for the same reason.
 [ -d "$SPLAT_ROOT/LichtFeld-Studio" ] || git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio.git "$SPLAT_ROOT/LichtFeld-Studio"
+# Undo a previous run's -march edit first, or checking out another ref refuses.
+git -C "$SPLAT_ROOT/LichtFeld-Studio" checkout -- src/core/CMakeLists.txt 2>/dev/null || true
 pin "$SPLAT_ROOT/LichtFeld-Studio" "$LFS_REF"
+grep -q -- '-march=native>' "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt" \
+  || { echo "src/core/CMakeLists.txt no longer sets -march=native; recheck LFS_MARCH" >&2; exit 1; }
+sed -i "s/-march=native>/-march=$LFS_MARCH>/" "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt"
 [ -d "$VCPKG_ROOT" ] || git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"     # NOT --depth 1
 pin "$VCPKG_ROOT" "$VCPKG_REF"
 echo "LichtFeld $(git -C "$SPLAT_ROOT/LichtFeld-Studio" rev-parse --short HEAD), vcpkg $(git -C "$VCPKG_ROOT" describe --tags --always)"
@@ -53,4 +64,12 @@ if command -v nvidia-smi >/dev/null; then
   ./build/LichtFeld-Studio --version
 else
   test -x ./build/LichtFeld-Studio
+fi
+# A portable build must not have been compiled for the build machine's CPU. The
+# binary runs fine there, so check the flags actually used instead. Counting
+# AVX-512 instructions does not work: builds with and without -march=native both
+# carry 5,107, in code that checks the CPU before using them.
+if [ "$LFS_MARCH" != native ]; then
+  n=$(grep -c -E -- '-march=native|-mavx512' ./build/compile_commands.json || true)
+  [ "$n" = 0 ] || { echo "LFS_MARCH=$LFS_MARCH build still compiled $n files for the build CPU" >&2; exit 1; }
 fi

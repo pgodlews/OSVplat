@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY scripts/setup_sfm_venv.sh /src/scripts/
 RUN /src/scripts/setup_sfm_venv.sh && rm -rf /root/.cache/pip
 COPY scripts/setup_lichtfeld.sh /src/scripts/
-RUN /src/scripts/setup_lichtfeld.sh \
+RUN LFS_MARCH=x86-64-v3 /src/scripts/setup_lichtfeld.sh \
     && cd /opt/splat/LichtFeld-Studio/build \
     && rm -rf CMakeFiles _deps/*-build _deps/*-subbuild vcpkg_installed/*/debug \
     && find . -name '*.o' -delete

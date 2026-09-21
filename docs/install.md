@@ -51,6 +51,8 @@ That runs three scripts, each safe to re-run on its own:
 Everything goes under `$SPLAT_ROOT` (default `~/splat`). The GPU architecture
 is detected from `nvidia-smi`; set `CUDA_ARCH` to override. Building LichtFeld
 is CPU-heavy — `JOBS=4` lowers the parallelism if the machine becomes unresponsive.
+LichtFeld is compiled for this machine's CPU (`-march=native`); to build it for
+another machine, set `LFS_MARCH=x86-64-v3`, as the Docker image does.
 
 ### Optional: SAM 3 masks
 

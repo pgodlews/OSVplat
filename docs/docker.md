@@ -8,6 +8,9 @@ job data and optional model weights stay in folders on the workstation.
 
 - Linux with an NVIDIA GPU and driver **580 or newer** (`nvidia-smi` shows the
   version). The image runs on RTX 20xx through 50xx (compute capability 7.5–12.0).
+- An x86-64 CPU with AVX2 and FMA (Intel Haswell / AMD Zen or newer). The
+  published 0.1.1 image also needed AVX-512 by accident and crashes in training
+  without it ([troubleshooting #25](troubleshooting.md)).
 - Docker with the Compose plugin, and the
   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
   Check it works:
