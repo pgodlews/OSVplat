@@ -4,8 +4,9 @@
 
 OSVplat turns a DJI Osmo 360 or Avata 360 `.OSV` into a flyable 3D Gaussian
 splat. It keeps both fisheye lenses as a calibrated rig instead of stitching
-first. Copy the clip to your Linux GPU workstation, pick a preset in a small
-web UI, and an hour or two later download `.ply`, `.sog` and `.spz` files.
+first. Copy the clip to your Linux GPU workstation, or hand it to a rented GPU
+on Vast.ai or RunPod, pick a preset in a small web UI, and an hour or two later
+download `.ply`, `.sog` and `.spz` files.
 
 <p align="center">
   <img src="docs/images/atrium-flythrough.webp" width="320" alt="Fly-through of a Gaussian splat of a domed atrium, trained from one Osmo 360 walk">
@@ -25,6 +26,11 @@ web UI, and an hour or two later download `.ply`, `.sog` and `.spz` files.
   selection → optional person masking → COLMAP SfM on the GPU →
   [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio) training →
   export. Change a training option and everything before training is reused.
+- **No GPU of your own needed.** The same image runs on a rented Vast.ai or
+  RunPod GPU: the clip goes in and the splats come out over presigned S3 URLs,
+  and you reach the UI over SSH. Stages are sized to the CPUs the container is
+  actually allowed, and GPUs the build cannot run are refused up front
+  ([rented GPUs](docs/cloud.md)).
 - **Web queue.** Submit jobs, watch progress per stage, see time estimates
   and PSNR/SSIM, compare runs, run parameter sweeps, and download results. It
   runs as a systemd service, so jobs survive closing the browser or logging out.
@@ -44,7 +50,7 @@ web UI, and an hour or two later download `.ply`, `.sog` and `.spz` files.
 
 - A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (developed on
   RTX 3090s; a Standard run peaked at 10 GB of VRAM), and ~20 GB of free disk
-  per clip.
+  per clip. Or a rented one: see [docs/cloud.md](docs/cloud.md).
 - Clips from a DJI Osmo 360 or Avata 360 (`.OSV`), or any stitched
   equirectangular video (`.mp4`, 2:1).
 
@@ -64,6 +70,10 @@ cp /media/$USER/SD/DCIM/DJI_001/CAM_*.OSV samples/
 
 Until a prebuilt image is published on GHCR, use the `--build` form: about an
 hour, once. Details, settings and updating: **[docs/docker.md](docs/docker.md)**.
+
+**On a rented GPU** (Vast.ai, RunPod): start `ghcr.io/pgodlews/osvplat:0.1.3`
+with your SSH key and two presigned URLs; `scripts/presign_s3.py` makes them.
+Steps, settings and what to watch out for: **[docs/cloud.md](docs/cloud.md)**.
 
 **Native install** (builds the tools on the workstation, about an hour, after the
 system packages in [docs/install.md](docs/install.md#1-system-packages)):

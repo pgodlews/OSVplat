@@ -173,6 +173,29 @@ covers 7.5 to 12.0.
 - Container disk: ~60 GB. Anything outside `/workspace` is lost when a pod
   is stopped.
 
+## When the instance dies mid-job
+
+Rented GPUs get interrupted: interruptible/spot instances are reclaimed,
+hosts go offline, a pod is terminated by mistake. What that costs:
+
+- **The work so far is lost with the instance's disk.** The stage cache,
+  logs and partial training live in `QUEUE_ROOT` (`/data`) on the instance.
+  A replacement instance starts from frames again, unless `QUEUE_ROOT` is on
+  storage that outlives it: a RunPod network volume, or `/workspace`, which
+  survives a stop but not a terminate. On Vast the disk goes with the
+  instance.
+- **No half-written result reaches the bucket.** The tar is written under a
+  temporary name and renamed when complete. It then goes up in a single PUT
+  (or POST), which S3 stores only once the whole body has arrived and matched
+  its `Content-MD5`. An upload cut off halfway leaves nothing, or the previous
+  object, never a truncated file.
+- **The presigned URLs outlive the instance.** They work until they expire,
+  for whoever has them, and the host could read them. Keep `--expires` close
+  to the run's length. Give each run its own result key (or prefix), so a
+  late or repeated upload cannot overwrite another run's result.
+- Nothing retries the job on another instance. Check the result exists
+  (`upload.state: done` and its sha256), not just that the instance is gone.
+
 ## Stopping and destroying
 
 Measured on 2026-09-21:
