@@ -318,6 +318,7 @@ GET    /api/jobs/{id}           config, stages, progress, metrics
 GET    /api/jobs/{id}/files     finished .ply/.sog/.spz: name, bytes, url
 GET    /api/jobs/{id}/files/{name} download one (only names in that job's export dir)
 GET    /api/jobs/{id}/log?stage=train[&follow=true]   plain text, or SSE tail
+GET    /api/jobs/{id}/telemetry[?logs=1]   telemetry.json, or the redacted log bundle (docs/job-telemetry.md)
 DELETE /api/jobs/{id}           cancel
 POST   /api/estimate            {config} -> per-stage seconds
 GET    /api/compare?ids=1,2,3   metrics table + config diff
@@ -349,6 +350,7 @@ set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_a
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_stages.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_worker.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_regressions.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_telemetry.py
 ~/splat/venv/bin/python ~/splat/scripts/test_fisheye.py
 ```
 

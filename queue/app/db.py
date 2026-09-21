@@ -185,10 +185,14 @@ def hide_finished() -> int:
     return cur.rowcount
 
 
-def purge_hidden() -> int:
-    """Actually delete hidden jobs, and with them their stages and metrics."""
-    cur = conn().execute("DELETE FROM jobs WHERE hidden=1")
-    return cur.rowcount
+def purge_hidden() -> list[int]:
+    """Actually delete hidden jobs, and with them their stages and metrics.
+
+    Returns the deleted ids, so the caller can remove their files too.
+    """
+    ids = [r["id"] for r in conn().execute("SELECT id FROM jobs WHERE hidden=1")]
+    conn().executemany("DELETE FROM jobs WHERE id=?", [(i,) for i in ids])
+    return ids
 
 
 def set_job_state(job_id: int, state: str, **kw) -> None:

@@ -77,6 +77,10 @@ cd '$APP'
 ./venv/bin/python -c 'import fastapi, uvicorn; print(\"deps ok\", fastapi.__version__)'"
 
 echo "==> installing systemd unit"
+# Which commit this install runs, for telemetry records (docker: OSVPLAT_REVISION
+# comes from the image build instead).
+REV=$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo unknown)
+git -C "$(dirname "$0")/.." diff --quiet HEAD 2>/dev/null || REV="$REV-dirty"
 UNIT=$(mktemp)
 cat > "$UNIT" <<UNITEOF
 [Unit]
@@ -90,6 +94,7 @@ WorkingDirectory=$APP
 Environment=PYTHONUNBUFFERED=1
 Environment=SPLAT_ROOT=$ROOT
 Environment=QUEUE_METRICS=$METRICS
+Environment=OSVPLAT_REVISION=$REV
 # After the Environment= lines on purpose: a QUEUE_METRICS= line added to
 # .queue_env then wins, so the endpoint can be toggled with a restart instead
 # of a redeploy.

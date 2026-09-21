@@ -8,6 +8,7 @@ import json
 import re
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -21,7 +22,7 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import db, estimate, metrics, progress, retention, worker
+from . import db, estimate, metrics, progress, retention, telemetry, worker
 from .config import (CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED, MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, JobConfig, quick_hash
@@ -581,6 +582,24 @@ def api_file(job_id: int, name: str):
                         filename=f"{stem}_{name}")
 
 
+@app.get("/api/jobs/{job_id}/telemetry")
+def api_telemetry(job_id: int, logs: bool = Query(False)):
+    """This job's telemetry.json, or with ?logs=1 its redacted log bundle.
+
+    Written after every stage (docs/job-telemetry.md), so a running job returns
+    what it has so far. 404 when telemetry is off or nothing is written yet.
+    """
+    p = telemetry.logs_path(job_id) if logs else telemetry.telemetry_path(job_id)
+    if not p.is_file():
+        raise HTTPException(404, "no telemetry for this job"
+                            + ("" if telemetry.TELEMETRY_ENABLED else
+                               " (QUEUE_TELEMETRY is off)"))
+    if logs:
+        return FileResponse(p, media_type="application/gzip",
+                            filename=f"job{job_id:05d}_logs.tar.gz")
+    return FileResponse(p, media_type="application/json")
+
+
 @app.get("/api/jobs/{job_id}/log")
 async def api_log(job_id: int, stage: str = Query("train"),
                   follow: bool = Query(False),
@@ -968,7 +987,10 @@ def api_clear(purge: bool = Query(False)) -> dict:
     deletes, for when that is what you mean.
     """
     if purge:
-        return {"purged": db.purge_hidden()}
+        ids = db.purge_hidden()
+        for i in ids:
+            shutil.rmtree(telemetry.run_dir(i), ignore_errors=True)
+        return {"purged": len(ids)}
     return {"hidden": db.hide_finished()}
 
 

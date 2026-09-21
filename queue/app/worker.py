@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from . import db, gpu, retention
+from . import db, gpu, retention, telemetry
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
                      SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
@@ -322,6 +322,8 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
             restamp_lock(cache_dir, proc.pid)
         sampler = None
         watchdog = None
+        resources = telemetry.ResourceSampler(ctx.gpu, proc.pid)
+        resources.start()
         if stage == "train":
             sampler = VramSampler(
                 ctx.gpu, lambda: [proc.pid] + _child_pids(proc.pid))
@@ -355,6 +357,9 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
                             db.stage_progress(ctx.job_id, stage, progress)
             proc.wait()
         finally:
+            resources.stop()
+            telemetry.record_resources(
+                ctx.job_id, stage, resources.summary(time.time() - state["started"]))
             if sampler:
                 sampler.stop()
                 if sampler.peak:
@@ -638,6 +643,8 @@ def run_job(job_id: int, gpu_index: int) -> None:
             # UI shows why it did not run rather than leaving a silent gap.
             if spec.get("skip") and spec["skip"](ctx):
                 db.upsert_stage(job_id, stage, key, "skipped", path=str(d))
+                telemetry.write(job_id)
+                telemetry.notify("stage.finished", job_id, stage, "skipped")
                 continue
 
             if spec["prepare"]:
@@ -653,28 +660,41 @@ def run_job(job_id: int, gpu_index: int) -> None:
                 db.upsert_stage(job_id, stage, key, "cached", path=str(d),
                                 progress=json.dumps(info), ended=time.time())
                 _record_metrics(job_id, stage, info)
+                telemetry.write(job_id)
+                telemetry.notify("stage.finished", job_id, stage, "cached")
                 continue
 
+            telemetry.notify("stage.started", job_id, stage, "running")
             info = _build_stage(ctx, job_id, stage, spec, d, key, log_path)
             db.cache_put(key, stage, str(d), dir_bytes(d))
             db.upsert_stage(job_id, stage, key, "done", path=str(d),
                             log_path=str(log_path),
                             progress=json.dumps(info), ended=time.time())
             _record_metrics(job_id, stage, info)
+            telemetry.write(job_id)
+            telemetry.notify("stage.finished", job_id, stage, "done")
 
         db.set_job_state(job_id, "done", ended=time.time())
+        telemetry.write(job_id, final=True)
+        telemetry.notify("job.finished", job_id, state="done")
     except ReviewRequired as exc:
         # Deliberately leaves the pending stages pending: this job is going to
         # run them, just not yet.
         db.set_review(job_id, "pending", str(exc))
         db.set_job_state(job_id, "awaiting_review", error=None)
+        telemetry.write(job_id)
+        telemetry.notify("job.waiting", job_id, state="awaiting_review")
     except Exception as exc:                                  # noqa: BLE001
         state = "cancelled" if job_id in _cancel else "failed"
         db.set_job_state(job_id, state, ended=time.time(), error=str(exc)[:4000])
+        failed_stage = None
         for st in db.job_stages(job_id):
             if st["state"] in ("running", "waiting"):
+                failed_stage = failed_stage or st["stage"]
                 db.upsert_stage(job_id, st["stage"], st["cache_key"], state,
                                 ended=time.time())
+        telemetry.write(job_id, final=True)
+        telemetry.notify("job.finished", job_id, failed_stage, state)
     finally:
         _cancel.discard(job_id)
         with _lock:

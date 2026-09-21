@@ -87,6 +87,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh && chmod -R a+rX /opt/splat
 # scripts/publish_image.sh fills VERSION and REVISION from the git tag.
 ARG VERSION=dev
 ARG REVISION=unknown
+# Read by queue/app/telemetry.py, so a record says which build produced it.
+ENV OSVPLAT_VERSION=${VERSION} OSVPLAT_REVISION=${REVISION}
 LABEL org.opencontainers.image.title="OSVplat" \
       org.opencontainers.image.description="Raw DJI .OSV dual-fisheye to Gaussian splat. No stitch." \
       org.opencontainers.image.source="https://github.com/pgodlews/OSVplat" \

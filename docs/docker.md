@@ -88,6 +88,8 @@ under `./data/cache/export/<key>/`.
 | `QUEUE_TOKEN` | generated | Fix the access token instead of generating one |
 | `QUEUE_GPUS` | `all` | Restrict the queue to some GPUs: `0`, `0,1` |
 | `QUEUE_METRICS` | 0 | `1` enables a Prometheus `/metrics` endpoint |
+| `QUEUE_TELEMETRY` | 1 | `0` stops writing per-job telemetry; it never leaves the machine unless you set an upload target ([job-telemetry.md](job-telemetry.md)) |
+| `QUEUE_WEBHOOK_URL`, `QUEUE_WEBHOOK_SECRET` | empty | POST a signed JSON event when a stage starts or finishes ([job-telemetry.md](job-telemetry.md#webhook)) |
 | `CUDA_ARCH` | `7.5;8.0;8.6;8.9;9.0;12.0` | Build only: GPU architectures to compile for |
 | `BUILD_JOBS` | 8 | Build only: parallel compile jobs; lower it if the machine struggles |
 

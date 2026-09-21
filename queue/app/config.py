@@ -1,4 +1,5 @@
 """Paths and resource configuration. Everything is derived from SPLAT_ROOT."""
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -84,6 +85,42 @@ START_PAUSED = os.environ.get("QUEUE_START_PAUSED", "1") == "1"
 # rather than reading QUEUE_METRICS=true as "off" and saying nothing.
 METRICS_ENABLED = os.environ.get("QUEUE_METRICS", "0").strip().lower() in (
     "1", "true", "yes", "on")
+
+def _flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _json_env(name: str) -> dict:
+    """A JSON object from the environment; {} if unset. Malformed is fatal:
+    a typo would otherwise silently turn an upload off."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    val = json.loads(raw)
+    if not isinstance(val, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return val
+
+
+# Per-job telemetry (queue/app/telemetry.py, docs/job-telemetry.md). On by default,
+# and local: telemetry.json and logs.tar.gz go to QUEUE_ROOT/runs/job<id>/ and
+# stay there. QUEUE_TELEMETRY=0 stops writing them. QUEUE_TELEMETRY_UPLOAD is an
+# upload target (presigned S3 POST or a PUT URL); without it nothing is sent
+# anywhere. QUEUE_TELEMETRY_PLACEMENT is copied into each record as-is, for
+# whoever launched this machine to say what it is (provider, region, price).
+TELEMETRY_ENABLED = _flag("QUEUE_TELEMETRY", "1")
+TELEMETRY_UPLOAD = _json_env("QUEUE_TELEMETRY_UPLOAD")
+TELEMETRY_PLACEMENT = _json_env("QUEUE_TELEMETRY_PLACEMENT")
+if TELEMETRY_UPLOAD and not TELEMETRY_UPLOAD.get("url"):
+    raise ValueError("QUEUE_TELEMETRY_UPLOAD needs a \"url\"")
+
+
+# Optional webhook: a small JSON event POSTed when a stage starts or finishes
+# and when a job ends (docs/job-telemetry.md, "Webhook"). Off unless a URL is
+# set. With QUEUE_WEBHOOK_SECRET, each request carries an HMAC-SHA256 of its
+# body in X-OSVplat-Signature, so the receiver can tell it came from here.
+WEBHOOK_URL = os.environ.get("QUEUE_WEBHOOK_URL", "").strip()
+WEBHOOK_SECRET = os.environ.get("QUEUE_WEBHOOK_SECRET", "").strip()
 
 # Shared secret for every request. This service can start GPU jobs, cancel them,
 # delete history and change scheduling, so it is not something to leave open on

@@ -21,6 +21,7 @@ Run from the repo root, no GPU needed:
 ```bash
 python3 queue/test_stages.py && python3 queue/test_worker.py
 python3 queue/test_regressions.py && python3 queue/test_distance.py
+python3 queue/test_telemetry.py
 python3 scripts/test_avata_motion.py && python3 scripts/test_imu_select.py
 ~/splat/venv/bin/python scripts/test_fisheye.py        # needs pycolmap
 ```
@@ -54,6 +55,11 @@ time, and a test that forgot once wrote into a live queue database.
   Nulls are recorded too — see the gyro veto section.
 - Never commit clips (`.OSV`, `.mp4`), splats (`.ply`, `.sog`, `.spz`) or
   anything with GPS data, serial numbers or personal paths.
+- **Telemetry stays anonymous.** `queue/app/telemetry.py` records no
+  hostnames, paths, clip or job names, GPU UUIDs or serials, and redacts logs.
+  A new field goes in `docs/job-telemetry.md`, and anything that could name a
+  person, place or machine stays out. Writing is on by default; sending is
+  only ever opt-in (`QUEUE_TELEMETRY_UPLOAD`).
 - The UI is one static HTML file with inline JS/CSS; keep it dependency-free.
 - New mask models (a future SAM, etc.) start in `queue/app/mask_backends.py`;
   its docstring lists the other three places to touch. Never ship gated weights.

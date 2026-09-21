@@ -133,6 +133,7 @@ see [Capturing for a good splat](docs/how-it-works.md#capturing-for-a-good-splat
 | [docs/install.md](docs/install.md) | Native install without Docker |
 | [docs/how-it-works.md](docs/how-it-works.md) | Stages, fisheye rig vs stitching, masking, gyro veto, output formats, with measurements |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Known traps, numbered (code comments cite them) |
+| [docs/job-telemetry.md](docs/job-telemetry.md) | Per-job timings and machine description: what is recorded, what is not, how to turn it off or upload it |
 | [queue/README.md](queue/README.md) | Queue service internals, job options, API, tests |
 | [docs/osmo360-telemetry.md](docs/osmo360-telemetry.md), [docs/avata360-telemetry.md](docs/avata360-telemetry.md) | What is inside a DJI `.OSV`: lens calibration, IMU, GPS |
 

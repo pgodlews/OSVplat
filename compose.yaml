@@ -19,6 +19,9 @@ services:
       QUEUE_TOKEN: ${QUEUE_TOKEN:-}
       QUEUE_GPUS: ${QUEUE_GPUS:-all}
       QUEUE_METRICS: ${QUEUE_METRICS:-0}
+      QUEUE_TELEMETRY: ${QUEUE_TELEMETRY:-1}    # per-job telemetry, local only (docs/job-telemetry.md)
+      QUEUE_WEBHOOK_URL: ${QUEUE_WEBHOOK_URL:-}     # optional stage events
+      QUEUE_WEBHOOK_SECRET: ${QUEUE_WEBHOOK_SECRET:-}
       HF_TOKEN: ${HF_TOKEN:-}              # only for `get-weights`
     volumes:
       - ${SAMPLES_DIR:-./samples}:/opt/splat/samples     # your clips (.OSV, .mp4)
