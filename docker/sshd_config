@@ -1,0 +1,17 @@
+# /etc/ssh/sshd_config.d/osvplat.conf -- read before the main sshd_config, so
+# these win. Used only when docker/entrypoint.sh starts sshd (an SSH key
+# variable is set; docs/cloud.md). The host running this container has root
+# over it: keys only, and nothing that lets a session reach back out.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+PermitEmptyPasswords no
+# A forwarded agent could be used by host root for as long as the session lasts.
+AllowAgentForwarding no
+# `ssh -L 8090:localhost:8090` for the UI; no -R, no tunnels, no X11.
+AllowTcpForwarding local
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+AllowStreamLocalForwarding no
+PrintMotd no

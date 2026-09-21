@@ -89,6 +89,8 @@ under `./data/cache/export/<key>/`.
 | `QUEUE_GPUS` | `all` | Restrict the queue to some GPUs: `0`, `0,1` |
 | `QUEUE_METRICS` | 0 | `1` enables a Prometheus `/metrics` endpoint |
 | `QUEUE_TELEMETRY` | 1 | `0` stops writing per-job telemetry; it never leaves the machine unless you set an upload target ([job-telemetry.md](job-telemetry.md)) |
+| `QUEUE_CPUS` | discovered | CPUs the stages are sized to; by default the container's CPU quota ([cloud.md](cloud.md#cpu-and-gpu-discovery)) |
+| `SSH_PUBLIC_KEYS`, `QUEUE_BIND`, `INPUT_URL`, `OUTPUT_UPLOAD_URL` | empty | For rented GPUs: SSH into the container, fetch the clip, upload the result ([cloud.md](cloud.md)) |
 | `QUEUE_WEBHOOK_URL`, `QUEUE_WEBHOOK_SECRET` | empty | POST a signed JSON event when a stage starts or finishes ([job-telemetry.md](job-telemetry.md#webhook)) |
 | `CUDA_ARCH` | `7.5;8.0;8.6;8.9;9.0;12.0` | Build only: GPU architectures to compile for |
 | `BUILD_JOBS` | 8 | Build only: parallel compile jobs; lower it if the machine struggles |

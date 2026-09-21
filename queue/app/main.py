@@ -22,7 +22,8 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import db, estimate, metrics, progress, retention, telemetry, worker
+from . import (db, estimate, gpu, metrics, outputs, progress, resources,
+               retention, telemetry, worker)
 from .config import (CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED, MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, JobConfig, quick_hash
@@ -124,6 +125,10 @@ def _startup() -> None:
     db.init()
     print("auth: token required" if QUEUE_TOKEN else
           "auth: NO TOKEN SET -- serving loopback clients only")
+    # What the stages will be sized to (resources.py); telemetry has already
+    # probed the GPUs, so this costs no extra nvidia-smi call later.
+    print(resources.summary(telemetry.host()["gpus"], worker.max_concurrent()))
+    outputs.startup_check()
     if worker.enforce_start_paused():
         print("queue forced back to PAUSED on startup "
               "(QUEUE_START_PAUSED=0 to keep the stored state)")
@@ -343,8 +348,28 @@ class CreateReq(BaseModel):
     priority: int = 0
 
 
+def _refuse_if_cannot_deliver() -> None:
+    """Fail at submission, not after the GPU time: no GPU here can run this
+    build (resources.unsupported_reason), or the result could not be
+    delivered (outputs.problems)."""
+    caps = gpu.compute_caps()
+    mine = [g for g in GPUS if g in caps]
+    if mine and all(resources.unsupported_reason(caps[g]) for g in mine):
+        raise HTTPException(400, "no GPU here can run this build: " + "; ".join(
+            f"gpu{g}: {resources.unsupported_reason(caps[g])}" for g in mine))
+    bad = outputs.problems()
+    if bad:
+        raise HTTPException(400, "; ".join(bad) + " -- no job can deliver its "
+                            "result; fix OUTPUT_UPLOAD_URL and restart")
+    left = outputs.seconds_left()
+    if left is not None and left < 3600:
+        print(f"WARNING: OUTPUT_UPLOAD_URL expires in {left / 60:.0f} min; "
+              f"a job accepted now may finish after it")
+
+
 @app.post("/api/jobs")
 def api_create(req: CreateReq) -> dict:
+    _refuse_if_cannot_deliver()
     cfg = _prepare(req.config)
     jid = db.create_job(cfg.name, cfg.model_dump(), priority=req.priority)
     for stage, key in cfg.keys().items():
@@ -352,7 +377,8 @@ def api_create(req: CreateReq) -> dict:
         db.upsert_stage(jid, stage, key,
                         "cached" if is_cached(d) else "pending", path=str(d))
     _store_plan(jid, cfg)
-    return {"id": jid, "keys": cfg.keys(), "cached": _cache_state(cfg)}
+    return {"id": jid, "keys": cfg.keys(), "cached": _cache_state(cfg),
+            "upload_expires_in_s": outputs.seconds_left()}
 
 
 def _set_dotted(d: dict, path: str, value) -> None:
@@ -398,6 +424,7 @@ def api_sweep(req: SweepReq) -> dict:
 
     A variant with an empty `set` is the control.
     """
+    _refuse_if_cannot_deliver()
     if not req.axes and not req.variants:
         raise HTTPException(400, "give either axes or variants")
     if req.axes and req.variants:
@@ -531,7 +558,8 @@ def api_job(job_id: int) -> dict:
     row = db.get_job(job_id)
     if row is None:
         raise HTTPException(404, "no such job")
-    return _job_dict(row)
+    # upload: OUTPUT_UPLOAD_URL's result for this job (outputs.py), or None.
+    return {**_job_dict(row), "upload": outputs.status(job_id)}
 
 
 @app.delete("/api/jobs/{job_id}")

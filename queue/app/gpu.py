@@ -14,7 +14,10 @@ from __future__ import annotations
 import subprocess
 from typing import Iterable, Optional
 
+from . import resources
 from .config import GPUS
+
+_caps: Optional[dict[int, str]] = None
 
 
 def _nvidia_smi(query: str, extra: list[str] | None = None) -> Optional[list[list[str]]]:
@@ -80,6 +83,18 @@ def compute_procs() -> Optional[dict[int, list[dict]]]:
     return out
 
 
+def compute_caps() -> dict[int, str]:
+    """{index: "8.6"}, probed once: a card does not change under us. {} (and
+    retried next time) when nvidia-smi failed, so no card is refused on a guess."""
+    global _caps
+    if _caps is None:
+        rows = _nvidia_smi("gpu=index,compute_cap")
+        if rows is None:
+            return {}
+        _caps = {int(r[0]): r[1] for r in rows if len(r) >= 2 and r[0].isdigit()}
+    return _caps
+
+
 def status(own_pids: Iterable[int] = (), held: Iterable[int] = ()) -> list[dict]:
     """Per-GPU status with a foreign-process flag and an availability verdict.
 
@@ -107,10 +122,15 @@ def status(own_pids: Iterable[int] = (), held: Iterable[int] = ()) -> list[dict]
     for g in sorted(set(list(util) + list(procs) + GPUS)):
         ps = procs.get(g, [])
         foreign = [p for p in ps if p["pid"] not in own]
-        schedulable = g in GPUS
+        # A card the image cannot run on (older than CUDA_ARCH's floor) is
+        # listed but never scheduled: failing it up front beats a job dying in
+        # gsplat or LichtFeld minutes in.
+        unsupported = resources.unsupported_reason(compute_caps().get(g))
+        schedulable = g in GPUS and not unsupported
         rows.append({
             "index": g,
             "schedulable": schedulable,
+            "unsupported": unsupported,
             "procs": ps,
             "foreign": foreign,
             "busy_foreign": bool(foreign),

@@ -19,10 +19,11 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from . import db, gpu, retention, telemetry
+from . import db, gpu, outputs, retention, telemetry
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
                      SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
+from .resources import stage_threads, thread_env
 from .stages import (ORDER, STAGES, Ctx, dir_bytes, done_marker, images_dir,
                      is_cached, lock_holder_alive, mark_done, pid_alive,
                      read_done, read_lock, release_lock, reset_stage_dir,
@@ -292,6 +293,11 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = str(ctx.gpu)
     env.setdefault("PYTHONUNBUFFERED", "1")
+    # Size CPU-bound work to what the container may use, shared between the
+    # jobs that can run side by side (resources.py). A value already in the
+    # service's environment wins, so it stays overridable per install.
+    for k, v in thread_env(stage_threads(max_concurrent())).items():
+        env.setdefault(k, v)
 
     progress: dict = {}
     last_push = 0.0
@@ -677,6 +683,7 @@ def run_job(job_id: int, gpu_index: int) -> None:
         db.set_job_state(job_id, "done", ended=time.time())
         telemetry.write(job_id, final=True)
         telemetry.notify("job.finished", job_id, state="done")
+        outputs.upload_async(job_id)
     except ReviewRequired as exc:
         # Deliberately leaves the pending stages pending: this job is going to
         # run them, just not yet.

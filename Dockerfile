@@ -49,11 +49,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Runtime side of the build packages: ffmpeg for decoding, and the GTK/X11/
 # Wayland libraries LichtFeld links against even when run --headless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg python3 python3-venv ca-certificates curl \
+      ffmpeg python3 python3-venv ca-certificates curl openssh-server rsync \
       libgtk-3-0t64 libglu1-mesa libegl1 libxinerama1 libxcursor1 libxkbcommon0 \
       libwayland-client0 libwayland-cursor0 libwayland-egl1 libdecor-0-0 libdbus-1-3 \
       libgomp1 libstdc++6 libjpeg-turbo8 libpng16-16t64 libsm6 libice6 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_*
+# openssh-server's install made host keys; one baked-in key pair would be shared
+# by every container from this image. The entrypoint makes them per container,
+# and only when an SSH key variable turns sshd on (docs/cloud.md).
 
 # Same absolute paths as the build stage: the venvs and LichtFeld's RUNPATH
 # point at them.
@@ -80,6 +84,7 @@ COPY scripts/ /opt/splat/scripts/
 COPY queue/app/ /opt/splat/queue_app/app/
 COPY queue/test_*.py queue/summarize_sweep.py /opt/splat/queue_app/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/sshd_config /etc/ssh/sshd_config.d/osvplat.conf
 COPY LICENSE THIRD_PARTY.md /opt/splat/
 RUN chmod +x /usr/local/bin/entrypoint.sh && chmod -R a+rX /opt/splat
 
@@ -89,6 +94,10 @@ ARG VERSION=dev
 ARG REVISION=unknown
 # Read by queue/app/telemetry.py, so a record says which build produced it.
 ENV OSVPLAT_VERSION=${VERSION} OSVPLAT_REVISION=${REVISION}
+# The GPU architectures compiled in: queue/app/resources.py refuses to schedule
+# on a card none of them covers, instead of a job dying in gsplat or LichtFeld.
+ARG CUDA_ARCH
+ENV OSVPLAT_CUDA_ARCH=${CUDA_ARCH}
 LABEL org.opencontainers.image.title="OSVplat" \
       org.opencontainers.image.description="Raw DJI .OSV dual-fisheye to Gaussian splat. No stitch." \
       org.opencontainers.image.source="https://github.com/pgodlews/OSVplat" \
@@ -98,5 +107,5 @@ LABEL org.opencontainers.image.title="OSVplat" \
       org.opencontainers.image.revision="${REVISION}"
 
 WORKDIR /opt/splat/queue_app
-EXPOSE 8090
+EXPOSE 8090 22
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

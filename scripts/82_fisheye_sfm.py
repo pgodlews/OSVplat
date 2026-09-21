@@ -34,6 +34,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import shutil
 import time
 from pathlib import Path
@@ -45,6 +46,11 @@ from colmap_incremental import DIRECT_SOLVER_MAX_IMAGES, incremental_mapping
 from osmo_fisheye import colmap_params, lenses, rig_rotation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+
+
+# COLMAP threads: the queue sets SPLAT_THREADS to the container's CPU allowance
+# (queue/app/resources.py); -1, all visible cores, when run by hand.
+THREADS = int(os.environ.get("SPLAT_THREADS") or -1)
 
 
 def call(x):
@@ -87,7 +93,7 @@ def main():
                  f"frames={n_img} overlap={a.overlap} cuda={pycolmap.has_cuda} "
                  f"direct_solver_max_images={a.direct_solver_max_images}")
     t_all = t = time.time()
-    extraction = pycolmap.FeatureExtractionOptions(use_gpu=True, num_threads=-1)
+    extraction = pycolmap.FeatureExtractionOptions(use_gpu=True, num_threads=THREADS)
     for i, l in enumerate(L):
         # k1..k4 refitted to the lens's full polynomial: COLMAP has no k5.
         params = colmap_params(l, a.fscale)
@@ -117,13 +123,13 @@ def main():
     t = time.time()
     pycolmap.match_sequential(
         db_path,
-        matching_options=pycolmap.FeatureMatchingOptions(use_gpu=True,
+        matching_options=pycolmap.FeatureMatchingOptions(use_gpu=True, num_threads=THREADS,
                                                          skip_image_pairs_in_same_frame=True),
         pairing_options=pycolmap.SequentialPairingOptions(overlap=a.overlap, expand_rig_images=True))
     logging.info(f"STAGE match {time.time() - t:.0f}s")
 
     t = time.time()
-    opts = pycolmap.IncrementalPipelineOptions(num_threads=-1, random_seed=0)
+    opts = pycolmap.IncrementalPipelineOptions(num_threads=THREADS, random_seed=0)
     opts.ba_refine_focal_length = a.refine_intrinsics
     opts.ba_refine_extra_params = a.refine_intrinsics
     opts.ba_refine_principal_point = False

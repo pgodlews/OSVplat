@@ -20,6 +20,7 @@ find is silently ignored and the run looks normal.
 """
 import argparse
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -29,6 +30,10 @@ from pycolmap.panorama import (Mapper, Matcher, PanoRenderType,
                                run_matcher)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+
+# COLMAP threads: the queue sets SPLAT_THREADS to the container's CPU allowance
+# (queue/app/resources.py); -1, all visible cores, when run by hand.
+THREADS = int(os.environ.get("SPLAT_THREADS") or -1)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("render", nargs="?", default="perspective_overlapping")
@@ -66,7 +71,7 @@ if masks is not None:
 options = PanoramaReconstructionOptions(
     matcher=Matcher.SEQUENTIAL, mapper=Mapper(mapper),
     render_type=PanoRenderType(render),
-    gpu_index='0', use_gpu=True, num_threads=-1)
+    gpu_index='0', use_gpu=True, num_threads=THREADS)
 
 logging.info(f'START render={render} mapper={mapper} '
              f'panos={len(list(panos.glob("*.jpg")))} cuda={pycolmap.has_cuda} '
@@ -97,7 +102,7 @@ def run_spherical_masked(input_image_path, opts, database_path, rec_path,
         camera_mode=pycolmap.CameraMode.SINGLE,
         extraction_options=extraction_options)
 
-    run_matcher(opts, database_path, pycolmap.FeatureMatchingOptions())
+    run_matcher(opts, database_path, pycolmap.FeatureMatchingOptions(num_threads=opts.num_threads))
 
     if opts.mapper == Mapper.INCREMENTAL:
         recs = pycolmap.incremental_mapping(

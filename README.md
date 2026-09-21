@@ -130,6 +130,7 @@ see [Capturing for a good splat](docs/how-it-works.md#capturing-for-a-good-splat
 | | |
 |---|---|
 | [docs/docker.md](docs/docker.md) | Running with Docker Compose, settings, updating, verifying and publishing the image |
+| [docs/cloud.md](docs/cloud.md) | Rented GPUs (Vast.ai, RunPod): SSH, presigned input and output URLs, CPU/GPU discovery |
 | [docs/install.md](docs/install.md) | Native install without Docker |
 | [docs/how-it-works.md](docs/how-it-works.md) | Stages, fisheye rig vs stitching, masking, gyro veto, output formats, with measurements |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Known traps, numbered (code comments cite them) |

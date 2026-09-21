@@ -42,7 +42,7 @@ from typing import Optional
 from . import db, gpu
 from .config import (LOG_ROOT, QUEUE_ROOT, RUNS_ROOT, SPLAT_ROOT,
                      TELEMETRY_ENABLED, TELEMETRY_PLACEMENT, TELEMETRY_UPLOAD,
-                     WEBHOOK_SECRET, WEBHOOK_URL)
+                     WEBHOOK_SECRET, WEBHOOK_URL, ssl_context)
 
 SCHEMA = "osvplat.telemetry/1"
 SERVICE_STARTED = time.time()
@@ -568,7 +568,7 @@ def _upload_locked(job_id: int, names: list[str]) -> None:
         for attempt in range(3):
             try:
                 req = upload_request(TELEMETRY_UPLOAD, job_id, name, data)
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with urllib.request.urlopen(req, timeout=60, context=ssl_context()) as r:
                     r.read()
                 err = None
                 break
@@ -603,7 +603,8 @@ def _hook_worker() -> None:
         event = _hook_q.get()
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(webhook_request(event), timeout=15) as r:
+                with urllib.request.urlopen(webhook_request(event), timeout=15,
+                                            context=ssl_context()) as r:
                     r.read()
                 break
             except Exception as exc:                          # noqa: BLE001

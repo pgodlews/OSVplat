@@ -109,11 +109,74 @@ def _json_env(name: str) -> dict:
 # anywhere. QUEUE_TELEMETRY_PLACEMENT is copied into each record as-is, for
 # whoever launched this machine to say what it is (provider, region, price).
 TELEMETRY_ENABLED = _flag("QUEUE_TELEMETRY", "1")
-TELEMETRY_UPLOAD = _json_env("QUEUE_TELEMETRY_UPLOAD")
-TELEMETRY_PLACEMENT = _json_env("QUEUE_TELEMETRY_PLACEMENT")
-if TELEMETRY_UPLOAD and not TELEMETRY_UPLOAD.get("url"):
-    raise ValueError("QUEUE_TELEMETRY_UPLOAD needs a \"url\"")
 
+# QUEUE_TLS_INSECURE=1 accepts self-signed or otherwise unverifiable TLS
+# certificates on this service's own outbound requests: OUTPUT_UPLOAD_URL,
+# telemetry uploads, the webhook (and INPUT_URL, in the entrypoint). Off by
+# default. On, anyone on the network path can read and alter those transfers,
+# presigned URLs included, so it is for a private endpoint on a network you
+# trust, not the internet.
+TLS_INSECURE = _flag("QUEUE_TLS_INSECURE", "0")
+
+
+def ssl_context():
+    """None (verify as usual) unless QUEUE_TLS_INSECURE is on."""
+    if not TLS_INSECURE:
+        return None
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _telemetry_env(name: str, need_url: bool = False) -> dict:
+    """Like _json_env, but a mistake here must never keep jobs from running:
+    it is reported loudly and that setting is off; telemetry.json is still
+    written locally. (Raising at import stopped the whole service, and in a
+    container that is a restart loop that keeps billing.)"""
+    try:
+        val = _json_env(name)
+        if need_url and val and not val.get("url"):
+            raise ValueError(f'{name} needs a "url"')
+        return val
+    except ValueError as exc:
+        print(f"WARNING: {name} ignored: {exc}")
+        return {}
+
+
+TELEMETRY_UPLOAD = _telemetry_env("QUEUE_TELEMETRY_UPLOAD", need_url=True)
+TELEMETRY_PLACEMENT = _telemetry_env("QUEUE_TELEMETRY_PLACEMENT")
+
+
+def _upload_target(name: str) -> dict:
+    """A plain URL means one presigned PUT; a JSON object is a target in the
+    QUEUE_TELEMETRY_UPLOAD shape (PUT with headers, or a presigned S3 POST)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        val = _json_env(name)
+        if not val.get("url"):
+            raise ValueError(f"{name} needs a \"url\"")
+        return val
+    if not raw.startswith("https://") and not raw.startswith("http://"):
+        raise ValueError(f"{name} must be an http(s) URL or a JSON object")
+    return {"method": "PUT", "url": raw}
+
+
+# Finished splats to object storage (queue/app/outputs.py, docs/cloud.md): after
+# each job that ends done, its export files go up as one tar. For rented GPUs,
+# where nothing should have to be pulled over SSH and no cloud credentials
+# belong on the box: a presigned URL can write one object and nothing else.
+# Unlike telemetry, this is the run's delivery: a malformed value does not stop
+# the service (SSH and the UI stay up) but outputs.preflight() makes the API
+# refuse new jobs until it is fixed.
+OUTPUT_UPLOAD_ERROR = None
+try:
+    OUTPUT_UPLOAD = _upload_target("OUTPUT_UPLOAD_URL")
+except ValueError as exc:
+    OUTPUT_UPLOAD, OUTPUT_UPLOAD_ERROR = {}, f"OUTPUT_UPLOAD_URL: {exc}"
 
 # Optional webhook: a small JSON event POSTed when a stage starts or finishes
 # and when a job ends (docs/job-telemetry.md, "Webhook"). Off unless a URL is

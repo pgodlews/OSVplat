@@ -444,6 +444,7 @@ async function refreshStatus() {
     // could not be probed, is not free either.
     const note = g.probe_ok === false ? 'unreadable — treated as busy'
       : foreign ? `foreign pid ${g.foreign.map(p=>p.pid).join(',')}`
+      : g.unsupported ? `unsupported: ${g.unsupported}`
       : !g.schedulable ? 'not scheduled'
       : g.held ? 'held by this queue'
       : g.available ? 'free' : 'busy';

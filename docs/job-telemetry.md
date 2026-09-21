@@ -50,8 +50,11 @@ upload is printed in the service log and never fails the job. `{job}` becomes
 
 The POST form is an S3 presigned POST: its policy can allow a key prefix
 (`starts-with`) and cap the size (`content-length-range`), so one target
-covers every job on a machine. A malformed target stops the service at start
-rather than silently sending nothing.
+covers every job on a machine. A malformed target (or `QUEUE_TELEMETRY_PLACEMENT`)
+is reported as a `WARNING: ... ignored` line in the service log and switched
+off, rather than silently sending nothing; it never stops jobs from running,
+and telemetry is still written locally. A self-signed endpoint needs
+`QUEUE_TLS_INSECURE=1` ([cloud.md](cloud.md#settings)).
 
 ## Webhook
 

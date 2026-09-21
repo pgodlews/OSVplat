@@ -64,6 +64,7 @@ report() { echo "  $1"; hits=$((hits+1)); }
 while IFS= read -r f; do report "file: $f"; done < <(find / -xdev \( \
     -name .env -o -name '.env.*' -o -name .netrc -o -name .git-credentials \
     -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -name 'id_ecdsa*' -o -name cosign.key \
+    -o -name authorized_keys -o -name 'authorized_keys2' -o -name 'ssh_host_*' \
     -o -name token -path '*huggingface*' -o -name stored_tokens \
     -o -iname '*.osv' -o -iname '*.lrf' -o -iname '*.mp4' -o -iname '*.insv' \
     -o -name '*.ply' -path '*/data/*' \) 2>/dev/null \
