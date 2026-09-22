@@ -36,6 +36,9 @@ BUILDER=${BUILDER:-osvplat-publish}
 # Where --push builds go before the scan. Must be a PRIVATE package: it holds
 # the image before it is known to be clean. GHCR makes new packages private.
 STAGING=${STAGING:-${IMAGE_NAME}-staging}
+# Any image known to be public, to prove the privacy probe below works before
+# trusting its "not public". Not IMAGE_NAME: a test run may publish privately.
+PROBE_PUBLIC=${PROBE_PUBLIC:-ghcr.io/pgodlews/osvplat}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -186,7 +189,7 @@ fi
 
 # ------------------------------------------- build once, push to staging, scan
 # The probe must work, or its "not public" means nothing: the released image is public.
-publicly_readable "$IMAGE_NAME" || die "cannot confirm $IMAGE_NAME is publicly readable; is ghcr.io reachable?"
+publicly_readable "$PROBE_PUBLIC" || die "the privacy probe cannot read public $PROBE_PUBLIC; is ghcr.io reachable?"
 ! publicly_readable "$STAGING" || die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)"
 echo "==> building for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION"
 "${BUILD[@]}" -t "$STAGING:$VERSION" --sbom=true --provenance=mode=max \
