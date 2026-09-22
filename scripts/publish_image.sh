@@ -160,18 +160,16 @@ BUILD=(docker buildx build --builder "$BUILDER" --platform linux/amd64
        --build-arg "CUDA_ARCH=$CUDA_ARCH" --build-arg "JOBS=$BUILD_JOBS"
        --build-arg "VERSION=$VERSION" --build-arg "REVISION=$REVISION")
 
-# GitHub's visibility of a ghcr.io package: private, public, none (does not
-# exist yet) or unknown (cannot tell: no gh, or its token lacks read:packages).
-package_visibility() {
-  local path=${1#ghcr.io/} out
-  command -v gh >/dev/null || { echo unknown; return; }
-  if out=$(gh api "/users/${path%%/*}/packages/container/${path#*/}" --jq .visibility 2>&1); then
-    echo "$out"
-  elif grep -qi "package not found" <<< "$out"; then
-    echo none
-  else
-    echo unknown
-  fi
+# Can anyone read this ghcr.io repository? Asked the way a stranger would:
+# an anonymous pull token, then its tag list. 200 = public; a private or
+# missing repository gets no token or a 401/403. Needs no gh, no scopes.
+publicly_readable() {
+  local path=${1#ghcr.io/} tok
+  tok=$(curl -fsS -m 30 "https://ghcr.io/token?scope=repository:$path:pull" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' 2>/dev/null) || tok=""
+  [ -n "$tok" ] || return 1
+  [ "$(curl -s -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
+        "https://ghcr.io/v2/$path/tags/list")" = 200 ]
 }
 
 t0=$(date +%s)
@@ -187,24 +185,16 @@ if [ $PUSH = 0 ]; then
 fi
 
 # ------------------------------------------- build once, push to staging, scan
-# A missing package answers "not found" even to a token that could not read
-# it, so first prove the token can read packages at all, on the public one.
-case $(package_visibility "$IMAGE_NAME") in
-  public|private|none) ;;
-  *) die "cannot read package visibility: gh needs read:packages (gh auth refresh -s read:packages)" ;;
-esac
-case $(package_visibility "$STAGING") in
-  private|none) ;;
-  public) die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)" ;;
-  *) die "cannot check $STAGING's visibility: needs gh logged in with read:packages (gh auth refresh -s read:packages)" ;;
-esac
+# The probe must work, or its "not public" means nothing: the released image is public.
+publicly_readable "$IMAGE_NAME" || die "cannot confirm $IMAGE_NAME is publicly readable; is ghcr.io reachable?"
+! publicly_readable "$STAGING" || die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)"
 echo "==> building for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION"
 "${BUILD[@]}" -t "$STAGING:$VERSION" --sbom=true --provenance=mode=max \
   --metadata-file "$WORK/meta.json" --push "$WORK/src"
 DIGEST=$(python3 -c "import json;print(json.load(open('$WORK/meta.json'))['containerimage.digest'])")
 echo "==> built and staged in $(( ($(date +%s)-t0)/60 )) min: $STAGING@$DIGEST"
-vis=$(package_visibility "$STAGING")
-[ "$vis" = private ] || die "$STAGING is '$vis' after the push, not private: delete $STAGING:$VERSION now, it is not scanned"
+! publicly_readable "$STAGING" \
+  || die "$STAGING is publicly readable after the push: make it private or delete $STAGING:$VERSION now, it is not scanned"
 docker pull -q "$STAGING@$DIGEST" >/dev/null
 scan_image "$STAGING@$DIGEST"
 

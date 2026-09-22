@@ -199,7 +199,6 @@ One-time setup:
 
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u pgodlews --password-stdin   # token with write:packages
-gh auth refresh -s read:packages   # the script checks that the staging package is private
 cosign generate-key-pair           # in the repo root; commit cosign.pub, keep cosign.key private
 ```
 
