@@ -17,6 +17,16 @@ SPLAT_ROOT=${SPLAT_ROOT:-$HOME/splat}
 # for a build without a GPU: CUDA_ARCH="7.5;8.6;12.0". CMake wants it dotless.
 CUDA_ARCH=${CUDA_ARCH:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)}
 CUDA_ARCH=$(echo "$CUDA_ARCH" | tr -d .)
+# LichtFeld's own CMakeLists ignores -DCMAKE_CUDA_ARCHITECTURES: it asks
+# nvidia-smi for the build machine's GPU and, with none (a Docker build), falls
+# back to "86" and forces that as the only architecture and the runtime floor.
+# The 0.1.2/0.1.3 images, "built for 7.5-12.0", refused an RTX 2080 Ti with
+# "compute capability 7.5, below the 8.6 this build requires" (troubleshooting
+# #31). Patched below to build exactly $CUDA_ARCH, with its lowest entry as the
+# floor.
+LFS_MIN_SM=$(tr ';' '\n' <<< "$CUDA_ARCH" | sort -n | head -1)
+LFS_MIN_CC="${LFS_MIN_SM%?}.${LFS_MIN_SM: -1}"
+LFS_TORCH_ARCHS=$(tr ';' '\n' <<< "$CUDA_ARCH" | sed -E 's/^(.*)(.)$/\1.\2/' | paste -sd';' -)
 # CPU target for lfs_core, whose Release flags hard-code -march=native: code for
 # whatever CPU runs the compile. That is right for a box building for itself and
 # wrong for an image, which then dies with SIGILL on any CPU lacking an
@@ -40,12 +50,35 @@ pin() {   # pin <dir> <ref>
 }
 # No --depth 1 on a fresh clone, for the same reason.
 [ -d "$SPLAT_ROOT/LichtFeld-Studio" ] || git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio.git "$SPLAT_ROOT/LichtFeld-Studio"
-# Undo a previous run's -march edit first, or checking out another ref refuses.
-git -C "$SPLAT_ROOT/LichtFeld-Studio" checkout -- src/core/CMakeLists.txt 2>/dev/null || true
+# Undo a previous run's edits first, or checking out another ref refuses.
+git -C "$SPLAT_ROOT/LichtFeld-Studio" checkout -- src/core/CMakeLists.txt CMakeLists.txt 2>/dev/null || true
 pin "$SPLAT_ROOT/LichtFeld-Studio" "$LFS_REF"
 grep -q -- '-march=native>' "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt" \
   || { echo "src/core/CMakeLists.txt no longer sets -march=native; recheck LFS_MARCH" >&2; exit 1; }
 sed -i "s/-march=native>/-march=$LFS_MARCH>/" "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt"
+# The architecture override (see LFS_MIN_SM above): two blocks, each anchored
+# on a line that must occur exactly once, or the build stops here.
+top="$SPLAT_ROOT/LichtFeld-Studio/CMakeLists.txt"
+a1='if(DEFINED TORCH_CUDA_ARCH_LIST)'
+a2='message(STATUS "Runtime GPU floor: SM ${LFS_RUNTIME_MIN_SM}")'
+[ "$(grep -cF -- "$a1" "$top")" = 1 ] && [ "$(grep -cF -- "$a2" "$top")" = 1 ] \
+  || { echo "LichtFeld's CMakeLists.txt changed; recheck the CUDA architecture override" >&2; exit 1; }
+python3 - "$top" "$a1" "$a2" <<'PY'
+import sys
+path, a1, a2 = sys.argv[1:4]
+s = open(path).read()
+s = s.replace(a1, """# OSVplat (scripts/setup_lichtfeld.sh): build the requested architectures.
+if(DEFINED OSVPLAT_CUDA_ARCHS)
+    set(LichtFeld-Studio_CUDA_ARCH "${OSVPLAT_CUDA_ARCHS}")
+    set(DETECTED_COMPUTE_CAP "${OSVPLAT_MIN_CC}")
+endif()
+""" + a1, 1)
+s = s.replace(a2, a2 + """
+if(DEFINED OSVPLAT_CUDA_ARCHS)
+    set(TORCH_CUDA_ARCH_LIST "${OSVPLAT_TORCH_ARCHS}" CACHE STRING "" FORCE)
+endif()""", 1)
+open(path, "w").write(s)
+PY
 [ -d "$VCPKG_ROOT" ] || git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"     # NOT --depth 1
 pin "$VCPKG_ROOT" "$VCPKG_REF"
 echo "LichtFeld $(git -C "$SPLAT_ROOT/LichtFeld-Studio" rev-parse --short HEAD), vcpkg $(git -C "$VCPKG_ROOT" describe --tags --always)"
@@ -70,7 +103,14 @@ if [ ! -f "$x264_tgz" ]; then
 fi
 cd "$SPLAT_ROOT/LichtFeld-Studio"
 nice -n 10 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja \
+  -DOSVPLAT_CUDA_ARCHS="$CUDA_ARCH" -DOSVPLAT_MIN_CC="$LFS_MIN_CC" -DOSVPLAT_TORCH_ARCHS="$LFS_TORCH_ARCHS" \
   -DCMAKE_CXX_STANDARD_LIBRARIES=-lstdc++exp   # GCC 14 <stacktrace>, troubleshooting #12
+# Before the hour of compiling: the configured build must be what was asked for.
+got=$(sed -n 's/^CMAKE_CUDA_ARCHITECTURES:STRING=//p' build/CMakeCache.txt)
+[ "$got" = "$CUDA_ARCH" ] \
+  || { echo "LichtFeld configured for CUDA architectures '$got', not '$CUDA_ARCH'" >&2; exit 1; }
+grep -q -- "-DLFS_MIN_SM=$LFS_MIN_SM\b" build/compile_commands.json \
+  || { echo "LichtFeld's runtime GPU floor is not SM $LFS_MIN_SM" >&2; exit 1; }
 # -k 0: the optional python typings step fails on a libstdc++exp stacktrace
 # symbol, so the build exits non-zero even though the executable links. That is
 # expected here, and `|| true` keeps `set -e` from treating it as fatal -- the
