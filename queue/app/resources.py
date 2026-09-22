@@ -16,6 +16,8 @@ different count on every machine.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -146,6 +148,46 @@ def unsupported_reason(compute_cap: Optional[str], built: str = None) -> Optiona
         return (f"compute capability {compute_cap} is not in this build "
                 f"(CUDA_ARCH {have}); rebuild with it")
     return None
+
+
+# cuInit in a child process: a broken driver can hang or crash the caller.
+_CUINIT = r"""
+import ctypes, sys
+try:
+    cu = ctypes.CDLL("libcuda.so.1")
+except OSError:
+    sys.exit(0)                      # no driver in here: "no GPU visible" says so
+r = cu.cuInit(0)
+if r:
+    name = ctypes.c_char_p()
+    cu.cuGetErrorName(r, ctypes.byref(name))
+    print((name.value or b"?").decode(), r)
+"""
+CUDA_ERROR: Optional[str] = None     # set once by probe_cuda() at startup
+
+
+def probe_cuda(timeout: float = 60) -> Optional[str]:
+    """Why CUDA cannot start on this machine, or None if it can.
+
+    nvidia-smi can list a healthy-looking GPU on a host where CUDA itself does
+    not initialise: a RunPod RTX 3090 on 2026-09-22 answered nvidia-smi but
+    cuInit returned CUDA_ERROR_UNKNOWN, and every job then died in the frames
+    stage after 0 s with an ffmpeg error. Checked once at startup so the
+    service can say plainly that the host is broken, and refuse jobs.
+    """
+    global CUDA_ERROR
+    try:
+        r = subprocess.run([sys.executable, "-c", _CUINIT], capture_output=True,
+                           text=True, timeout=timeout)
+        out = r.stdout.strip()
+        CUDA_ERROR = f"cuInit failed: {out}" if out else (
+            f"cuInit probe exited {r.returncode}" if r.returncode else None)
+    except subprocess.TimeoutExpired:
+        CUDA_ERROR = f"cuInit did not return within {timeout:.0f} s"
+    except OSError as exc:
+        CUDA_ERROR = None
+        print(f"cuda probe not run: {exc}")
+    return CUDA_ERROR
 
 
 def summary(gpus: Optional[list[dict]], concurrent: int) -> str:

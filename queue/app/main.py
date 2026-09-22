@@ -128,6 +128,11 @@ def _startup() -> None:
     # What the stages will be sized to (resources.py); telemetry has already
     # probed the GPUs, so this costs no extra nvidia-smi call later.
     print(resources.summary(telemetry.host()["gpus"], worker.max_concurrent()))
+    if GPUS and resources.probe_cuda():
+        print(f"ERROR: CUDA does not start on this machine ({resources.CUDA_ERROR}) "
+              f"although nvidia-smi lists the GPU. The host is faulty: no job can "
+              f"run here, new jobs are refused. On a rented GPU, destroy it and "
+              f"take another.")
     outputs.startup_check()
     if worker.enforce_start_paused():
         print("queue forced back to PAUSED on startup "
@@ -352,6 +357,10 @@ def _refuse_if_cannot_deliver() -> None:
     """Fail at submission, not after the GPU time: no GPU here can run this
     build (resources.unsupported_reason), or the result could not be
     delivered (outputs.problems)."""
+    if GPUS and resources.CUDA_ERROR:
+        raise HTTPException(400, f"CUDA does not start on this machine "
+                            f"({resources.CUDA_ERROR}): the host is faulty; "
+                            f"use another one")
     caps = gpu.compute_caps()
     mine = [g for g in GPUS if g in caps]
     if mine and all(resources.unsupported_reason(caps[g]) for g in mine):

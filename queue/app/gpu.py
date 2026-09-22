@@ -125,7 +125,8 @@ def status(own_pids: Iterable[int] = (), held: Iterable[int] = ()) -> list[dict]
         # A card the image cannot run on (older than CUDA_ARCH's floor) is
         # listed but never scheduled: failing it up front beats a job dying in
         # gsplat or LichtFeld minutes in.
-        unsupported = resources.unsupported_reason(compute_caps().get(g))
+        unsupported = (resources.CUDA_ERROR
+                       or resources.unsupported_reason(compute_caps().get(g)))
         schedulable = g in GPUS and not unsupported
         rows.append({
             "index": g,

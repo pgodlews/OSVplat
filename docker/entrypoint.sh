@@ -37,7 +37,7 @@ case "${1:-}" in
   *) exec "$@" ;;
 esac
 
-die() { echo "ERROR: $*" >&2; exit 1; }
+err() { echo "ERROR: $*" >&2; }
 
 # ------------------------------------------------------------------ SSH
 # Keys from any of: SSH_PUBLIC_KEYS (ours), SSH_PUBLIC_KEY (what Vast injects:
@@ -50,40 +50,63 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # here at first start, never baked into the image -- a shared host key would
 # let anyone impersonate every container. Fingerprints go to the log, which
 # Vast and RunPod show outside the container, to check the first connection.
-ssh_keys() {
-  local k
-  for k in "${SSH_PUBLIC_KEYS:-}" "${SSH_PUBLIC_KEY:-}" "${PUBLIC_KEY:-}" "$url_keys"; do
-    [ -n "$k" ] && printf '%s\n' "$k"
-  done
-  return 0
-}
+#
+# Nothing in this block exits. On Vast and RunPod an exiting container is
+# restarted and keeps billing, and RunPod shows no log outside its web
+# console: a bad key must be a loud line in the log, not a crash loop. That is
+# how RunPod's PUBLIC_KEY=null (sent when the account has no SSH key) looked
+# on 2026-09-22 (troubleshooting #27).
+KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) '
+clean_keys() { tr -d '\r' | sed 's/^[[:space:]]*//' | grep -v '^#' | grep -v '^$' || true; }
 
+own=$(printf '%s\n' "${SSH_PUBLIC_KEYS:-}" | clean_keys)
+if [ -n "${SSH_KEYS_URL:-}" ]; then
+  case "$SSH_KEYS_URL" in
+    https://*) own="$own
+$(curl -fsS --max-time 30 "$SSH_KEYS_URL" | clean_keys)" || err "could not fetch SSH_KEYS_URL" ;;
+    *) err "SSH_KEYS_URL must be https://; ignored" ;;
+  esac
+fi
+own=$(printf '%s\n' "$own" | clean_keys)
+bad=$(printf '%s\n' "$own" | grep -vE "$KEY_RE" || true)
+[ -z "$bad" ] || err "not an SSH public key, skipped: $(printf '%s' "$bad" | head -1 | cut -c1-40)..."
+# Provider-injected keys are a convenience; anything in them that is not a
+# key ("null", "None") is ignored.
+injected=$(printf '%s\n%s\n' "${SSH_PUBLIC_KEY:-}" "${PUBLIC_KEY:-}" | clean_keys)
+junk=$(printf '%s\n' "$injected" | grep -vE "$KEY_RE" || true)
+[ -z "$junk" ] || echo "OSVplat: ignoring a provider SSH key variable that holds no key ($(printf '%s' "$junk" | head -1 | cut -c1-12))"
+keys=$(printf '%s\n%s\n' "$own" "$injected" | grep -E "$KEY_RE" | sort -u || true)
+
+# Asked for SSH: our own variables are set, or the provider handed us a real key.
+SSH_WANTED=0
+[ -n "${SSH_PUBLIC_KEYS:-}${SSH_KEYS_URL:-}$keys" ] && SSH_WANTED=1
 SSH_ON=0
-if [ -n "${SSH_PUBLIC_KEYS:-}${SSH_PUBLIC_KEY:-}${PUBLIC_KEY:-}${SSH_KEYS_URL:-}" ]; then
-  [ "$(id -u)" = 0 ] || die "SSH needs the container to run as root (no 'user:'); unset the SSH key variables otherwise"
-  url_keys=""
-  if [ -n "${SSH_KEYS_URL:-}" ]; then
-    case "$SSH_KEYS_URL" in https://*) ;; *) die "SSH_KEYS_URL must be https://" ;; esac
-    url_keys=$(curl -fsS --max-time 30 "$SSH_KEYS_URL") || die "could not fetch SSH_KEYS_URL"
+if [ "$SSH_WANTED" = 1 ]; then
+  if [ "$(id -u)" != 0 ]; then
+    err "SSH needs the container to run as root (no 'user:'); sshd not started"
+  elif [ -z "$keys" ]; then
+    err "SSH was asked for but no valid public key was given; sshd not started"
+  else
+    install -d -m 700 /root/.ssh
+    (umask 077; printf '%s\n' "$keys" > /root/.ssh/authorized_keys)
+    # Made once per container: a restart keeps them, a new container gets new ones.
+    ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A >/dev/null
+    mkdir -p /run/sshd
+    if /usr/sbin/sshd -p "${SSH_PORT:-22}"; then
+      SSH_ON=1
+      echo "OSVplat: sshd on port ${SSH_PORT:-22}, $(wc -l < /root/.ssh/authorized_keys) key(s). Host key fingerprints:"
+      for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done | sed 's/^/  /'
+    else
+      err "sshd did not start"
+    fi
   fi
-  keys=$(ssh_keys | tr -d '\r' | sed 's/^[[:space:]]*//' | grep -v '^#' | grep -v '^$' || true)
-  bad=$(printf '%s\n' "$keys" | grep -vE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) ' || true)
-  [ -z "$bad" ] || die "not an SSH public key: $(printf '%s' "$bad" | head -1 | cut -c1-40)..."
-  [ -n "$keys" ] || die "the SSH key variables are set but hold no key"
-  install -d -m 700 /root/.ssh
-  (umask 077; printf '%s\n' "$keys" | sort -u > /root/.ssh/authorized_keys)
-  # Made once per container: a restart keeps them, a new container gets new ones.
-  ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A >/dev/null
-  mkdir -p /run/sshd
-  /usr/sbin/sshd -p "${SSH_PORT:-22}" || die "sshd did not start"
-  SSH_ON=1
-  echo "OSVplat: sshd on port ${SSH_PORT:-22}, $(wc -l < /root/.ssh/authorized_keys) key(s). Host key fingerprints:"
-  for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done | sed 's/^/  /'
 fi
 
 # The UI stays inside the container when SSH is the way in: reach it with
 # `ssh -L 8090:localhost:8090`. The token is still required.
-BIND=${QUEUE_BIND:-$([ "$SSH_ON" = 1 ] && echo 127.0.0.1 || echo 0.0.0.0)}
+# When SSH was asked for but could not start, it stays that way: a broken SSH
+# setup must not quietly publish the UI instead.
+BIND=${QUEUE_BIND:-$([ "$SSH_WANTED" = 1 ] && echo 127.0.0.1 || echo 0.0.0.0)}
 
 # ------------------------------------------------------------- input clip
 # INPUT_URL: fetch one clip into samples/ at start (a presigned GET, or any
@@ -128,6 +151,8 @@ if [ "$SSH_ON" = 1 ] && [ "$BIND" = 127.0.0.1 ]; then
   sp=${RUNPOD_TCP_PORT_22:-${VAST_TCP_PORT_22:-${SSH_PORT:-22}}}
   echo "OSVplat: ssh -p $sp -L 8090:localhost:$PORT root@$ip"
   echo "  then open http://localhost:8090/?token=$QUEUE_TOKEN"
+elif [ "$BIND" = 127.0.0.1 ]; then
+  echo "OSVplat: the UI listens on 127.0.0.1 only and SSH is not running; fix the SSH settings above"
 else
   echo "OSVplat: open http://<this-machine>:${PUBLIC_PORT:-$PORT}/?token=$QUEUE_TOKEN"
 fi

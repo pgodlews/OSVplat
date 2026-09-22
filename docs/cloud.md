@@ -148,10 +148,27 @@ them. This matters for local builds trimmed to one card
 (`--build-arg CUDA_ARCH=8.6`) that later run on another. The published image
 covers 7.5 to 12.0.
 
+Rented hosts can be faulty in ways `nvidia-smi` does not show. At startup the
+service also checks that CUDA itself starts (`cuInit`); on a host where it does
+not, the log says the host is faulty and jobs are refused
+([troubleshooting #29](troubleshooting.md)). Destroy it and rent another.
+
 ## Vast.ai
 
-- Launch in **entrypoint mode** (not the SSH or Jupyter modes: those replace
-  the image's entrypoint with Vast's own sshd and tunnel).
+- Launch in **entrypoint mode**. The SSH and Jupyter modes replace the
+  image's entrypoint with Vast's own setup, and with this image that setup
+  fails: Vast's sshd expects host keys baked into the image, and this image
+  deliberately has none ("sshd: no hostkeys available -- exiting", seen on
+  2026-09-22). Entrypoint mode is not the default everywhere: the `vastai` CLI
+  and the API create SSH-mode instances unless told otherwise. With the CLI,
+  end the command with an empty `--args`:
+
+  ```bash
+  vastai create instance <offer> --image ghcr.io/pgodlews/osvplat:0.1.3 --disk 100 \
+    --env "-p 22:22 -e SSH_PUBLIC_KEYS='ssh-ed25519 AAAA… you@host'" --args
+  ```
+
+  With the API or SDK, pass `runtype: "args"`.
 - Docker options: `-p 22:22` (plus `-e` for the variables above). Vast maps
   ports to random external ones and prints the right `ssh -p` line in our log
   from `VAST_TCP_PORT_22` and `PUBLIC_IPADDR`. Search with
@@ -167,8 +184,13 @@ covers 7.5 to 12.0.
 - A Pod from a custom template with this image, **TCP port 22** exposed.
   Don't expose 8090 as an HTTP port: RunPod's proxy makes it public, and
   requests over 100 s (uploads, log streams) are cut off.
-- Keys: RunPod injects your account's SSH keys as `PUBLIC_KEY`. The log's
+- Keys: RunPod injects your account's SSH keys as `PUBLIC_KEY`, and the
+  string `null` when the account has none; that is ignored, so pass your key
+  as `SSH_PUBLIC_KEYS` ([troubleshooting #27](troubleshooting.md)). The log's
   connect line uses `RUNPOD_PUBLIC_IP` and `RUNPOD_TCP_PORT_22`.
+- The container log, with the host key fingerprints, is only shown in
+  RunPod's web console (the API has no log endpoint), so compare the
+  fingerprint there on the first connection.
 - Container start command: leave it empty.
 - Container disk: ~60 GB. Anything outside `/workspace` is lost when a pod
   is stopped.

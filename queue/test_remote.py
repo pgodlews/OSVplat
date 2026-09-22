@@ -147,6 +147,39 @@ class Gpus(unittest.TestCase):
         with patch.object(gpu, "compute_caps", lambda: {}), patch.object(main, "GPUS", [0]):
             main._refuse_if_cannot_deliver()                      # unknown: not refused
 
+    def test_cuda_probe(self):
+        import subprocess as sp
+        from fastapi import HTTPException
+        from app import main
+        ok = sp.CompletedProcess([], 0, stdout="", stderr="")
+        bad = sp.CompletedProcess([], 0, stdout="CUDA_ERROR_UNKNOWN 999\n", stderr="")
+        with patch.object(resources.subprocess, "run", lambda *a, **k: ok):
+            self.assertIsNone(resources.probe_cuda())
+        with patch.object(resources.subprocess, "run", lambda *a, **k: bad):
+            self.assertIn("CUDA_ERROR_UNKNOWN", resources.probe_cuda())
+        try:
+            # A broken host: every GPU unsupported, jobs refused.
+            rows = {"gpu=index,uuid": [["0", "GPU-a"]],
+                    "compute-apps=gpu_uuid,pid,process_name,used_memory": [],
+                    "gpu=index,memory.used,memory.total,utilization.gpu": [["0", "1", "24576", "0"]],
+                    "gpu=index,compute_cap": [["0", "8.6"]]}
+            with patch.object(gpu, "_nvidia_smi", lambda q, extra=None: rows[q]), \
+                    patch.object(gpu, "GPUS", [0]), patch.object(gpu, "_caps", None):
+                st = gpu.status()[0]
+            self.assertFalse(st["available"])
+            self.assertIn("CUDA_ERROR_UNKNOWN", st["unsupported"])
+            with patch.object(main, "GPUS", [0]):
+                with self.assertRaises(HTTPException) as cm:
+                    main._refuse_if_cannot_deliver()
+            self.assertIn("faulty", cm.exception.detail)
+        finally:
+            resources.CUDA_ERROR = None
+        def hang(*a, **k):
+            raise sp.TimeoutExpired("x", 60)
+        with patch.object(resources.subprocess, "run", hang):
+            self.assertIn("did not return", resources.probe_cuda())
+        resources.CUDA_ERROR = None
+
     def test_probe_failure_refuses_nothing(self):
         with patch.object(gpu, "_nvidia_smi", lambda q, extra=None: None), \
                 patch.object(gpu, "_caps", None):
