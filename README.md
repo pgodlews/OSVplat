@@ -48,7 +48,9 @@ download `.ply`, `.sog` and `.spz` files.
 
 ## Requirements
 
-- A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (developed on
+- A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (the published
+  0.1.2/0.1.3 images need RTX 30xx or newer, see
+  [troubleshooting #31](docs/troubleshooting.md); developed on
   RTX 3090s; a Standard run peaked at 10 GB of VRAM), and ~20 GB of free disk
   per clip. Or a rented one: see [docs/cloud.md](docs/cloud.md).
 - Clips from a DJI Osmo 360 or Avata 360 (`.OSV`), or any stitched

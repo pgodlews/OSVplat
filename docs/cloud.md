@@ -159,8 +159,23 @@ RTX 5090 (12.0). Other cards, and anything below 7.5, show as unsupported with
 the reason in the startup log and the UI, and are never scheduled. When no GPU
 here can run the build, the API refuses new jobs (HTTP 400) instead of queueing
 them. This matters for local builds trimmed to one card
-(`--build-arg CUDA_ARCH=8.6`) that later run on another. The published image
-covers 7.5 to 12.0.
+(`--build-arg CUDA_ARCH=8.6`) that later run on another.
+
+Measured with the published 0.1.3 image (10 s Draft job on the 0198 clip,
+2026-09-22):
+
+| CC | Card | Training | PSNR / SSIM |
+|---|---|---|---|
+| 7.5 | RTX 2080 Ti (Vast) | **refused**: LichtFeld was built for 8.6 only ([troubleshooting #31](troubleshooting.md)) | – |
+| 8.0 | A100 | refused by the same floor (not run) | – |
+| 8.6 | RTX 3090 | 624 s | 35.18 / 0.9714 |
+| 9.0 | H100 SXM (Vast) | 566 s | 35.42 / 0.9715 |
+| 12.0 | RTX 5060 Ti (Vast) | 1132 s | 35.39 / 0.9714 |
+
+9.0 and 12.0 run from the 8.6 PTX that the driver compiles at startup.
+`scripts/setup_lichtfeld.sh` on main builds LichtFeld for every architecture in
+`CUDA_ARCH` and stops the build if it did not; the first image with that fix
+still has to be run on a 7.5 and an 8.0 card.
 
 Rented hosts can be faulty in ways `nvidia-smi` does not show. At startup the
 service also checks that CUDA itself starts (`cuInit`); on a host where it does

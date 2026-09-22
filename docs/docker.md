@@ -7,7 +7,10 @@ job data and optional model weights stay in folders on the workstation.
 ## Requirements
 
 - Linux with an NVIDIA GPU and driver **580 or newer** (`nvidia-smi` shows the
-  version). The image runs on RTX 20xx through 50xx (compute capability 7.5–12.0).
+  version). Built from source, the image runs on RTX 20xx through 50xx (compute
+  capability 7.5–12.0). The published 0.1.2 and 0.1.3 images train only on 8.6 and
+  newer (RTX 30xx/40xx/50xx, A10/A40/A6000, L4/L40, H100); an RTX 20xx, T4 or A100
+  is refused ([troubleshooting #31](troubleshooting.md)).
 - An x86-64 CPU with AVX2 and FMA (Intel Haswell / AMD Zen or newer). The
   published 0.1.1 image also needed AVX-512 by accident and crashes in training
   without it ([troubleshooting #25](troubleshooting.md)).
