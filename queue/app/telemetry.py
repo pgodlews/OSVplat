@@ -39,7 +39,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from . import db, gpu
+from . import db, gpu, resources
 from .config import (LOG_ROOT, QUEUE_ROOT, RUNS_ROOT, SPLAT_ROOT,
                      TELEMETRY_ENABLED, TELEMETRY_PLACEMENT, TELEMETRY_UPLOAD,
                      WEBHOOK_SECRET, WEBHOOK_URL, ssl_context)
@@ -96,15 +96,10 @@ def _cpu() -> dict:
         affinity = logical
     # A container limited with --cpus sees every host core in /proc and in its
     # affinity mask; only the cgroup quota says how much it may actually use.
-    quota = None
-    raw = _read("/sys/fs/cgroup/cpu.max")
-    if raw:
-        q, _, period = raw.strip().partition(" ")
-        if q != "max":
-            try:
-                quota = round(int(q) / int(period), 2)
-            except (ValueError, ZeroDivisionError):
-                pass
+    # resources.py reads cgroup v1 as well as v2: a RunPod host on v1 was
+    # recorded as 64 effective CPUs against a quota of 13.6 (2026-09-22).
+    quota = resources.cgroup_cpu_quota()
+    quota = round(quota, 2) if quota is not None else None
     effective = min(x for x in (affinity, quota) if x) if (affinity or quota) else None
     # Physical cores, from unique (physical id, core id) pairs.
     cores, pid = set(), None

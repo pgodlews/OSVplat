@@ -135,7 +135,15 @@ whose 16 visible CPUs matched its allowance did the same SfM in 1270 s. (Those
 runs predate this change; the 3267 s has not been re-measured with it.)
 
 On rented hosts SfM, which runs on the CPU, is the slow stage: training the
-same Smoke test took 122 s on an L4. Pick offers by CPU as well as GPU.
+same Smoke test took 122 s on an L4 and 96 s on a 3090. Pick offers by CPU as
+well as GPU, and by speed per core rather than core count. Smoke test SfM on
+the 0198 clip, 76 frames:
+
+| Host | CPUs used | SfM |
+|---|---|---|
+| Vast, Ryzen 7 7700X (2022) | 16 | 1270 s |
+| Vast, EPYC 7R32 (2020) | 46 of 96 | 2855 s |
+| RunPod, EPYC 7663, 178 threads on a 23.8-CPU quota (before this release) | 23 | 3267 s |
 
 GPUs are checked against the build. The image records the architectures it
 was compiled for (`OSVPLAT_CUDA_ARCH`, from the build's `CUDA_ARCH`). A card is
