@@ -45,6 +45,8 @@ Code comments refer to these by number (`docs/troubleshooting.md #18`).
 
 29. **Rented GPU: nvidia-smi fine, every job fails in frames at once.** A RunPod RTX 3090 (driver 580.178.04) on 2026-09-22 listed a healthy, idle GPU in `nvidia-smi`, but CUDA itself did not start: ffmpeg `cu->cuInit(0) failed -> CUDA_ERROR_UNKNOWN`, torch `CUDA unknown error`, so the frames stage exited 187 after 0 s. The host was faulty, not the image. The service now calls `cuInit` once at startup; when it fails, the log says the host is faulty, the GPU shows as unsupported with that reason, and the API refuses jobs. Destroy the instance and rent another.
 
+30. **0.1.3: `upload.state: failed`, "HTTP 403 Forbidden", with an AWS presigned PUT URL.** 0.1.3 sent a `Content-MD5` header with the result upload. A presigned PUT URL signs only `host`, and AWS S3 refuses a request carrying extra headers the URL did not sign ("There were headers present in the request which were not signed"); versitygw accepted it, which is how it passed testing. Measured 2026-09-22 against a fresh AWS bucket: the same PUT succeeds without the header. From 0.1.4 the header is gone and the upload checks the `ETag` S3 returns (the stored object's MD5) instead. With 0.1.3, give `OUTPUT_UPLOAD_URL` a presigned POST target (JSON, see [cloud.md](cloud.md#settings)), which is unaffected, or copy `runs/job<id>/job<id>.tar` off over SSH: it is kept after a failed upload.
+
 ## Fisheye rig traps
 
 - **Read every `DewarpParams` field.** Dropping `k5` (field 15) made an accurate calibration look wrong at the rim, and rebuilding the rig from yaw/pitch/roll instead of `cam_extri_q` (field 28) put the lenses 1.65° apart from where they are.

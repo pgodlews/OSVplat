@@ -206,17 +206,20 @@ class Target(unittest.TestCase):
 
 
 class _Sink(http.server.BaseHTTPRequestHandler):
+    """A PUT endpoint that behaves like AWS S3 with a presigned URL: refuses
+    unsigned extra headers (Content-MD5), returns the body's MD5 as ETag."""
     got: list = []
     status = 200
+    corrupt = False          # answer with the ETag of a damaged body
 
     def do_PUT(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
-        md5 = self.headers.get("Content-MD5")
-        ok = md5 == base64.b64encode(hashlib.md5(body).digest()).decode()
-        type(self).got.append({"path": self.path, "body": body, "md5_ok": ok,
+        unsigned = "Content-MD5" in self.headers
+        type(self).got.append({"path": self.path, "body": body, "unsigned_md5": unsigned,
                                "ctype": self.headers.get("Content-Type")})
-        code = type(self).status if ok else 400       # what S3 does on a bad MD5
-        self.send_response(code)
+        self.send_response(403 if unsigned else type(self).status)
+        stored = body + (b"x" if type(self).corrupt else b"")
+        self.send_header("ETag", '"%s"' % hashlib.md5(stored).hexdigest())
         self.end_headers()
 
     def log_message(self, *a):
@@ -250,7 +253,7 @@ class Upload(unittest.TestCase):
         cls.srv.shutdown()
 
     def setUp(self):
-        _Sink.got, _Sink.status = [], 200
+        _Sink.got, _Sink.status, _Sink.corrupt = [], 200, False
         for d in config.RUNS_ROOT.glob("job*"):
             (d / "upload.json").unlink(missing_ok=True)
 
@@ -260,7 +263,7 @@ class Upload(unittest.TestCase):
         self.assertEqual(st["state"], "done", st)
         got = _Sink.got[0]
         self.assertEqual(got["path"], f"/osv/job{jid:05d}.tar?sig=x")
-        self.assertTrue(got["md5_ok"])
+        self.assertFalse(got["unsigned_md5"])          # AWS refuses unsigned Content-MD5
         self.assertEqual(got["ctype"], "application/x-tar")
         self.assertEqual(st["sha256"], hashlib.sha256(got["body"]).hexdigest())
         self.assertNotIn("sig=x", json.dumps(st))                 # no credential in status
@@ -271,6 +274,21 @@ class Upload(unittest.TestCase):
         self.assertEqual(names[f"job{jid:05d}/splat_3000.ply"].size, 1000)
         self.assertEqual(outputs.status(jid)["state"], "done")
         self.assertFalse((config.RUNS_ROOT / f"job{jid:05d}" / f"job{jid:05d}.tar").exists())
+
+    def test_damaged_upload_fails(self):
+        jid = make_done_job({"splat.ply": b"x" * 10})
+        _Sink.corrupt = True
+        st = outputs.upload(jid, {"method": "PUT", "url": f"{self.base}/{{job}}.tar"})
+        self.assertEqual(st["state"], "failed")
+        self.assertIn("damaged", st["error"])
+        self.assertEqual(len(_Sink.got), 3)                       # retried
+
+    def test_etag_rules(self):
+        md5 = hashlib.md5(b"a").hexdigest()
+        self.assertIsNone(outputs.etag_problem(f'"{md5}"', md5))
+        self.assertIsNone(outputs.etag_problem(None, md5))                    # no ETag
+        self.assertIsNone(outputs.etag_problem('"9b2cf535f27731c974343645a3985328-3"', md5))  # multipart
+        self.assertIn("damaged", outputs.etag_problem('"%s"' % ("0" * 32), md5))
 
     def test_rejected_upload_fails_loudly_and_keeps_archive(self):
         jid = make_done_job({"splat.ply": b"x" * 10})

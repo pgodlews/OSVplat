@@ -45,7 +45,10 @@ scripts/presign_s3.py s3://my-bucket/osvplat/run1 --clip ~/clips/DJI_0198.OSV --
 ```
 
 It uploads the clip and prints `INPUT_URL`, `INPUT_SHA256` and
-`OUTPUT_UPLOAD_URL`. Start the container with those plus your SSH public key
+`OUTPUT_UPLOAD_URL`. A presigned URL cannot outlive the credentials that
+signed it: with temporary credentials (`aws login`, SSO, an assumed role) it
+stops working when that session ends, whatever `--expires` says. With
+`aws login` credentials boto3 also needs `pip install "botocore[crt]"`. Start the container with those plus your SSH public key
 (the provider-specific parts are below):
 
 ```bash
@@ -90,7 +93,10 @@ Compose's `user:` set, the SSH variables are refused with an error.
 `OUTPUT_UPLOAD_URL` details:
 
 - The tar holds the job's `.ply`/`.sog`/`.spz` and `telemetry.json` under
-  `job<id>/`. A PUT carries `Content-MD5`, so S3 rejects a damaged body.
+  `job<id>/`. After a PUT, the `ETag` S3 returns (the stored object's MD5)
+  is compared with the archive's; a mismatch fails the upload. (0.1.3 sent a
+  `Content-MD5` header instead, which AWS refuses on a presigned PUT: use a
+  POST target with 0.1.3, or 0.1.4.)
 - A plain presigned URL names **one object**, so it is used once: the first
   job that finishes uploads, and later jobs are refused
   (`upload.state: refused`) rather than overwriting it. For several jobs, use a
@@ -216,9 +222,9 @@ hosts go offline, a pod is terminated by mistake. What that costs:
   instance.
 - **No half-written result reaches the bucket.** The tar is written under a
   temporary name and renamed when complete. It then goes up in a single PUT
-  (or POST), which S3 stores only once the whole body has arrived and matched
-  its `Content-MD5`. An upload cut off halfway leaves nothing, or the previous
-  object, never a truncated file.
+  (or POST), which S3 stores only once the whole body has arrived (its
+  length is fixed by `Content-Length`). An upload cut off halfway leaves
+  nothing, or the previous object, never a truncated file.
 - **The presigned URLs outlive the instance.** They work until they expire,
   for whoever has them, and the host could read them. Keep `--expires` close
   to the run's length. Give each run its own result key (or prefix), so a

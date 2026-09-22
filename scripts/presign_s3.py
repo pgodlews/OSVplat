@@ -15,7 +15,7 @@ already there), then prints the environment for the container:
 
 --expires (hours, default 24) must outlast the whole run: pull, queue, upload.
 SigV4 allows up to 7 days; temporary credentials (SSO, roles) cap it at their
-own expiry. --endpoint-url for R2, B2, MinIO, versitygw and other S3-compatible
+own expiry: a URL signed with them dies with the session. --endpoint-url for R2, B2, MinIO, versitygw and other S3-compatible
 stores (path-style URLs, SigV4). Uses your normal AWS credentials, or
 --env-file with ROOT_ACCESS_KEY=/ROOT_SECRET_KEY= (or AWS_ACCESS_KEY_ID=/
 AWS_SECRET_ACCESS_KEY=) lines; they stay here and are never printed.
@@ -59,7 +59,7 @@ def main() -> None:
         import boto3
         from botocore.config import Config
     except ImportError:
-        sys.exit("needs boto3: pip install boto3")
+        sys.exit("needs boto3: pip install boto3 (and botocore[crt] for `aws login` credentials)")
 
     def split(s3url):
         u = urlsplit(s3url)
@@ -99,7 +99,8 @@ def main() -> None:
                                         ExpiresIn=seconds)
         lines += [f"INPUT_URL={url}", f"INPUT_SHA256={sha256(a.clip)}"]
     # No ContentType/ContentMD5 in Params: signed headers would have to match
-    # exactly; the container sends Content-MD5 unsigned and S3 still checks it.
+    # exactly. The container sends no Content-MD5 (AWS refuses unsigned extra
+    # headers on a presigned PUT); it checks the returned ETag instead.
     url = s3.generate_presigned_url("put_object", Params={"Bucket": rbucket, "Key": rkey},
                                     ExpiresIn=seconds)
     lines.append(f"OUTPUT_UPLOAD_URL={url}")

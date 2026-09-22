@@ -9,8 +9,12 @@ and the log to check the download against.
 After a job ends done, its export files (the .ply/.sog/.spz the download
 buttons serve; symlinks into the train cache, followed) are packed as
 job<id>.tar and sent with the same request builder as telemetry, so both
-accept a plain PUT URL or a presigned S3 POST. A PUT also carries Content-MD5,
-so S3 rejects a body that arrived damaged.
+accept a plain PUT URL or a presigned S3 POST. After a PUT, the ETag S3 returns
+(the object's MD5 for a single-part upload) is compared with the archive's MD5,
+so a body that arrived damaged fails the upload. Not a Content-MD5 header: AWS
+refuses a presigned PUT carrying headers the URL did not sign ("There were
+headers present in the request which were not signed"), and the MD5 is not
+known when the URL is made. versitygw accepted it, AWS did not (2026-09-22).
 
 Fails loudly, never silently: upload.json in the job's run dir records
 state/bytes/sha256/error, the job detail API returns it, the webhook sends
@@ -200,18 +204,29 @@ def build_archive(job_id: int, files: list[Path], out: Path) -> dict:
             sha.update(chunk)
             md5.update(chunk)
     return {"bytes": out.stat().st_size, "sha256": sha.hexdigest(),
-            "md5_b64": base64.b64encode(md5.digest()).decode()}
+            "md5": md5.hexdigest()}
 
 
-def request(target: dict, job_id: int, name: str, data: bytes,
-            md5_b64: str) -> urllib.request.Request:
-    """telemetry.upload_request, plus the tar content type and Content-MD5."""
+def request(target: dict, job_id: int, name: str, data: bytes) -> urllib.request.Request:
+    """telemetry.upload_request with the tar content type. No other headers:
+    a presigned PUT signs only `host`, and AWS refuses unsigned extras (a
+    Content-Type is the one it tolerates)."""
     t = dict(target)
     t["headers"] = {"Content-Type": "application/x-tar", **(target.get("headers") or {})}
-    req = telemetry.upload_request(t, job_id, name, data)
-    if (target.get("method") or "PUT").upper() == "PUT":
-        req.add_header("Content-MD5", md5_b64)
-    return req
+    return telemetry.upload_request(t, job_id, name, data)
+
+
+def etag_problem(etag: Optional[str], md5_hex: str) -> Optional[str]:
+    """A damaged upload, judged by the ETag S3 returned, or None.
+
+    Only a plain 32-hex ETag is an MD5: multipart uploads ("...-3") and
+    SSE-KMS objects have other ETags, and some servers send none. Those are
+    not checked rather than failed; sha256 in upload.json still is.
+    """
+    e = (etag or "").strip().strip('"').lower()
+    if len(e) == 32 and all(c in "0123456789abcdef" for c in e) and e != md5_hex:
+        return f"stored object's ETag {e} is not the archive's MD5 {md5_hex}: damaged in transit"
+    return None
 
 
 def _single_object_owner(target: dict, dest: str) -> Optional[int]:
@@ -259,11 +274,13 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
         err = None
         for attempt in range(attempts):
             try:
-                req = request(target, job_id, name, data, meta["md5_b64"])
+                req = request(target, job_id, name, data)
                 with urllib.request.urlopen(req, timeout=600, context=ssl_context()) as r:
                     r.read()
-                err = None
-                break
+                    etag = r.headers.get("ETag")
+                err = etag_problem(etag, meta["md5"])
+                if err is None:
+                    break
             except Exception as exc:                          # noqa: BLE001
                 # HTTPError's text can echo the URL; keep only code and reason.
                 err = (f"HTTP {exc.code} {exc.reason}" if hasattr(exc, "code")
