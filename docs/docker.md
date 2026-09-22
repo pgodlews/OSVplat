@@ -185,16 +185,21 @@ releases are built on a workstation with `scripts/publish_image.sh`, which:
 
 1. clones the release **tag from GitHub** into a temporary folder, so nothing
    untracked or ignored in a working copy can reach the image;
-2. builds it (all GPU architectures: several hours);
-3. **scans the image for private data** (your hostname, home path and git
-   e-mail, `.env` files, keys, tokens, clips) and stops on any finding;
-4. with `--push`: uploads it with an SBOM and build provenance attached, signs
-   the digest with cosign, and prints the lines for the release notes.
+2. builds it **once** (all GPU architectures: several hours). Without
+   `--push` the image stays local; with it, the image goes, with an SBOM and
+   build provenance attached, to a **private** staging package
+   (`ghcr.io/pgodlews/osvplat-staging`);
+3. **scans that exact image for private data** (your hostname, home path and
+   git e-mail, `.env` files, keys, tokens, clips) and stops on any finding;
+4. with `--push`: copies the scanned image to the public `:VERSION` and
+   `:latest` tags on the registry (same digest, no rebuild), signs the digest
+   with cosign, and prints the lines for the release notes.
 
 One-time setup:
 
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u pgodlews --password-stdin   # token with write:packages
+gh auth refresh -s read:packages   # the script checks that the staging package is private
 cosign generate-key-pair           # in the repo root; commit cosign.pub, keep cosign.key private
 ```
 
@@ -203,9 +208,10 @@ Each release:
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 scripts/publish_image.sh 0.1.0            # build + scan only; pushes nothing
-scripts/publish_image.sh 0.1.0 --push     # same build from cache, then push + sign
+scripts/publish_image.sh 0.1.0 --push     # build once to staging, scan it, publish + sign
 ```
 
-After the first push, make the package public once in its settings on GitHub,
-or users cannot pull it. `scripts/publish_image.sh --scan <image>` runs just
+After the first push, make the `osvplat` package public once in its settings
+on GitHub, or users cannot pull it. Leave `osvplat-staging` private: it holds
+images before they are scanned, and the script refuses to use it otherwise. `scripts/publish_image.sh --scan <image>` runs just
 the leak scan on any local image.

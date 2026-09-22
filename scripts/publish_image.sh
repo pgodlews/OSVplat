@@ -2,7 +2,8 @@
 # Build, check and publish the OSVplat image to GHCR (maintainers).
 #
 #   scripts/publish_image.sh 0.1.0            clone tag v0.1.0, build, scan. Pushes nothing.
-#   scripts/publish_image.sh 0.1.0 --push     ...then push, attach SBOM + provenance, sign
+#   scripts/publish_image.sh 0.1.0 --push     build once to a private staging package,
+#                                             scan that exact image, then publish + sign
 #   scripts/publish_image.sh --scan IMAGE     only run the leak scan on a local image
 #
 # Before --push, once:  docker login ghcr.io -u <github-user>  (a token with
@@ -13,10 +14,14 @@
 # Why each step:
 #   * builds from a fresh clone of the GitHub tag, never a working copy, so
 #     untracked or ignored local files cannot end up in the image;
-#   * scans the built image for private data and refuses to push on a hit;
-#   * pushes with an SBOM (every package inside) and build provenance (source
-#     commit, build arguments) attached, and signs the digest, so users can
-#     check what the image contains, where it came from and that it is yours.
+#   * scans the built image for private data and refuses to publish on a hit;
+#   * with --push, builds ONCE: the image, its SBOM (every package inside) and
+#     build provenance (source commit, build arguments) go to a private staging
+#     package, that exact digest is pulled and scanned, and only a clean image
+#     is copied to the public tags (registry-side, no rebuild) and signed. The
+#     old flow built twice (--load to scan, then again to push) and BuildKit
+#     re-ran the whole build stage the second time: +4 h for 0.1.2 and 0.1.3,
+#     and the image pushed was not the image scanned.
 set -euo pipefail
 
 REPO_URL=${REPO_URL:-https://github.com/pgodlews/OSVplat.git}
@@ -28,6 +33,9 @@ IMAGE_NAME=${IMAGE_NAME:-ghcr.io/pgodlews/osvplat}
 CUDA_ARCH=${CUDA_ARCH:-7.5;8.0;8.6;8.9;9.0;12.0}
 BUILD_JOBS=${BUILD_JOBS:-8}
 BUILDER=${BUILDER:-osvplat-publish}
+# Where --push builds go before the scan. Must be a PRIVATE package: it holds
+# the image before it is known to be clean. GHCR makes new packages private.
+STAGING=${STAGING:-${IMAGE_NAME}-staging}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -150,28 +158,63 @@ docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
   || docker buildx create --name "$BUILDER" --driver docker-container >/dev/null
 BUILD=(docker buildx build --builder "$BUILDER" --platform linux/amd64
        --build-arg "CUDA_ARCH=$CUDA_ARCH" --build-arg "JOBS=$BUILD_JOBS"
-       --build-arg "VERSION=$VERSION" --build-arg "REVISION=$REVISION"
-       -t "$IMAGE_NAME:$VERSION" -t "$IMAGE_NAME:latest")
+       --build-arg "VERSION=$VERSION" --build-arg "REVISION=$REVISION")
 
-# ---------------------------------------------------------------- build + scan
-echo "==> building for CUDA_ARCH=$CUDA_ARCH (hours for the full list)"
+# GitHub's visibility of a ghcr.io package: private, public, none (does not
+# exist yet) or unknown (cannot tell: no gh, or its token lacks read:packages).
+package_visibility() {
+  local path=${1#ghcr.io/} out
+  command -v gh >/dev/null || { echo unknown; return; }
+  if out=$(gh api "/users/${path%%/*}/packages/container/${path#*/}" --jq .visibility 2>&1); then
+    echo "$out"
+  elif grep -qi "package not found" <<< "$out"; then
+    echo none
+  else
+    echo unknown
+  fi
+}
+
 t0=$(date +%s)
-"${BUILD[@]}" --load "$WORK/src"
-echo "==> built in $(( ($(date +%s)-t0)/60 )) min: $(docker image inspect -f '{{.Size}}' "$IMAGE_NAME:$VERSION" | awk '{printf "%.1f GB", $1/1e9}')"
-scan_image "$IMAGE_NAME:$VERSION"
-
 if [ $PUSH = 0 ]; then
+  # ---------------------------------------------------------------- build + scan
+  echo "==> building for CUDA_ARCH=$CUDA_ARCH (hours for the full list)"
+  "${BUILD[@]}" -t "$IMAGE_NAME:$VERSION" --load "$WORK/src"
+  echo "==> built in $(( ($(date +%s)-t0)/60 )) min: $(docker image inspect -f '{{.Size}}' "$IMAGE_NAME:$VERSION" | awk '{printf "%.1f GB", $1/1e9}')"
+  scan_image "$IMAGE_NAME:$VERSION"
   echo
   echo "Built and scanned $IMAGE_NAME:$VERSION ($REVISION). Nothing pushed; rerun with --push."
   exit 0
 fi
 
-# ---------------------------------------------------------------- push + sign
-# Same builder and arguments, so every layer is a cache hit: this only adds
-# the attestations and uploads.
-echo "==> pushing with SBOM and provenance"
-"${BUILD[@]}" --sbom=true --provenance=mode=max --metadata-file "$WORK/meta.json" --push "$WORK/src"
+# ------------------------------------------- build once, push to staging, scan
+# A missing package answers "not found" even to a token that could not read
+# it, so first prove the token can read packages at all, on the public one.
+case $(package_visibility "$IMAGE_NAME") in
+  public|private|none) ;;
+  *) die "cannot read package visibility: gh needs read:packages (gh auth refresh -s read:packages)" ;;
+esac
+case $(package_visibility "$STAGING") in
+  private|none) ;;
+  public) die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)" ;;
+  *) die "cannot check $STAGING's visibility: needs gh logged in with read:packages (gh auth refresh -s read:packages)" ;;
+esac
+echo "==> building for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION"
+"${BUILD[@]}" -t "$STAGING:$VERSION" --sbom=true --provenance=mode=max \
+  --metadata-file "$WORK/meta.json" --push "$WORK/src"
 DIGEST=$(python3 -c "import json;print(json.load(open('$WORK/meta.json'))['containerimage.digest'])")
+echo "==> built and staged in $(( ($(date +%s)-t0)/60 )) min: $STAGING@$DIGEST"
+vis=$(package_visibility "$STAGING")
+[ "$vis" = private ] || die "$STAGING is '$vis' after the push, not private: delete $STAGING:$VERSION now, it is not scanned"
+docker pull -q "$STAGING@$DIGEST" >/dev/null
+scan_image "$STAGING@$DIGEST"
+
+# ------------------------------------------------------------- publish + sign
+# A registry-side copy of the index: image, SBOM and provenance, same digest.
+echo "==> publishing $IMAGE_NAME:$VERSION and :latest (copy, no rebuild)"
+docker buildx imagetools create -t "$IMAGE_NAME:$VERSION" -t "$IMAGE_NAME:latest" "$STAGING@$DIGEST"
+got=$(docker buildx imagetools inspect "$IMAGE_NAME:$VERSION" --format '{{json .Manifest}}' \
+      | python3 -c "import json,sys;print(json.load(sys.stdin)['digest'])")
+[ "$got" = "$DIGEST" ] || die "published digest $got is not the scanned $DIGEST"
 REF="$IMAGE_NAME@$DIGEST"
 if [ $SIGN = 1 ]; then
   echo "==> signing $REF (asks for the key's password)"
