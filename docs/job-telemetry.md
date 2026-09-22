@@ -56,6 +56,14 @@ off, rather than silently sending nothing; it never stops jobs from running,
 and telemetry is still written locally. A self-signed endpoint needs
 `QUEUE_TLS_INSECURE=1` ([cloud.md](cloud.md#settings)).
 
+Not every S3-compatible server honours a POST policy's own expiration.
+versitygw v1.8.0 answered "Invalid according to Policy: Policy expired" to a
+policy about an hour after it was signed, although its `expiration` was
+12 hours out (2026-09-22: 204 at +55 min, 403 at +62 min; AWS S3 honours the
+expiration). Telemetry is uploaded after every stage, so on such a server the
+records of a job longer than an hour stop arriving; the job and its
+`OUTPUT_UPLOAD_URL` result (a presigned PUT, unaffected) are fine.
+
 ## Webhook
 
 Optional, separate from the record: set `QUEUE_WEBHOOK_URL` and the queue
