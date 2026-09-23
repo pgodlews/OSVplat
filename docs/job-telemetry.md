@@ -35,6 +35,8 @@ every job with the same options shares, while telemetry belongs to one job.
 | `QUEUE_TELEMETRY_UPLOAD` | unset | JSON upload target; unset means nothing is sent anywhere |
 | `QUEUE_WEBHOOK_URL` | unset | POST a JSON event per stage and job end ([Webhook](#webhook)) |
 | `QUEUE_WEBHOOK_SECRET` | unset | sign webhook bodies with HMAC-SHA256 |
+| `QUEUE_BENCHMARK` | `0` | `1` runs the [host benchmark](#benchmark) once at startup, before any job starts |
+| `QUEUE_BENCHMARK_DISK_GB` | `2` | size of the benchmark's disk test file |
 | `QUEUE_TELEMETRY_PLACEMENT` | unset | JSON object copied into each record as `placement`, e.g. `{"provider": "…", "region": "…", "price_per_hour": 0.5}`, for whoever launched the machine |
 
 Both files are uploaded once per job, when it has ended (done, failed or
@@ -156,6 +158,34 @@ shows next to the stage timings. Nothing extra is sent to measure it.
 | `output` | `state`, `bytes`, `seconds` (the successful request alone), `mb_s`, `attempts`, `pack_s` (building the archive), `ended`. Null when there is no `OUTPUT_UPLOAD_URL`. The upload ends after the job does, so `telemetry.json` is written once more when it finishes, and only then uploaded |
 
 Neither carries the URL, the bucket or the clip name.
+
+## Benchmark
+
+A fixed workload, so that machines compare: per-job timings do not, because
+every clip is different. `POST /api/benchmark` starts it and returns
+`{"state": "running", ...}`; `GET /api/benchmark` returns the running state or
+the last result, which is also kept in `QUEUE_ROOT/benchmark.json`. It takes
+one to two minutes and holds the whole machine: it is refused (HTTP 409) while
+a job or compare render runs, no job starts until it ends, and `/api/status`
+shows `benchmark_running`. `QUEUE_BENCHMARK=1` runs it at startup.
+
+Every input is generated from a fixed seed; no clip is read. The record holds
+raw scores only. Deciding whether a machine is good enough is left to whoever
+launched it.
+
+| Field | Content |
+|---|---|
+| `state` | `running`, `done`, or `failed` when any part failed (the other parts still ran and have scores) |
+| `errors` | per part, what went wrong. A GPU that is busy with a foreign process is `"gpu": "no free GPU: ..."` and fails the run |
+| `cpu` | a synthetic 3840×1920 frame: JPEG decode and encode per second on one thread; SIFT extract (1920×960, about 7500 features) and match per second on one thread; decode and SIFT per second with one process per allowed CPU (`processes`, the effective CPUs in `host`), and `decode_scaling` / `sift_scaling`: how many single cores that was worth |
+| `memory` | `copy_gb_s`: single-thread copy of a 512 MiB buffer |
+| `disk` | `write_fsync_mb_s` and `read_mb_s` of a `QUEUE_BENCHMARK_DISK_GB` file under `QUEUE_ROOT`, read back with the page cache dropped (`cache_dropped`; false where the OS cannot, such as macOS) |
+| `gpu` | `device`; `torch_import_s`, `cuda_init_s`; `matmul_fp32_tflops` (TF32 off) and `matmul_fp16_tflops` at 8192²; `d2d_copy_gb_s`; `h2d_pinned_gb_s` and `d2h_pinned_gb_s` for 1 GiB (a card on a narrow slot or riser shows here); `gsplat_it_s`: forward + backward of 1 M Gaussians at 1920×1080 |
+| `resources` | the [stage sampler](#gpu-health) over the run, every 2 s: GPU power, clocks, clock reasons and PCIe link under load, CPU seconds and cores busy |
+| `durations_s`, `wall_s`, `started`, `ended`, `gpu_index` | timing, and which GPU ran the GPU part |
+| `host`, `software`, `placement` | as in a job record |
+
+The log is `QUEUE_ROOT/logs/benchmark.log`.
 
 ## What is left out
 

@@ -458,7 +458,7 @@ def start_sampler(gpu_index: Optional[int], pid: int,
 def finish_sampler(job_id: Optional[int], stage: str,
                    sampler: Optional[ResourceSampler], wall_s: float) -> Optional[dict]:
     """Stop the sampler and return its summary, recorded for the job if one
-    is given. Never raises.
+    is given (the benchmark passes None). Never raises.
 
     Called from the stage's `finally`: an exception here would replace the
     stage's own outcome, so a telemetry bug would fail a healthy job.

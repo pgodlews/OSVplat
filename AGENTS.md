@@ -22,7 +22,9 @@ Run from the repo root, no GPU needed:
 python3 queue/test_stages.py && python3 queue/test_worker.py
 python3 queue/test_regressions.py && python3 queue/test_distance.py
 python3 queue/test_telemetry.py && python3 queue/test_remote.py
+python3 queue/test_benchmark.py
 python3 scripts/test_avata_motion.py && python3 scripts/test_imu_select.py
+python3 scripts/test_benchmark.py                      # numpy + OpenCV; GPU part with torch
 ~/splat/venv/bin/python scripts/test_fisheye.py        # needs pycolmap
 ```
 

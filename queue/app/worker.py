@@ -52,6 +52,9 @@ _lock = threading.Lock()
 # card before either process shows up in GPU telemetry.
 _alloc_lock = threading.Lock()
 _stop = threading.Event()
+# Set while the host benchmark runs: it measures the whole machine (every
+# core, the disk, a GPU), so nothing is dispatched or reserved beside it.
+_exclusive = threading.Event()
 
 
 def own_pids() -> list[int]:
@@ -158,7 +161,8 @@ def reserve_gpu() -> Iterator[Optional[int]]:
     """
     token = uuid.uuid4().hex
     with _alloc_lock:
-        free = gpu.free_gpus(own_pids=own_pids(), held=held_gpus())
+        free = [] if _exclusive.is_set() else gpu.free_gpus(
+            own_pids=own_pids(), held=held_gpus())
         if not free:
             chosen = None
         else:
@@ -170,6 +174,35 @@ def reserve_gpu() -> Iterator[Optional[int]]:
     finally:
         with _lock:
             _reserved.pop(token, None)
+
+
+@contextlib.contextmanager
+def exclusive() -> Iterator[Optional[list[int]]]:
+    """Hold the whole machine for the block: yields the free GPUs, or None.
+
+    None when anything of this service's is running (a job, a render, another
+    holder); the caller refuses rather than waits. While held, the dispatcher
+    starts no job and reserve_gpu() hands out nothing.
+    """
+    with _alloc_lock:
+        with _lock:
+            busy = bool(_held or _reserved) or _exclusive.is_set()
+        if busy:
+            got = None
+        else:
+            _exclusive.set()
+            got = gpu.free_gpus(own_pids=own_pids(), held=[])
+    if got is None:
+        yield None
+        return
+    try:
+        yield got
+    finally:
+        _exclusive.clear()
+
+
+def exclusive_held() -> bool:
+    return _exclusive.is_set()
 
 
 # --------------------------------------------------------------- termination
@@ -816,8 +849,10 @@ def dispatcher() -> None:
                 with _alloc_lock:
                     with _lock:
                         in_flight = len(_held)
-                    free = gpu.free_gpus(own_pids=own_pids(),
-                                         held=held_gpus())
+                    # Under _alloc_lock, which exclusive() sets it under: a
+                    # look before taking the lock could race a benchmark start.
+                    free = [] if _exclusive.is_set() else gpu.free_gpus(
+                        own_pids=own_pids(), held=held_gpus())
                     if free and in_flight < max_concurrent():
                         row = db.next_queued()
                         if row is not None:
@@ -920,6 +955,8 @@ def running_state() -> dict:
         reserved = dict(_reserved)
     all_held = list(held.values()) + list(reserved.values())
     return {"paused": paused(), "held": held,
+            # The host benchmark holds the machine: nothing is dispatched.
+            "benchmark_running": _exclusive.is_set(),
             "reserved": sorted(set(reserved.values())),
             "max_concurrent": max_concurrent(),
             "scheduler_error": db.get_setting(SCHED_ERROR_KEY, "") or None,

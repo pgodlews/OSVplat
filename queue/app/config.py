@@ -29,6 +29,7 @@ PERSON_MASKS = SCRIPTS / "70_person_masks.py"
 MASK_PY = Path(os.environ.get("QUEUE_MASK_PY", GS_PY)).expanduser()
 MODELS_ROOT = Path(os.environ.get("QUEUE_MODELS_DIR", SPLAT_ROOT / "models")).expanduser()
 RENDER_COMPARE = SCRIPTS / "93_render_compare.py"
+BENCHMARK = SCRIPTS / "benchmark.py"               # fixed-workload host benchmark
 
 # Raw DJI dual fisheye (.OSV) runs its own stage implementations -- no stitch.
 # See stages.py "fisheye rig" and docs/how-it-works.md, "Fisheye rig".
@@ -177,6 +178,12 @@ try:
     OUTPUT_UPLOAD = _upload_target("OUTPUT_UPLOAD_URL")
 except ValueError as exc:
     OUTPUT_UPLOAD, OUTPUT_UPLOAD_ERROR = {}, f"OUTPUT_UPLOAD_URL: {exc}"
+
+# Host benchmark (scripts/benchmark.py, docs/job-telemetry.md "Benchmark"):
+# POST /api/benchmark runs it; QUEUE_BENCHMARK=1 also runs it once at startup,
+# before any job is dispatched.
+BENCHMARK_AT_START = _flag("QUEUE_BENCHMARK", "0")
+BENCHMARK_DISK_GB = float(os.environ.get("QUEUE_BENCHMARK_DISK_GB", "2"))
 
 # Optional webhook: a small JSON event POSTed when a stage starts or finishes
 # and when a job ends (docs/job-telemetry.md, "Webhook"). Off unless a URL is

@@ -22,9 +22,10 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import (db, estimate, gpu, metrics, outputs, progress, resources,
+from . import (benchmark, db, estimate, gpu, metrics, outputs, progress, resources,
                retention, telemetry, worker)
-from .config import (CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED, MODELS_ROOT, QUEUE_TOKEN,
+from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED,
+                     MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, JobConfig, quick_hash
 from . import mask_backends
@@ -145,6 +146,12 @@ def _startup() -> None:
         print(f"pruned {logs['removed']} log(s) and {rends['removed']} render(s)")
     print(f"disk: {retention.free_bytes()/retention.GB:.1f} GB free, "
           f"cache holds {retention.cache_total()/retention.GB:.1f} GB")
+    # Before the dispatcher starts: the benchmark holds the machine, so no job
+    # is started until it ends.
+    if BENCHMARK_AT_START:
+        ok, why = benchmark.start()
+        print("benchmark: started (QUEUE_BENCHMARK=1)" if ok
+              else f"benchmark: not started: {why}")
     worker.start()
 
 
@@ -1013,6 +1020,25 @@ def api_render(req: RenderReq) -> dict:
         return {"url": f"/renders/{stamp}", "gpu": g,
                 "held_out": held_out_split,
                 "stdout": proc.stdout[-400:]}
+
+
+@app.post("/api/benchmark")
+def api_benchmark_run() -> dict:
+    """Start the host benchmark (scripts/benchmark.py); poll GET for the result.
+
+    409 while a job, a render or another benchmark runs: it measures the
+    whole machine, and no job starts until it ends.
+    """
+    ok, why = benchmark.start()
+    if not ok:
+        raise HTTPException(409, why)
+    return benchmark.status()
+
+
+@app.get("/api/benchmark")
+def api_benchmark() -> dict:
+    """The running benchmark, or the last result ({"state": "idle"} if none)."""
+    return benchmark.status()
 
 
 @app.post("/api/jobs/clear")
