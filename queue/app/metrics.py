@@ -12,10 +12,11 @@ than the thing it measures -- this queue is at 166 jobs and climbing.
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Iterable, Optional
 
-from . import db, estimate, retention, worker
+from . import db, estimate, hoststats, retention, telemetry, worker
 from .config import GPUS
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -73,6 +74,97 @@ class Exposition:
 
     def text(self) -> str:
         return "\n".join(self._out) + "\n"
+
+
+def _gpu_health(e: Exposition) -> None:
+    """Power, clocks, temperature, PCIe link and clock reasons, per GPU.
+
+    The same nvidia-smi fields job telemetry samples; one query per scrape.
+    """
+    rows = []
+    for r in telemetry._gpu_sample_rows() or []:
+        if len(r) < 11:
+            continue                      # a driver without the health fields
+        try:
+            rows.append((int(r[0]), r))
+        except ValueError:
+            pass
+    num = telemetry._num
+
+    def fam(name, help_text, i, scale=1.0, cast=float):
+        e.add(name, help_text, "gauge",
+              [({"gpu": g}, num(r[i], cast) * scale) for g, r in rows
+               if num(r[i], cast) is not None])
+    fam("gpu_power_watts", "GPU power draw.", 3)
+    fam("gpu_sm_clock_hertz", "GPU SM clock.", 4, 1e6)
+    fam("gpu_memory_clock_hertz", "GPU memory clock.", 5, 1e6)
+    fam("gpu_temperature_celsius", "GPU temperature.", 6)
+    fam("gpu_pcie_link_generation", "Current PCIe generation. The link trains "
+        "down when idle; compare under load.", 7, cast=int)
+    fam("gpu_pcie_link_width", "Current PCIe lanes. The link trains down when "
+        "idle; compare under load.", 8, cast=int)
+    fam("gpu_ecc_uncorrected_errors", "Uncorrected ECC errors since the driver "
+        "loaded. Absent on cards without ECC.", 9, cast=int)
+    reasons = []
+    for g, r in rows:
+        try:
+            bits = int(r[10], 16)
+        except ValueError:
+            continue
+        reasons += [({"gpu": g, "reason": n}, 1 if bits & b else 0)
+                    for b, n in telemetry.CLOCK_REASONS.items()]
+    e.add("gpu_clock_event_reason", "1 while this reason holds the GPU "
+          "clocks down (sw_power_cap, hw_slowdown, sw_thermal...).", "gauge", reasons)
+
+
+def _host(e: Exposition) -> None:
+    """Machine-wide counters (hoststats.py); rate() them for shares and speeds.
+
+    Counters rather than per-scrape rates: they need no state here, and any
+    scrape interval gets the right answer.
+    """
+    h = hoststats.read()
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, ValueError, OSError):
+        hz = 100
+    st = h.get("stat")
+    if st:
+        e.add("host_cpu_seconds_total", "CPU time of the whole machine, summed "
+              "over cores, by mode. steal is time the hypervisor gave to other "
+              "guests; it is not in busy.", "counter",
+              [({"mode": m}, st["total"][m] / hz)
+               for m in ("busy", "idle", "iowait", "steal")])
+    stalls = []
+    for scope, key in (("system", "psi"), ("cgroup", "cgroup_psi")):
+        for res, kinds in (h.get(key) or {}).items():
+            for kind, us in (kinds or {}).items():
+                stalls.append(({"scope": scope, "resource": res, "kind": kind}, us / 1e6))
+    e.add("host_pressure_stalled_seconds_total", "Pressure stall time (PSI): "
+          "some = at least one task waited for the resource, full = all did. "
+          "scope system is the whole machine, cgroup this container.",
+          "counter", stalls)
+    cg = h.get("cgroup_cpu")
+    if cg:
+        e.scalar("cgroup_cpu_periods_total", "CPU quota periods elapsed.",
+                 "counter", cg["periods"])
+        e.scalar("cgroup_cpu_throttled_periods_total",
+                 "Periods in which the CPU quota throttled this container.",
+                 "counter", cg["throttled"])
+        e.scalar("cgroup_cpu_throttled_seconds_total",
+                 "Time this container spent throttled by its CPU quota.",
+                 "counter", cg["throttled_us"] / 1e6)
+    d = h.get("disk")
+    if d:
+        e.scalar("host_disk_read_bytes_total", "Bytes read, all disks.", "counter", d["read"])
+        e.scalar("host_disk_written_bytes_total", "Bytes written, all disks.",
+                 "counter", d["write"])
+    n = h.get("net")
+    if n:
+        e.scalar("host_network_receive_bytes_total",
+                 "Bytes received, all interfaces but lo.", "counter", n["rx"])
+        e.scalar("host_network_transmit_bytes_total",
+                 "Bytes sent, all interfaces but lo.", "counter", n["tx"])
 
 
 def render(jobs: list[dict], now: Optional[float] = None) -> str:
@@ -176,6 +268,9 @@ def render(jobs: list[dict], now: Optional[float] = None) -> str:
     e.scalar("gpu_probe_ok",
              "1 when nvidia-smi answered. A failed probe schedules nothing.",
              "gauge", 1 if (rows and rows[0].get("probe_ok")) else 0)
+
+    _gpu_health(e)
+    _host(e)
 
     # --------------------------------------------------------- estimator
     c = estimate.constants()

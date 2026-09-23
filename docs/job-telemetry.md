@@ -13,7 +13,8 @@ Not to be confused with the camera telemetry inside a `.OSV`
 | File | When |
 |---|---|
 | `QUEUE_ROOT/runs/job<id>/telemetry.json` | after every stage, and when the job ends (done, failed, cancelled, waiting for mask review) |
-| `QUEUE_ROOT/runs/job<id>/logs.tar.gz` | when the job ends: this job's stage logs, redacted, each capped at the first 256 KB and last 1 MB |
+| `QUEUE_ROOT/runs/job<id>/samples.jsonl.gz` | every 5 s while a stage runs: one line of machine and GPU load ([Time series](#time-series)) |
+| `QUEUE_ROOT/runs/job<id>/logs.tar.gz` | when the job ends: this job's stage logs, redacted, each capped at the first 256 KB and last 1 MB, and `samples.jsonl.gz` |
 
 Telemetry never stops or fails a job, or the service. A probe, sample, write,
 upload or webhook that fails prints one line in the service log (`telemetry:
@@ -111,7 +112,7 @@ request carries `X-OSVplat-Signature: sha256=<HMAC-SHA256 of the body>`.
 | `job` | id, state, sweep id, created/started/ended, first 500 chars of the error (redacted like the logs), input size in bytes, the job config **without** the job name and clip file name (the extension and content hash stay) |
 | `plan` | the per-stage estimate frozen at submit time, with its assumptions (panoramas, iterations, it/s) |
 | `stages[]` | stage, state (done, cached, skipped, failed…), cache key, start/end, `wall_s`, `planned_s`, the numeric results the stage reported (`info`), and `resources` |
-| `stages[].resources` | sampled every 5 s over the stage's process tree: CPU seconds, average cores busy, peak RSS, GPU utilisation p50/p95/mean and peak GPU memory (whole device), and GPU health ([below](#gpu-health)) |
+| `stages[].resources` | sampled every 5 s over the stage's process tree: CPU seconds, average cores busy, peak RSS, GPU utilisation p50/p95/mean and peak GPU memory (whole device), GPU health ([below](#gpu-health)), and `host`: the machine over the whole stage ([Machine load](#machine-load)) |
 | `metrics` | the job's metrics table: PSNR, SSIM, splats, peak VRAM, train seconds… |
 | `host` | OS, whether in a container; CPU model, logical CPUs, physical cores, effective CPUs (affinity and cgroup quota), AVX/AVX2/FMA/AVX-512; RAM, cgroup memory limit, `/dev/shm` size; free/total disk under `QUEUE_ROOT`; per GPU: name, memory, compute capability, driver, max PCIe gen/width, power limit, the card's default and max power limit, max SM and memory clocks |
 | `software` | image version and git revision (`OSVPLAT_VERSION`, `OSVPLAT_REVISION`; the Dockerfile and `deploy.sh` set them), Python version |
@@ -147,6 +148,42 @@ first that works. A driver with none of these gives null health fields, not a
 failed job. Xid errors are not recorded: `nvidia-smi` cannot query them, and a
 container usually cannot read the kernel log where they appear.
 
+### Machine load
+
+`stages[].resources.host`, each line of the [time series](#time-series), and the
+benchmark's `resources.host` describe the machine over an interval, from
+counters the kernel keeps. They tell a slow host from a slow stage: a
+neighbour on the same box, a CPU quota the job keeps hitting, a slow disk.
+
+| Field | Content |
+|---|---|
+| `seconds` | the interval |
+| `cpu_busy`, `cpu_iowait`, `cpu_steal` | share of all CPU time on the machine (`/proc/stat`, not limited to this container). Steal is time a hypervisor gave to other guests: well above zero means the cores are shared. Busy leaves steal out, so busy + idle + iowait + steal = 1 |
+| `core_busy_pct` | per core, 0–100, in the time series only |
+| `psi` | pressure stall information for the whole machine: the share of the interval in which some (`_some`) or all (`_full`) tasks waited for CPU, memory or IO |
+| `cgroup_psi` | the same for this container's cgroup alone |
+| `cgroup_throttled`, `cgroup_throttled_s` | the share of CPU-quota periods in which this container was throttled, and the time it lost. High means the job wants more CPUs than the host gives it |
+| `disk_read_mb_s`, `disk_write_mb_s` | all disks, summed (partitions, loop and device-mapper devices left out so nothing is counted twice) |
+| `net_rx_mb_s`, `net_tx_mb_s` | all interfaces but `lo`; in a container, its own traffic |
+
+A source the kernel does not have (no PSI, macOS) is null. No device or
+interface names are recorded.
+
+### Time series
+
+`samples.jsonl.gz`: one JSON line per 5 s sample, while a stage's process
+runs. Each line is its own gzip member, so a service killed mid-write loses at
+most that line. The first sample of each stage only sets the baseline, so a
+stage shorter than about 5 s adds no line. Writing stops at 32 MB, with a line in
+the service log.
+
+| Field | Content |
+|---|---|
+| `t`, `stage` | wall-clock time and the running stage |
+| `cores_busy`, `rss_mb` | the stage's process tree: cores' worth of CPU over the interval, resident memory |
+| `host` | [machine load](#machine-load) over the interval, with `core_busy_pct` |
+| `gpu` | this job's GPU at the sample: `util`, `mem_mib`, `power_w`, `sm_mhz`, `mem_mhz`, `temp_c`, `pcie_gen`, `pcie_width`, `clock_reasons` (the reasons active); null without a GPU |
+
 ### Transfers
 
 Sizes and times of the transfers the machine already does, so a slow link
@@ -181,11 +218,26 @@ launched it.
 | `memory` | `copy_gb_s`: single-thread copy of a 512 MiB buffer |
 | `disk` | `write_fsync_mb_s` and `read_mb_s` of a `QUEUE_BENCHMARK_DISK_GB` file under `QUEUE_ROOT`, read back with the page cache dropped (`cache_dropped`; false where the OS cannot, such as macOS) |
 | `gpu` | `device`; `torch_import_s`, `cuda_init_s`; `matmul_fp32_tflops` (TF32 off) and `matmul_fp16_tflops` at 8192²; `d2d_copy_gb_s`; `h2d_pinned_gb_s` and `d2h_pinned_gb_s` for 1 GiB (a card on a narrow slot or riser shows here); `gsplat_it_s`: forward + backward of 1 M Gaussians at 1920×1080 |
-| `resources` | the [stage sampler](#gpu-health) over the run, every 2 s: GPU power, clocks, clock reasons and PCIe link under load, CPU seconds and cores busy |
+| `resources` | the [stage sampler](#gpu-health) over the run, every 2 s: GPU power, clocks, clock reasons and PCIe link under load, CPU seconds and cores busy, and `host`: steal, pressure and throttling while it ran ([Machine load](#machine-load)). A benchmark on a shared or quota-limited host says so here |
 | `durations_s`, `wall_s`, `started`, `ended`, `gpu_index` | timing, and which GPU ran the GPU part |
 | `host`, `software`, `placement` | as in a job record |
 
 The log is `QUEUE_ROOT/logs/benchmark.log`.
+
+## Prometheus metrics
+
+With `QUEUE_METRICS=1`, `/metrics` also carries the machine and GPU figures
+above, as the kernel's own counters: `rate()` them for shares and speeds.
+
+| Metric | |
+|---|---|
+| `splatqueue_host_cpu_seconds_total{mode}` | `busy`, `idle`, `iowait`, `steal`, whole machine |
+| `splatqueue_host_pressure_stalled_seconds_total{scope,resource,kind}` | PSI stall time; `scope` is `system` or `cgroup` |
+| `splatqueue_cgroup_cpu_periods_total`, `…_throttled_periods_total`, `…_throttled_seconds_total` | CPU-quota throttling of this container |
+| `splatqueue_host_disk_read_bytes_total`, `…_written_bytes_total` | all disks |
+| `splatqueue_host_network_receive_bytes_total`, `…_transmit_bytes_total` | all interfaces but `lo` |
+| `splatqueue_gpu_power_watts`, `…_sm_clock_hertz`, `…_memory_clock_hertz`, `…_temperature_celsius`, `…_pcie_link_generation`, `…_pcie_link_width`, `…_ecc_uncorrected_errors` | per `gpu`, gauges at scrape time |
+| `splatqueue_gpu_clock_event_reason{gpu,reason}` | 1 while that reason holds the clocks down |
 
 ## What is left out
 

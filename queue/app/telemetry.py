@@ -24,6 +24,7 @@ and prints one line instead.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import hmac
 import io
@@ -42,7 +43,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from . import db, gpu, resources
+from . import db, gpu, hoststats, resources
 from .config import (LOG_ROOT, QUEUE_ROOT, RUNS_ROOT, SPLAT_ROOT,
                      TELEMETRY_ENABLED, TELEMETRY_PLACEMENT, TELEMETRY_UPLOAD,
                      WEBHOOK_SECRET, WEBHOOK_URL, ssl_context)
@@ -75,6 +76,15 @@ def telemetry_path(job_id: int) -> Path:
 
 def logs_path(job_id: int) -> Path:
     return run_dir(job_id) / "logs.tar.gz"
+
+
+def samples_path(job_id: int) -> Path:
+    return run_dir(job_id) / "samples.jsonl.gz"
+
+
+# A long job on a many-core host writes about 1 KB per 5 s sample; this cap
+# is weeks of that, and only stops a runaway from filling the disk.
+SAMPLES_MAX_BYTES = 32 * 1024 * 1024
 
 
 # ------------------------------------------------------------------ host
@@ -316,11 +326,20 @@ class ResourceSampler(threading.Thread):
     card that throttles hot shows here, not in utilisation.
     """
 
-    def __init__(self, gpu_index: Optional[int], pid: int, interval: float = 5.0):
+    def __init__(self, gpu_index: Optional[int], pid: int, interval: float = 5.0,
+                 job_id: Optional[int] = None, stage: Optional[str] = None):
         super().__init__(daemon=True, name="resources")
         self.gpu = gpu_index
         self.pid = pid
         self.interval = interval
+        # With a job: one line per sample in its samples.jsonl.gz.
+        self.job_id = job_id
+        self.stage = stage
+        self._host_first: Optional[dict] = None
+        self._host_prev: Optional[dict] = None
+        self._cpu_prev: Optional[float] = None
+        self._gpu_now: Optional[dict] = None
+        self._series_off = job_id is None or not TELEMETRY_ENABLED
         self.cpu: dict[int, float] = {}
         self.rss_peak = 0
         self.gpu_util: list[float] = []
@@ -345,10 +364,13 @@ class ResourceSampler(threading.Thread):
         util = float(r[1])
         self.gpu_util.append(util)
         self.gpu_mem_peak = max(self.gpu_mem_peak, int(r[2]))
+        self._gpu_now = {"util": util, "mem_mib": int(r[2])}
         if len(r) < 11:
             return
         power, sm, mem, temp = (_num(x) for x in r[3:7])
         gen, width, ecc = (_num(x, int) for x in r[7:10])
+        self._gpu_now.update({"power_w": power, "sm_mhz": sm, "mem_mhz": mem,
+                              "temp_c": temp, "pcie_gen": gen, "pcie_width": width})
         if util >= BUSY_UTIL:
             for vals, v in ((self.power, power), (self.sm_clock, sm),
                             (self.mem_clock, mem)):
@@ -369,6 +391,7 @@ class ResourceSampler(threading.Thread):
         for bit, name in CLOCK_REASONS.items():
             if bits & bit:
                 self.reasons[name] = self.reasons.get(name, 0) + 1
+        self._gpu_now["clock_reasons"] = [n for b, n in CLOCK_REASONS.items() if bits & b]
 
     def sample(self) -> None:
         rss = 0
@@ -379,6 +402,7 @@ class ResourceSampler(threading.Thread):
                     self.cpu[p] = st[0]
                     rss += st[1]
         self.rss_peak = max(self.rss_peak, rss)
+        self._gpu_now = None
         if self.gpu is not None and self.gpu >= 0:
             for r in _gpu_sample_rows() or []:
                 try:
@@ -387,6 +411,45 @@ class ResourceSampler(threading.Thread):
                 except (IndexError, ValueError):
                     pass
         self.samples += 1
+        host = hoststats.read()
+        if self._host_first is None:
+            self._host_first = host
+        self._series(rss, host)
+        self._host_prev = host
+
+    def _series(self, rss: int, host: dict) -> None:
+        """Append this sample to the job's samples.jsonl.gz.
+
+        One gzip member per line: a service killed mid-write loses at most
+        that line, and every earlier one still reads (gzip.open reads the
+        members as one stream). The first sample only sets the baseline the
+        next one's rates are measured from.
+        """
+        cpu_now = sum(self.cpu.values()) if self.cpu else None
+        prev, cpu_prev = self._host_prev, self._cpu_prev
+        self._cpu_prev = cpu_now
+        if self._series_off or prev is None:
+            return
+        rates = hoststats.rates(prev, host, per_core=True)
+        dt = (rates or {}).get("seconds")
+        line = {"t": round(time.time(), 1), "stage": self.stage,
+                "cores_busy": (round((cpu_now - cpu_prev) / dt, 2)
+                               if dt and cpu_now is not None and cpu_prev is not None else None),
+                "rss_mb": round(rss / 1e6) if rss else None,
+                "host": rates, "gpu": self._gpu_now}
+        try:
+            p = samples_path(self.job_id)
+            if p.exists() and p.stat().st_size > SAMPLES_MAX_BYTES:
+                self._series_off = True
+                print(f"job {self.job_id}: samples.jsonl.gz is over "
+                      f"{SAMPLES_MAX_BYTES >> 20} MB; no more samples written")
+                return
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with gzip.open(p, "ab") as f:
+                f.write(json.dumps(line, separators=(",", ":")).encode() + b"\n")
+        except Exception as exc:                              # noqa: BLE001
+            self._series_off = True
+            print(f"job {self.job_id}: samples not written: {type(exc).__name__}: {exc}")
 
     def run(self) -> None:
         # First look early, so a stage shorter than one interval still gets
@@ -434,6 +497,8 @@ class ResourceSampler(threading.Thread):
             "gpu_clock_reasons": ({k: round(v / self.reason_samples, 2)
                                    for k, v in sorted(self.reasons.items())}
                                   if self.reason_samples else None),
+            # The machine over the whole stage: steal, pressure, throttling.
+            "host": hoststats.rates(self._host_first, self._host_prev),
         }
 
 
@@ -442,11 +507,15 @@ def record_resources(job_id: int, stage: str, summary: dict) -> None:
         _resources.setdefault(job_id, {})[stage] = summary
 
 
-def start_sampler(gpu_index: Optional[int], pid: int,
-                  interval: float = 5.0) -> Optional[ResourceSampler]:
-    """A running sampler for one stage, or None. Never raises."""
+def start_sampler(gpu_index: Optional[int], pid: int, interval: float = 5.0,
+                  job_id: Optional[int] = None,
+                  stage: Optional[str] = None) -> Optional[ResourceSampler]:
+    """A running sampler for one stage, or None. Never raises.
+
+    With a job id, it also writes the job's time series (samples.jsonl.gz).
+    """
     try:
-        s = ResourceSampler(gpu_index, pid, interval)
+        s = ResourceSampler(gpu_index, pid, interval, job_id=job_id, stage=stage)
         s.start()
         return s
     except Exception as exc:                                  # noqa: BLE001
@@ -726,6 +795,16 @@ def _bundle_logs(job_id: int) -> None:
             data = redact(_capped(p).decode("utf-8", "replace")).encode()
             ti = tarfile.TarInfo(f"{st['stage']}.log")
             ti.size, ti.mtime = len(data), int(p.stat().st_mtime)
+            tar.addfile(ti, io.BytesIO(data))
+        # Numbers only, nothing to redact. Read whole, so a sampler still
+        # appending cannot cut the member short.
+        try:
+            data = samples_path(job_id).read_bytes()
+        except OSError:
+            data = b""
+        if data:
+            ti = tarfile.TarInfo("samples.jsonl.gz")
+            ti.size, ti.mtime = len(data), int(time.time())
             tar.addfile(ti, io.BytesIO(data))
     os.replace(tmp, out)
 

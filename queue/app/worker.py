@@ -361,7 +361,8 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
             restamp_lock(cache_dir, proc.pid)
         sampler = None
         watchdog = None
-        resources = telemetry.start_sampler(ctx.gpu, proc.pid)
+        resources = telemetry.start_sampler(ctx.gpu, proc.pid,
+                                            job_id=ctx.job_id, stage=stage)
         if stage == "train":
             sampler = VramSampler(
                 ctx.gpu, lambda: [proc.pid] + _child_pids(proc.pid))
