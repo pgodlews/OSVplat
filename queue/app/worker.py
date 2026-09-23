@@ -268,10 +268,10 @@ class VramSampler(threading.Thread):
         self.gpu = gpu_index
         self._pids = pid_getter
         self.peak = 0
-        self._stop = threading.Event()
+        self._halt = threading.Event()   # not _stop: Thread.join() calls _stop()
 
     def run(self) -> None:
-        while not self._stop.wait(10.0):
+        while not self._halt.wait(10.0):
             try:
                 pids = set(self._pids())
                 procs = gpu.compute_procs() or {}
@@ -282,7 +282,7 @@ class VramSampler(threading.Thread):
                 pass
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
 
 def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,

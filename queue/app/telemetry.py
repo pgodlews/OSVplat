@@ -256,7 +256,9 @@ class ResourceSampler(threading.Thread):
         self.gpu_util: list[float] = []
         self.gpu_mem_peak = 0
         self.samples = 0
-        self._stop = threading.Event()
+        # Not _stop: that name is threading.Thread's own method, which join()
+        # calls; an Event there made join() raise TypeError.
+        self._halt = threading.Event()
 
     def sample(self) -> None:
         rss = 0
@@ -282,7 +284,7 @@ class ResourceSampler(threading.Thread):
         # First look early, so a stage shorter than one interval still gets
         # a sample; frames and select on a short clip take seconds.
         wait = min(0.5, self.interval)
-        while not self._stop.wait(wait):
+        while not self._halt.wait(wait):
             wait = self.interval
             try:
                 self.sample()
@@ -290,7 +292,7 @@ class ResourceSampler(threading.Thread):
                 pass
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def summary(self, wall_s: float) -> dict:
         cpu_s = round(sum(self.cpu.values()), 1)

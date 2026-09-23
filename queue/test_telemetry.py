@@ -274,6 +274,16 @@ class Sampler(unittest.TestCase):
             self.assertIsNone(out["cpu_seconds"])   # no /proc: unknown, not zero
         self.assertIsNone(out["gpu_util_p50"])
 
+    def test_samplers_can_be_joined(self):
+        # Both kept their stop Event in self._stop, which is the name of the
+        # method Thread.join() calls: join() raised TypeError.
+        for s in (telemetry.ResourceSampler(None, os.getpid(), interval=0.05),
+                  worker.VramSampler(-1, lambda: [])):
+            s.start()
+            s.stop()
+            s.join(5)
+            self.assertFalse(s.is_alive(), type(s).__name__)
+
 
 def _fake_stage(stage):
     return {"argv": lambda ctx: [sys.executable, "-c",
