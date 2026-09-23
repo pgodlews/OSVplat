@@ -182,7 +182,7 @@ class Upload(unittest.TestCase):
         self.assertGreater(body.index('name="file"'), body.index('name="x-amz-signature"'))
         self.assertIn("multipart/form-data; boundary=", req.get_header("Content-type"))
 
-    def test_uploads_after_each_write(self):
+    def test_uploads_once_at_the_end(self):
         db.init()
         srv = http.server.HTTPServer(("127.0.0.1", 0), _Sink)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -191,6 +191,9 @@ class Upload(unittest.TestCase):
         jid = make_job()
         try:
             with patch.object(telemetry, "TELEMETRY_UPLOAD", target):
+                telemetry.write(jid)                # after a stage: local only
+                time.sleep(0.3)
+                self.assertEqual(_Sink.got, [])
                 telemetry.write(jid, final=True)
                 deadline = time.time() + 10
                 while len(_Sink.got) < 2 and time.time() < deadline:
@@ -285,6 +288,135 @@ class Sampler(unittest.TestCase):
             self.assertFalse(s.is_alive(), type(s).__name__)
 
 
+class GpuHealth(unittest.TestCase):
+    """nvidia-smi answers faked: the fallbacks and what the summary makes of them."""
+
+    def setUp(self):
+        telemetry._sample_query = None
+
+    def tearDown(self):
+        telemetry._sample_query = None
+
+    def fake_smi(self, rows, known):
+        """nvidia-smi that fails any query naming a field outside `known`."""
+        asked = []
+
+        def smi(query, extra=None):
+            asked.append(query)
+            fields = query.split("=", 1)[1].split(",")
+            return None if any(f not in known for f in fields) else rows(fields)
+        return smi, asked
+
+    def test_old_driver_falls_back_to_throttle_reasons(self):
+        known = set(telemetry._SAMPLE_QUERIES[1].split("=", 1)[1].split(","))
+        seq = iter([
+            # util, mem, power, sm, mem clk, temp, gen, width, ecc, reasons
+            ["0", "90", "4000", "300.5", "1900", "9500", "70", "4", "16", "[N/A]", "0x0000000000000004"],
+            ["0", "95", "4100", "320.0", "1800", "9500", "83", "4", "16", "[N/A]", "0x0000000000000024"],
+            ["0", "10", "4100", "30.0", "210", "405", "60", "1", "16", "[N/A]", "0x0000000000000001"],
+        ])
+        smi, asked = self.fake_smi(lambda fields: [next(seq)], known)
+        s = telemetry.ResourceSampler(0, os.getpid())
+        with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+            for _ in range(3):
+                s.sample()
+        self.assertIn("clocks_throttle_reasons.active", telemetry._sample_query)
+        # The event-reasons query was tried once, not on every sample.
+        self.assertEqual(sum("clocks_event_reasons" in q for q in asked), 1)
+        out = s.summary(15)
+        self.assertEqual(out["gpu_busy_samples"], 2)
+        self.assertEqual(out["gpu_power_w_max"], 320.0)
+        self.assertEqual(out["gpu_sm_mhz_busy_p50"], 1900.0)   # idle 210 left out
+        self.assertEqual(out["gpu_temp_c_max"], 83.0)
+        self.assertEqual((out["gpu_pcie_gen_max"], out["gpu_pcie_width_max"]), (4, 16))
+        self.assertIsNone(out["gpu_ecc_uncorrected"])            # [N/A]: unknown
+        self.assertEqual(out["gpu_clock_reasons"],
+                         {"gpu_idle": 0.33, "sw_power_cap": 0.67, "sw_thermal": 0.33})
+        self.assertEqual(out["gpu_mem_peak_mib"], 4100)
+
+    def test_driver_without_health_fields_still_samples_utilisation(self):
+        known = {"index", "utilization.gpu", "memory.used"}
+        smi, _ = self.fake_smi(lambda fields: [["0", "80", "1234"]], known)
+        s = telemetry.ResourceSampler(0, os.getpid())
+        with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+            s.sample()
+        out = s.summary(5)
+        self.assertEqual((out["gpu_util_p50"], out["gpu_mem_peak_mib"]), (80.0, 1234))
+        self.assertIsNone(out["gpu_clock_reasons"])
+        self.assertIsNone(out["gpu_busy_samples"])
+        self.assertIsNone(out["gpu_power_w_busy_p50"])
+
+    def test_no_nvidia_smi_is_not_remembered(self):
+        with patch.object(telemetry.gpu, "_nvidia_smi", lambda q, extra=None: None):
+            telemetry.ResourceSampler(0, os.getpid()).sample()
+        self.assertIsNone(telemetry._sample_query)
+
+    def test_host_limits_fall_back(self):
+        base = telemetry._GPU_HOST.split("=", 1)[1].split(",")
+        row = ["0", "NVIDIA GeForce RTX 3090", "24576", "8.6", "595.84", "4", "16", "350.00"]
+        smi, _ = self.fake_smi(lambda fields: [row], set(base))
+        with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+            g = telemetry._gpus()[0]
+        self.assertEqual((g["name"], g["power_limit_w"]), ("NVIDIA GeForce RTX 3090", 350.0))
+        self.assertIsNone(g["power_default_w"])
+        smi, _ = self.fake_smi(lambda fields: [row + ["350.00", "400.00", "2100", "9751"]],
+                               set(base) | set(telemetry._GPU_LIMITS[1:].split(",")))
+        with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+            g = telemetry._gpus()[0]
+        self.assertEqual((g["power_default_w"], g["power_max_w"], g["sm_clock_max_mhz"],
+                          g["mem_clock_max_mhz"]), (350.0, 400.0, 2100, 9751))
+
+
+class Transfers(unittest.TestCase):
+    def setUp(self):
+        db.init()
+        db.conn().execute("DELETE FROM jobs")
+        telemetry.INPUT_FETCH.unlink(missing_ok=True)
+
+    def tearDown(self):
+        telemetry.INPUT_FETCH.unlink(missing_ok=True)
+
+    def test_input_download_matches_the_job_clip_only(self):
+        jid = make_job()
+        self.assertIsNone(telemetry.build(jid)["transfers"]["input"])
+        telemetry.INPUT_FETCH.parent.mkdir(parents=True, exist_ok=True)
+        telemetry.INPUT_FETCH.write_text(json.dumps(
+            {"file": CLIP, "bytes": 50_000_000, "seconds": 4.0,
+             "first_byte_s": 0.12, "ended": 1790000000}))
+        rec = telemetry.build(jid)
+        self.assertEqual(rec["transfers"]["input"],
+                         {"bytes": 50_000_000, "seconds": 4.0, "mb_s": 12.5,
+                          "first_byte_s": 0.12, "ended": 1790000000})
+        self.assertNotIn("garden_walk_north", json.dumps(rec))
+        telemetry.INPUT_FETCH.write_text(json.dumps({"file": "samples/other.OSV", "bytes": 1}))
+        self.assertIsNone(telemetry.build(jid)["transfers"]["input"])
+
+    def test_output_upload_without_its_destination(self):
+        jid = make_job()
+        d = telemetry.run_dir(jid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "upload.json").write_text(json.dumps(
+            {"state": "done", "url": "https://bucket.example/private-name/job.tar",
+             "bytes": 30_000_000, "transfer_s": 2.0, "pack_s": 0.4, "attempts": 1,
+             "sha256": "ab" * 32, "ended": 1790000100}))
+        rec = telemetry.build(jid)
+        self.assertEqual(rec["transfers"]["output"],
+                         {"state": "done", "bytes": 30_000_000, "seconds": 2.0,
+                          "mb_s": 15.0, "attempts": 1, "pack_s": 0.4, "ended": 1790000100})
+        self.assertNotIn("private-name", json.dumps(rec))
+
+    def test_resources_survive_the_final_write(self):
+        # The final write drops resources from memory; the rewrite after an
+        # output upload (or a service restart) must keep them.
+        jid = make_job()
+        db.upsert_stage(jid, "sfm", "k", "done", started=1, ended=2)
+        telemetry.record_resources(jid, "sfm", {"cpu_seconds": 7.0})
+        telemetry.write(jid, final=True)
+        telemetry.write(jid)
+        rec = json.loads(telemetry.telemetry_path(jid).read_text())
+        self.assertEqual(rec["stages"][0]["resources"], {"cpu_seconds": 7.0})
+
+
 def _fake_stage(stage):
     return {"argv": lambda ctx: [sys.executable, "-c",
                                  f"import time; print('{stage} on {SPLAT_ROOT}'); time.sleep(0.8)"],
@@ -345,6 +477,146 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((events[-1]["event"], events[-1]["stage"], events[-1]["state"]),
                          ("job.finished", "sfm", "failed"))
         self.assertTrue(telemetry.logs_path(jid).is_file())
+
+
+class UploadAtTheEnd(unittest.TestCase):
+    """One telemetry upload per job, after the result upload when there is one."""
+
+    run_fake_job = EndToEnd.run_fake_job
+
+    def run_uploading(self, output: bool):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _Sink)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_port}"
+        _Sink.got.clear()
+        try:
+            with patch.object(telemetry, "TELEMETRY_UPLOAD", {"url": base + "/t/{job}/{file}"}), \
+                    patch.object(worker.outputs, "OUTPUT_UPLOAD",
+                                 {"url": base + "/out/{job}.tar"} if output else {}):
+                jid, _ = self.run_fake_job()
+                deadline = time.time() + 15
+                while len([g for g in _Sink.got if g[1].startswith("/t/")]) < 2 \
+                        and time.time() < deadline:
+                    time.sleep(0.05)
+                time.sleep(0.3)                     # nothing more may follow
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        sent = [(p, b) for _, p, _, b in _Sink.got if p.startswith("/t/")]
+        self.assertEqual(sorted(p for p, _ in sent),
+                         [f"/t/job{jid:05d}/logs.tar.gz", f"/t/job{jid:05d}/telemetry.json"])
+        return json.loads(next(b for p, b in sent if p.endswith(".json")))
+
+    def test_without_output_upload(self):
+        rec = self.run_uploading(output=False)
+        self.assertEqual(rec["job"]["state"], "done")
+        self.assertIsNone(rec["transfers"]["output"])
+
+    def test_after_output_upload(self):
+        # The fake stages export nothing, so the result upload fails loudly;
+        # what matters is that the record sent is the one written after it.
+        rec = self.run_uploading(output=True)
+        self.assertEqual(rec["transfers"]["output"]["state"], "failed")
+        self.assertTrue(all(s["resources"] for s in rec["stages"]))
+
+
+class FailuresNeverReachTheJob(unittest.TestCase):
+    """A broken telemetry probe is one line in the log; the job runs on."""
+
+    run_fake_job = EndToEnd.run_fake_job
+
+    def assert_done(self):
+        jid, events = self.run_fake_job()
+        self.assertEqual(db.get_job(jid)["state"], "done")
+        self.assertEqual(events[-1]["state"], "done")
+        return jid
+
+    def test_sampler_that_cannot_start(self):
+        with patch.object(telemetry, "ResourceSampler", side_effect=RuntimeError("no threads")):
+            jid = self.assert_done()
+        rec = json.loads(telemetry.telemetry_path(jid).read_text())
+        self.assertTrue(all(s["resources"] is None for s in rec["stages"]))
+
+    def test_summary_that_raises(self):
+        with patch.object(telemetry.ResourceSampler, "summary", side_effect=ZeroDivisionError):
+            self.assert_done()
+
+    def test_samples_that_raise_are_logged_once(self):
+        s = telemetry.ResourceSampler(None, os.getpid(), interval=0.05)
+        out = io.StringIO()
+        with patch.object(s, "sample", side_effect=OSError("proc gone")), \
+                patch("sys.stdout", out):
+            s.start()
+            time.sleep(0.8)
+            s.stop()
+            s.join(2)
+        self.assertEqual(out.getvalue().count("resource sample failed"), 1)
+
+    def test_record_that_cannot_be_built(self):
+        with patch.object(telemetry, "build", side_effect=RuntimeError("boom")):
+            self.assert_done()
+
+    def test_host_probe_that_raises(self):
+        with patch.object(telemetry, "_host", None), \
+                patch.object(telemetry, "_cpu", side_effect=IndexError("odd cpuinfo")), \
+                patch.object(telemetry, "_gpus", side_effect=OSError("nvidia-smi hung")):
+            h = telemetry.host()
+        self.assertEqual((h["cpu"], h["gpus"]), ({}, None))
+        self.assertIn("total_bytes", h["memory"])
+
+    def test_result_archive_without_readable_telemetry(self):
+        from app import outputs
+        jid = make_job()
+        d = telemetry.run_dir(jid)
+        d.mkdir(parents=True, exist_ok=True)
+        telemetry.telemetry_path(jid).mkdir()          # unreadable as a file
+        f = Path(TMP.name) / "splat.ply"
+        f.write_bytes(b"ply")
+        meta = outputs.build_archive(jid, [f], d / "out.tar")
+        with tarfile.open(d / "out.tar") as tar:
+            self.assertEqual(tar.getnames(), [f"job{jid:05d}/splat.ply"])
+        self.assertGreater(meta["bytes"], 0)
+
+
+class EndedInReview(unittest.TestCase):
+    """A job that ends while parked for mask review never returns to run_job."""
+
+    def setUp(self):
+        db.init()
+        db.conn().execute("DELETE FROM jobs")
+
+    def parked(self) -> int:
+        jid = make_job()
+        db.upsert_stage(jid, "mask", "k", "done", started=1, ended=2)
+        db.set_job_state(jid, "awaiting_review")
+        telemetry.write(jid)
+        return jid
+
+    def check_final(self, jid, events):
+        rec = json.loads(telemetry.telemetry_path(jid).read_text())
+        self.assertEqual(rec["job"]["state"], "cancelled")
+        self.assertTrue(telemetry.logs_path(jid).is_file())
+        self.assertEqual((events[-1]["event"], events[-1]["state"]),
+                         ("job.finished", "cancelled"))
+
+    def hooks(self, events):
+        return (patch.object(telemetry, "WEBHOOK_URL", "http://unused"),
+                patch.object(telemetry, "_hook_q",
+                             type("Q", (), {"put_nowait": events.append})()))
+
+    def test_stopped(self):
+        jid, events = self.parked(), []
+        a, b = self.hooks(events)
+        with a, b:
+            self.assertTrue(worker.cancel(jid))
+        self.check_final(jid, events)
+
+    def test_rejected(self):
+        jid, events = self.parked(), []
+        a, b = self.hooks(events)
+        with a, b:
+            main.api_review_post(jid, main.ReviewReq(approved=False, note="bad"))
+        self.check_final(jid, events)
 
 
 class Purge(unittest.TestCase):

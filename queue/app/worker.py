@@ -328,8 +328,7 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
             restamp_lock(cache_dir, proc.pid)
         sampler = None
         watchdog = None
-        resources = telemetry.ResourceSampler(ctx.gpu, proc.pid)
-        resources.start()
+        resources = telemetry.start_sampler(ctx.gpu, proc.pid)
         if stage == "train":
             sampler = VramSampler(
                 ctx.gpu, lambda: [proc.pid] + _child_pids(proc.pid))
@@ -363,9 +362,8 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
                             db.stage_progress(ctx.job_id, stage, progress)
             proc.wait()
         finally:
-            resources.stop()
-            telemetry.record_resources(
-                ctx.job_id, stage, resources.summary(time.time() - state["started"]))
+            telemetry.finish_sampler(ctx.job_id, stage, resources,
+                                     time.time() - state["started"])
             if sampler:
                 sampler.stop()
                 if sampler.peak:
@@ -681,7 +679,9 @@ def run_job(job_id: int, gpu_index: int) -> None:
             telemetry.notify("stage.finished", job_id, stage, "done")
 
         db.set_job_state(job_id, "done", ended=time.time())
-        telemetry.write(job_id, final=True)
+        # With a result to upload, the record goes after it (outputs.py), so
+        # its one upload includes how that transfer went.
+        telemetry.write(job_id, final=True, upload=not outputs.OUTPUT_UPLOAD)
         telemetry.notify("job.finished", job_id, state="done")
         outputs.upload_async(job_id)
     except ReviewRequired as exc:
@@ -774,6 +774,9 @@ def cancel(job_id: int) -> bool:
         db.set_review(job_id, "rejected", "stopped from the queue")
         db.set_job_state(job_id, "cancelled", ended=time.time(),
                          error="stopped while awaiting mask review")
+        # It ends here, not in run_job: its final record and one upload too.
+        telemetry.write(job_id, final=True)
+        telemetry.notify("job.finished", job_id, state="cancelled")
         return True
     if row["state"] not in ("queued", "running"):
         return False

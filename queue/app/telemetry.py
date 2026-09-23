@@ -4,7 +4,8 @@ Written by default, uploaded only when asked. Every job gets
 QUEUE_ROOT/runs/job<id>/telemetry.json, rewritten after each stage and when the
 job ends (done, failed, cancelled), plus logs.tar.gz with the redacted stage
 logs once it ends. Nothing leaves the machine unless QUEUE_TELEMETRY_UPLOAD
-names a destination. docs/job-telemetry.md lists every field.
+names a destination, and then both are sent once, when the job has ended and
+its result upload (if any) is over. docs/job-telemetry.md lists every field.
 
 Why it exists: estimate.py is calibrated on one 3090 and refits only from this
 queue's own history. Comparing hardware -- another GPU, a 4-core host, a rented
@@ -16,8 +17,10 @@ same key, and telemetry is per job. It also records no hostnames, paths, clip
 names, job names, GPU UUIDs or serial numbers, and log bundles are redacted
 (see _redactor), so a bundle can be shared as it is.
 
-Linux-only probes (/proc, cgroups) degrade to null elsewhere; a telemetry
-failure is printed and never fails a job.
+Linux-only probes (/proc, cgroups) degrade to null elsewhere. Nothing here may
+stop or fail a job, or the service: every entry point a job or startup calls
+(host, start_sampler, finish_sampler, write, notify) catches its own errors
+and prints one line instead.
 """
 from __future__ import annotations
 
@@ -150,25 +153,40 @@ def _disk() -> dict:
         return {}
 
 
+def _num(s: str, cast=float):
+    """nvidia-smi prints "[N/A]" or "[Not Supported]" for what a card lacks."""
+    try:
+        return cast(s)
+    except (TypeError, ValueError):
+        return None
+
+
+_GPU_HOST = ("gpu=index,name,memory.total,compute_cap,driver_version,"
+             "pcie.link.gen.max,pcie.link.width.max,power.limit")
+# Limits a host can lower below the card's own: a power cap under the default
+# and max clocks are what a rented card is judged against.
+_GPU_LIMITS = ",power.default_limit,power.max_limit,clocks.max.sm,clocks.max.mem"
+
+
 def _gpus() -> Optional[list[dict]]:
     # No uuid, no serial: they identify the card, and nothing here needs that.
-    rows = gpu._nvidia_smi(
-        "gpu=index,name,memory.total,compute_cap,driver_version,pcie.link.gen.max,pcie.link.width.max,power.limit")
+    # One field a driver does not know fails the whole query, so the limits
+    # are asked for with a fallback to the fields every driver has.
+    rows = gpu._nvidia_smi(_GPU_HOST + _GPU_LIMITS)
+    if rows is None:
+        rows = gpu._nvidia_smi(_GPU_HOST)
     if rows is None:
         return None
     out = []
     for r in rows:
-        r = r + [""] * (8 - len(r))
-
-        def num(s, cast=float):
-            try:
-                return cast(s)
-            except ValueError:
-                return None
-        out.append({"index": num(r[0], int), "name": r[1] or None,
-                    "memory_mib": num(r[2], int), "compute_cap": r[3] or None,
-                    "driver": r[4] or None, "pcie_gen": num(r[5], int),
-                    "pcie_width": num(r[6], int), "power_limit_w": num(r[7])})
+        r = r + [""] * (12 - len(r))
+        out.append({"index": _num(r[0], int), "name": r[1] or None,
+                    "memory_mib": _num(r[2], int), "compute_cap": r[3] or None,
+                    "driver": r[4] or None, "pcie_gen": _num(r[5], int),
+                    "pcie_width": _num(r[6], int), "power_limit_w": _num(r[7]),
+                    "power_default_w": _num(r[8]), "power_max_w": _num(r[9]),
+                    "sm_clock_max_mhz": _num(r[10], int),
+                    "mem_clock_max_mhz": _num(r[11], int)})
     return out
 
 
@@ -180,16 +198,29 @@ def _boot_time() -> Optional[float]:
         return None
 
 
+def _probe(name: str, fn):
+    """fn(), or None and one line in the log: a probe never stops anything."""
+    try:
+        return fn()
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"telemetry: {name} probe failed: {type(exc).__name__}: {exc}")
+        return None
+
+
 def host() -> dict:
-    """Description of this machine. Probed once; it does not change under us."""
+    """Description of this machine. Probed once; it does not change under us.
+
+    Never raises: the service calls it at startup, and a probe that trips on
+    an unusual /proc or nvidia-smi must not keep the queue from starting.
+    """
     global _host
     if _host is None:
         _host = {
-            "os": platform.platform(terse=True),
-            "container": Path("/.dockerenv").exists(),
-            "cpu": _cpu(),
-            "memory": _memory(),
-            "gpus": _gpus(),
+            "os": _probe("os", lambda: platform.platform(terse=True)),
+            "container": _probe("container", lambda: Path("/.dockerenv").exists()),
+            "cpu": _probe("cpu", _cpu) or {},
+            "memory": _probe("memory", _memory) or {},
+            "gpus": _probe("gpu", _gpus),
         }
     return _host
 
@@ -235,6 +266,41 @@ def _proc_stat(pid: int) -> Optional[tuple[float, int]]:
         return None
 
 
+# Why a GPU ran below its clocks (clocks_event_reasons, NVML's bit order).
+# Idle is included: a stage that is mostly gpu_idle was not GPU-bound.
+CLOCK_REASONS = {
+    0x1: "gpu_idle", 0x2: "applications_clocks", 0x4: "sw_power_cap",
+    0x8: "hw_slowdown", 0x10: "sync_boost", 0x20: "sw_thermal",
+    0x40: "hw_thermal", 0x80: "hw_power_brake", 0x100: "display_clocks",
+}
+_GPU_SAMPLE = "gpu=index,utilization.gpu,memory.used"
+_GPU_HEALTH = (",power.draw,clocks.sm,clocks.mem,temperature.gpu,"
+               "pcie.link.gen.current,pcie.link.width.current,"
+               "ecc.errors.uncorrected.volatile.total,")
+# Most complete first. clocks_event_reasons is the newer name (drivers from
+# about 535); older drivers only know clocks_throttle_reasons. The last is
+# what this sampler asked before it recorded health.
+_SAMPLE_QUERIES = (_GPU_SAMPLE + _GPU_HEALTH + "clocks_event_reasons.active",
+                   _GPU_SAMPLE + _GPU_HEALTH + "clocks_throttle_reasons.active",
+                   _GPU_SAMPLE)
+_sample_query: Optional[str] = None      # the first that worked on this driver
+# A busy sample: clocks and power are read from these only, since an idle GPU
+# drops its clocks and PCIe link on purpose.
+BUSY_UTIL = 50.0
+
+
+def _gpu_sample_rows() -> Optional[list[list[str]]]:
+    global _sample_query
+    if _sample_query:
+        return gpu._nvidia_smi(_sample_query)
+    for q in _SAMPLE_QUERIES:
+        rows = gpu._nvidia_smi(q)
+        if rows is not None:
+            _sample_query = q
+            return rows
+    return None                           # nothing learned; try again next time
+
+
 class ResourceSampler(threading.Thread):
     """CPU, RSS and GPU use of one stage's process tree, sampled.
 
@@ -244,6 +310,10 @@ class ResourceSampler(threading.Thread):
     LichtFeld are long-lived, so what it measures -- how many cores a stage
     actually kept busy -- holds. GPU figures are for the whole device, not
     just this job, which is exact with one job per GPU.
+
+    GPU health (power, clocks, temperature, PCIe link, clock reasons, ECC) is
+    for telling a slow host from a slow stage: a power cap, a riser at x1 or a
+    card that throttles hot shows here, not in utilisation.
     """
 
     def __init__(self, gpu_index: Optional[int], pid: int, interval: float = 5.0):
@@ -255,10 +325,50 @@ class ResourceSampler(threading.Thread):
         self.rss_peak = 0
         self.gpu_util: list[float] = []
         self.gpu_mem_peak = 0
+        # Busy samples only (utilisation >= BUSY_UTIL).
+        self.power: list[float] = []
+        self.sm_clock: list[float] = []
+        self.mem_clock: list[float] = []
+        self.temp_max: Optional[float] = None
+        self.pcie_gen_max: Optional[int] = None
+        self.pcie_width_max: Optional[int] = None
+        self.ecc_max: Optional[int] = None
+        self.reasons: dict[str, int] = {}
+        self.reason_samples = 0
         self.samples = 0
         # Not _stop: that name is threading.Thread's own method, which join()
         # calls; an Event there made join() raise TypeError.
         self._halt = threading.Event()
+        self._logged = False
+
+    def _gpu_row(self, r: list[str]) -> None:
+        util = float(r[1])
+        self.gpu_util.append(util)
+        self.gpu_mem_peak = max(self.gpu_mem_peak, int(r[2]))
+        if len(r) < 11:
+            return
+        power, sm, mem, temp = (_num(x) for x in r[3:7])
+        gen, width, ecc = (_num(x, int) for x in r[7:10])
+        if util >= BUSY_UTIL:
+            for vals, v in ((self.power, power), (self.sm_clock, sm),
+                            (self.mem_clock, mem)):
+                if v is not None:
+                    vals.append(v)
+        # The link trains down when idle, so the highest seen is what the
+        # slot can do; below the card's max under load means a narrow slot.
+        for attr, v in (("temp_max", temp), ("pcie_gen_max", gen),
+                        ("pcie_width_max", width), ("ecc_max", ecc)):
+            if v is not None:
+                cur = getattr(self, attr)
+                setattr(self, attr, v if cur is None else max(cur, v))
+        try:
+            bits = int(r[10], 16)
+        except ValueError:
+            return
+        self.reason_samples += 1
+        for bit, name in CLOCK_REASONS.items():
+            if bits & bit:
+                self.reasons[name] = self.reasons.get(name, 0) + 1
 
     def sample(self) -> None:
         rss = 0
@@ -270,12 +380,10 @@ class ResourceSampler(threading.Thread):
                     rss += st[1]
         self.rss_peak = max(self.rss_peak, rss)
         if self.gpu is not None and self.gpu >= 0:
-            rows = gpu._nvidia_smi("gpu=index,utilization.gpu,memory.used")
-            for r in rows or []:
+            for r in _gpu_sample_rows() or []:
                 try:
                     if int(r[0]) == self.gpu:
-                        self.gpu_util.append(float(r[1]))
-                        self.gpu_mem_peak = max(self.gpu_mem_peak, int(r[2]))
+                        self._gpu_row(r)
                 except (IndexError, ValueError):
                     pass
         self.samples += 1
@@ -288,8 +396,12 @@ class ResourceSampler(threading.Thread):
             wait = self.interval
             try:
                 self.sample()
-            except Exception:                                 # noqa: BLE001
-                pass
+            except Exception as exc:                          # noqa: BLE001
+                # Logged once, not every 5 s; the stage runs on either way.
+                if not self._logged:
+                    self._logged = True
+                    print(f"telemetry: resource sample failed (pid {self.pid}): "
+                          f"{type(exc).__name__}: {exc}")
 
     def stop(self) -> None:
         self._halt.set()
@@ -298,22 +410,72 @@ class ResourceSampler(threading.Thread):
         cpu_s = round(sum(self.cpu.values()), 1)
         util = sorted(self.gpu_util)
 
-        def pct(q):
-            return round(util[min(len(util) - 1, int(q * len(util)))], 1) if util else None
+        def pct(vals, q):
+            vals = sorted(vals)
+            return round(vals[min(len(vals) - 1, int(q * len(vals)))], 1) if vals else None
         return {
             "samples": self.samples,
             "cpu_seconds": cpu_s if self.cpu else None,
             "avg_cores_busy": round(cpu_s / wall_s, 2) if self.cpu and wall_s > 0 else None,
             "rss_peak_bytes": self.rss_peak or None,
-            "gpu_util_p50": pct(0.5), "gpu_util_p95": pct(0.95),
+            "gpu_util_p50": pct(util, 0.5), "gpu_util_p95": pct(util, 0.95),
             "gpu_util_mean": round(statistics.fmean(util), 1) if util else None,
             "gpu_mem_peak_mib": self.gpu_mem_peak or None,
+            "gpu_busy_samples": len(self.power) if self.reason_samples else None,
+            "gpu_power_w_busy_p50": pct(self.power, 0.5),
+            "gpu_power_w_max": round(max(self.power), 1) if self.power else None,
+            "gpu_sm_mhz_busy_p50": pct(self.sm_clock, 0.5),
+            "gpu_mem_mhz_busy_p50": pct(self.mem_clock, 0.5),
+            "gpu_temp_c_max": self.temp_max,
+            "gpu_pcie_gen_max": self.pcie_gen_max,
+            "gpu_pcie_width_max": self.pcie_width_max,
+            "gpu_ecc_uncorrected": self.ecc_max,
+            # Share of samples in which each reason held a clock down.
+            "gpu_clock_reasons": ({k: round(v / self.reason_samples, 2)
+                                   for k, v in sorted(self.reasons.items())}
+                                  if self.reason_samples else None),
         }
 
 
 def record_resources(job_id: int, stage: str, summary: dict) -> None:
     with _res_lock:
         _resources.setdefault(job_id, {})[stage] = summary
+
+
+def start_sampler(gpu_index: Optional[int], pid: int,
+                  interval: float = 5.0) -> Optional[ResourceSampler]:
+    """A running sampler for one stage, or None. Never raises."""
+    try:
+        s = ResourceSampler(gpu_index, pid, interval)
+        s.start()
+        return s
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"telemetry: no resource sampling for pid {pid}: "
+              f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def finish_sampler(job_id: Optional[int], stage: str,
+                   sampler: Optional[ResourceSampler], wall_s: float) -> Optional[dict]:
+    """Stop the sampler and return its summary, recorded for the job if one
+    is given. Never raises.
+
+    Called from the stage's `finally`: an exception here would replace the
+    stage's own outcome, so a telemetry bug would fail a healthy job.
+    """
+    if sampler is None:
+        return None
+    try:
+        sampler.stop()
+        summary = sampler.summary(wall_s)
+        if job_id is not None:
+            record_resources(job_id, stage, summary)
+        return summary
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"telemetry: {stage} resources not recorded"
+              f"{'' if job_id is None else f' for job {job_id}'}: "
+              f"{type(exc).__name__}: {exc}")
+        return None
 
 
 # ------------------------------------------------------------ the record
@@ -342,6 +504,49 @@ def _metrics(job_id: int) -> dict:
     return {r["name"]: r["value"] for r in rows}
 
 
+INPUT_FETCH = RUNS_ROOT / "input_fetch.json"     # docker/entrypoint.sh writes it
+
+
+def _rate(nbytes, seconds) -> Optional[float]:
+    return round(nbytes / 1e6 / seconds, 2) if nbytes and seconds else None
+
+
+def _input_transfer(input_file: Optional[str]) -> Optional[dict]:
+    """How INPUT_URL's download of this job's clip went, or None.
+
+    None when the clip came some other way (copied in, mounted) or was
+    already there: the entrypoint only writes a record when it downloads.
+    Matched on the clip's name, which does not go into the record.
+    """
+    try:
+        rec = json.loads(INPUT_FETCH.read_text())
+    except (OSError, ValueError):
+        return None
+    if not input_file or not isinstance(rec, dict) or rec.get("file") != input_file:
+        return None
+    nbytes, secs = _num(rec.get("bytes"), int), _num(rec.get("seconds"))
+    return {"bytes": nbytes, "seconds": secs, "mb_s": _rate(nbytes, secs),
+            "first_byte_s": _num(rec.get("first_byte_s")),
+            "ended": _num(rec.get("ended"))}
+
+
+def _output_transfer(job_id: int) -> Optional[dict]:
+    """OUTPUT_UPLOAD_URL's upload of this job's result (upload.json), or None.
+
+    Only the sizes and times: upload.json also names the destination.
+    """
+    try:
+        st = json.loads((run_dir(job_id) / "upload.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(st, dict):
+        return None
+    nbytes, secs = st.get("bytes"), st.get("transfer_s")
+    return {"state": st.get("state"), "bytes": nbytes, "seconds": secs,
+            "mb_s": _rate(nbytes, secs), "attempts": st.get("attempts"),
+            "pack_s": st.get("pack_s"), "ended": st.get("ended")}
+
+
 def build(job_id: int) -> Optional[dict]:
     row = db.get_job(job_id)
     if row is None:
@@ -361,8 +566,18 @@ def build(job_id: int) -> Optional[dict]:
             input_bytes = (SPLAT_ROOT / f).stat().st_size
         except OSError:
             pass
+    # The previous record's resources, under what is in memory: a service
+    # restart mid-job, or the rewrite after an output upload (which comes
+    # after the final write dropped them from memory), would lose them.
+    res = {}
+    try:
+        prev = json.loads(telemetry_path(job_id).read_text())
+        res = {s["stage"]: s["resources"] for s in prev.get("stages", [])
+               if s.get("resources")}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
     with _res_lock:
-        res = dict(_resources.get(job_id, {}))
+        res.update(_resources.get(job_id, {}))
     stages = []
     for st in db.job_stages(job_id):
         try:
@@ -397,17 +612,25 @@ def build(job_id: int) -> Optional[dict]:
         "metrics": _metrics(job_id),
         "host": {**host(), "disk": _disk()},
         "software": _software(),
+        "transfers": {"input": _input_transfer(f), "output": _output_transfer(job_id)},
         "placement": TELEMETRY_PLACEMENT or None,
         "timeline": {"host_boot": _boot_time(),
                      "service_started": round(SERVICE_STARTED, 1)},
     }
 
 
-def write(job_id: int, final: bool = False) -> None:
-    """Rewrite this job's telemetry (and, at the end, its logs); then upload.
+def write(job_id: int, final: bool = False, upload: Optional[bool] = None) -> None:
+    """Rewrite this job's telemetry (and, at the end, its logs).
 
     Called after every stage and once when the job ends. Never raises.
+
+    Uploaded once, at the very end (`upload`, which defaults to `final`): one
+    complete record per job rather than a partial one per stage. When the job
+    also uploads its result, the worker defers this to outputs.py, which
+    uploads the record after that transfer so it carries transfers.output.
     """
+    if upload is None:
+        upload = final
     if not TELEMETRY_ENABLED:
         return
     try:
@@ -421,13 +644,14 @@ def write(job_id: int, final: bool = False) -> None:
             tmp = p.with_suffix(f".{uuid.uuid4().hex[:6]}.tmp")
             tmp.write_text(json.dumps(rec, indent=1))
             os.replace(tmp, p)
-        files = ["telemetry.json"]
         if final:
             _bundle_logs(job_id)
-            files.append("logs.tar.gz")
             with _res_lock:
                 _resources.pop(job_id, None)
-        if TELEMETRY_UPLOAD:
+        files = ["telemetry.json"]
+        if logs_path(job_id).is_file():
+            files.append("logs.tar.gz")
+        if upload and TELEMETRY_UPLOAD:
             threading.Thread(target=_upload_files, args=(job_id, files),
                              daemon=True, name=f"telemetry{job_id}").start()
     except Exception as exc:                                  # noqa: BLE001

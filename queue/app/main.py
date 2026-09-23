@@ -833,6 +833,9 @@ def api_review_post(job_id: int, req: ReviewReq) -> dict:
     db.set_review(job_id, "rejected", req.note)
     db.set_job_state(job_id, "cancelled", ended=time.time(),
                      error=f"masks rejected at review: {req.note[:500]}")
+    # The job ends here, not in the worker: its final record and one upload.
+    telemetry.write(job_id, final=True)
+    telemetry.notify("job.finished", job_id, state="cancelled")
     return {"id": job_id, "state": "cancelled", "review_state": "rejected"}
 
 

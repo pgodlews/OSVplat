@@ -130,7 +130,10 @@ fetch_input() {
   case "${QUEUE_TLS_INSECURE:-0}" in 1|true|yes|on)
     insecure=(-k); echo "WARNING: QUEUE_TLS_INSECURE: not checking the TLS certificate of INPUT_URL" >&2 ;; esac
   # Only scheme, host and path are printed: the query of a presigned URL is the credential.
-  curl -fsS "${insecure[@]}" --connect-timeout 20 --retry 5 --retry-all-errors --max-time 7200 -o "$dest.part" "$INPUT_URL" \
+  # -w: bytes, seconds and time to first byte of the last attempt, for telemetry.
+  local stats
+  stats=$(curl -fsS "${insecure[@]}" --connect-timeout 20 --retry 5 --retry-all-errors --max-time 7200 \
+      -w '%{size_download} %{time_total} %{time_starttransfer}' -o "$dest.part" "$INPUT_URL") \
     || { rm -f "$dest.part"; echo "ERROR: input download from ${INPUT_URL%%\?*} failed" >&2; return 1; }
   if [ -n "${INPUT_SHA256:-}" ] && ! echo "$INPUT_SHA256  $dest.part" | sha256sum -c --status; then
     echo "ERROR: input sha256 mismatch for $name: got $(sha256sum "$dest.part" | cut -c1-16)..., expected ${INPUT_SHA256:0:16}..." >&2
@@ -138,6 +141,20 @@ fetch_input() {
   fi
   mv "$dest.part" "$dest"
   echo "OSVplat: input samples/$name, $(stat -c %s "$dest") bytes in $((SECONDS - t0)) s"
+  record_input_fetch "$name" "$stats" \
+    || echo "WARNING: input download not recorded for telemetry (the clip is fine)" >&2
+  return 0
+}
+# Job telemetry reports it as transfers.input (docs/job-telemetry.md); the
+# name is only used to match the job and never goes into the record.
+record_input_fetch() {
+  local b s f
+  read -r b s f <<<"$2" || return 1
+  case "$b$s$f" in *[!0-9.]*|"") return 1 ;; esac
+  mkdir -p "$QUEUE_ROOT/runs" || return 1
+  printf '{"file": "samples/%s", "bytes": %s, "seconds": %s, "first_byte_s": %s, "ended": %s}\n' \
+    "$(printf %s "$1" | sed 's/[\\"]/\\&/g')" "$b" "$s" "$f" "$(date +%s)" \
+    > "$QUEUE_ROOT/runs/input_fetch.json"
 }
 if [ -n "${INPUT_URL:-}" ]; then
   { fetch_input || echo "WARNING: no input clip from INPUT_URL; the queue runs without it" >&2; } &

@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import calendar
 import hashlib
+import io
 import json
 import os
 import socket
@@ -194,9 +195,17 @@ def build_archive(job_id: int, files: list[Path], out: Path) -> dict:
     with tarfile.open(tmp, "w", dereference=True) as tar:
         for p in files:
             tar.add(p, arcname=f"{prefix}/{p.name}", recursive=False)
-        tel = telemetry.telemetry_path(job_id)
-        if tel.is_file():
-            tar.add(tel, arcname=f"{prefix}/telemetry.json", recursive=False)
+        # Read whole first: a tar member cut short would break the result
+        # archive, and a copy of the telemetry must never cost the upload.
+        try:
+            tel = telemetry.telemetry_path(job_id).read_bytes()
+        except OSError as exc:
+            tel = None
+            print(f"job {job_id}: telemetry.json not in the result archive: {exc}")
+        if tel:
+            info = tarfile.TarInfo(f"{prefix}/telemetry.json")
+            info.size, info.mtime, info.mode = len(tel), int(time.time()), 0o644
+            tar.addfile(info, io.BytesIO(tel))
     os.replace(tmp, out)
     sha, md5 = hashlib.sha256(), hashlib.md5()
     with out.open("rb") as f:
@@ -271,13 +280,19 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
         _set_status(job_id, state="uploading", url=dest, started=round(started, 1))
         meta = build_archive(job_id, files, arc)
         data = arc.read_bytes()
+        pack_s = round(time.time() - started, 1)
         err = None
+        tries = transfer_s = 0
         for attempt in range(attempts):
+            tries += 1
             try:
                 req = request(target, job_id, name, data)
+                # The last attempt's own time, for telemetry's MB/s.
+                t0 = time.monotonic()
                 with urllib.request.urlopen(req, timeout=600, context=ssl_context()) as r:
                     r.read()
                     etag = r.headers.get("ETag")
+                transfer_s = round(time.monotonic() - t0, 2)
                 err = etag_problem(etag, meta["md5"])
                 if err is None:
                     break
@@ -291,7 +306,8 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
             job_id, state="failed" if err else "done", url=dest, file=name,
             files=[p.name for p in files], bytes=meta["bytes"],
             sha256=meta["sha256"], started=round(started, 1),
-            ended=round(time.time(), 1), error=err)
+            ended=round(time.time(), 1), pack_s=pack_s,
+            transfer_s=None if err else transfer_s, attempts=tries, error=err)
         if err:
             print(f"job {job_id}: output upload to {dest} FAILED: {err} "
                   f"(archive kept at {arc})")
@@ -313,5 +329,8 @@ def upload_async(job_id: int) -> None:
         except Exception as exc:                              # noqa: BLE001
             st = {"state": "failed", "error": str(exc)}
             print(f"job {job_id}: output upload FAILED: {exc}")
+        # The job's one telemetry upload, deferred to here by the worker so
+        # the record includes transfers.output.
+        telemetry.write(job_id, upload=True)
         telemetry.notify("job.uploaded", job_id, state=st.get("state"))
     threading.Thread(target=run, daemon=True, name=f"output{job_id}").start()
