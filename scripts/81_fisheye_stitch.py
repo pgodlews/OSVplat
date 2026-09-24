@@ -31,7 +31,6 @@ import argparse
 import math
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -39,6 +38,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from io_pool import WriteBehind, read_ahead
 from osmo_fisheye import lenses, theta_d, world_to_cams
 
 
@@ -101,10 +101,14 @@ def fish_grid(l, M_np, fscale, dev, valid_radius):
     return torch.stack([gx, gy], -1).float()[None], valid
 
 
-def to_tensor(path, dev, flags=cv2.IMREAD_COLOR):
+def read(path, flags=cv2.IMREAD_COLOR):
     img = cv2.imread(str(path), flags)
     if img is None:
         raise SystemExit(f"cannot read {path}")
+    return img
+
+
+def to_tensor(img, dev):
     t = torch.from_numpy(img).to(dev)
     t = t.permute(2, 0, 1) if t.ndim == 3 else t[None]
     return t[None].float()
@@ -127,22 +131,22 @@ def stitch(a, L, dev):
     grids = [erp_grid(l, M, a.fscale, dev, erp_w, erp_h) for l, M in zip(L, world_to_cams(L))]
     wsum = (grids[0][1] + grids[1][1]).clamp_min(1e-6)
     names = sorted(p.name for p in (Path(a.images) / "lens0").glob("*.jpg"))[: a.limit or None]
-    pool, pending = ThreadPoolExecutor(6), []
     t = time.time()
-    for name in names:
-        acc = None
-        for i, (grid, w) in enumerate(grids):
-            s = F.grid_sample(to_tensor(Path(a.images) / f"lens{i}" / name, dev), grid,
-                              mode="bilinear", padding_mode="zeros", align_corners=False) * w
-            acc = s if acc is None else acc + s
-        pano = (acc / wsum).clamp(0, 255).byte()[0].permute(1, 2, 0).cpu().numpy()
-        dst = out / f"pano_{frame_number(name)}.jpg"
-        pending.append(pool.submit(cv2.imwrite, str(dst), pano, [cv2.IMWRITE_JPEG_QUALITY, 95]))
-    ok = all(p.result() for p in pending)
-    print(f"stitch: {len(names)} panoramas {erp_w}x{erp_h} (fscale {a.fscale}) in {time.time() - t:.1f}s"
-          + ("" if ok else " -- SOME WRITES FAILED"), flush=True)
-    if not ok:
-        raise SystemExit(1)
+    # Decoding the two fisheyes and encoding the panorama are the work here; the
+    # GPU resample takes milliseconds. Both run on threads, in order.
+    load = lambda name: [read(Path(a.images) / f"lens{i}" / name) for i in (0, 1)]
+    with WriteBehind() as writer:
+        for name, imgs in read_ahead(load, names):
+            acc = None
+            for img, (grid, w) in zip(imgs, grids):
+                s = F.grid_sample(to_tensor(img, dev), grid,
+                                  mode="bilinear", padding_mode="zeros", align_corners=False) * w
+                acc = s if acc is None else acc + s
+            pano = (acc / wsum).clamp(0, 255).byte()[0].permute(1, 2, 0).cpu().numpy()
+            dst = out / f"pano_{frame_number(name)}.jpg"
+            writer.submit(dst, cv2.imwrite, str(dst), pano, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    print(f"stitch: {len(names)} panoramas {erp_w}x{erp_h} (fscale {a.fscale}) in {time.time() - t:.1f}s",
+          flush=True)
 
 
 def masks(a, L, dev):
@@ -152,15 +156,16 @@ def masks(a, L, dev):
         (Path(a.out) / f"lens{i}").mkdir(parents=True, exist_ok=True)
     t = time.time()
     keep = [0.0, 0.0]
-    for name in names:
-        src = Path(a.erp_masks) / f"pano_{frame_number(name)}.png"
-        erp = to_tensor(src, dev, cv2.IMREAD_GRAYSCALE)
-        for i, (grid, valid) in enumerate(grids):
-            m = F.grid_sample(erp, grid, mode="nearest", padding_mode="border", align_corners=False)[0, 0]
-            m = ((m >= 128) & valid).byte() * 255
-            keep[i] += float(m.float().mean() / 255)
-            if not cv2.imwrite(str(Path(a.out) / f"lens{i}" / f"{name}.png"), m.cpu().numpy()):
-                raise SystemExit(f"could not write mask for lens{i}/{name}")
+    load = lambda name: read(Path(a.erp_masks) / f"pano_{frame_number(name)}.png", cv2.IMREAD_GRAYSCALE)
+    with WriteBehind() as writer:
+        for name, img in read_ahead(load, names):
+            erp = to_tensor(img, dev)
+            for i, (grid, valid) in enumerate(grids):
+                m = F.grid_sample(erp, grid, mode="nearest", padding_mode="border", align_corners=False)[0, 0]
+                m = ((m >= 128) & valid).byte() * 255
+                keep[i] += float(m.float().mean() / 255)
+                dst = Path(a.out) / f"lens{i}" / f"{name}.png"
+                writer.submit(f"mask for lens{i}/{name}", cv2.imwrite, str(dst), m.cpu().numpy())
     n = max(len(names), 1)
     circle = (f"valid circle alone: {math.pi * a.valid_radius ** 2 / (size_of(L[0])[0] * size_of(L[0])[1]):.3f}"
               if a.valid_radius > 0 else "no valid circle")

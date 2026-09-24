@@ -56,6 +56,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from io_pool import WriteBehind, read_ahead
+
 PERSON_LABEL = 1  # COCO
 
 # torch and the model libraries are imported inside the backends on purpose:
@@ -243,24 +245,38 @@ def main() -> int:
         net = maskrcnn_resnet50_fpn_v2(
             weights=MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT).eval().to(device)
         views = build_views(DEFAULT_VIEWS)
+        # Where each equirect pixel lands in each view, kept on the GPU so the
+        # view masks are carried back there and only the union comes home.
+        for v in views:
+            v["flat_t"] = torch.from_numpy(v["py"] * vs + v["px"]).long().to(device)
+            v["inside_t"] = torch.from_numpy(v["inside"]).to(device)
+        # byte -> [0, 1] exactly as the host computes it. CUDA divides by a
+        # scalar as a multiply by its reciprocal, which can differ in the last bit.
+        to_unit = torch.arange(256, dtype=torch.float32).div(255).to(device)
 
-        def segment(work):
-            tiles = [cv2.remap(work, v["map_x"], v["map_y"], cv2.INTER_LINEAR,
-                               borderMode=cv2.BORDER_WRAP) for v in views]
-            batch = [torch.from_numpy(cv2.cvtColor(t, cv2.COLOR_BGR2RGB))
-                     .permute(2, 0, 1).float().div(255).to(device) for t in tiles]
+        def prepare(work):
+            # Runs on a reader thread (cv2.remap releases the GIL), so the tiles
+            # for the next frame are cut while the GPU works on this one.
+            return np.stack([cv2.cvtColor(cv2.remap(work, v["map_x"], v["map_y"], cv2.INTER_LINEAR,
+                                                    borderMode=cv2.BORDER_WRAP), cv2.COLOR_BGR2RGB)
+                             for v in views])
+
+        def segment(work, tiles):
+            # Upload bytes and convert on the GPU: a quarter of the transfer. Each
+            # tile is a CHW view of HWC memory, the layout the model always got.
+            dev_tiles = to_unit[torch.from_numpy(tiles).to(device).long()].permute(0, 3, 1, 2)
             with torch.no_grad():
-                outputs = net(batch)
-            found = np.zeros((eh, ew), np.uint8)
+                outputs = net(list(dev_tiles))
+            found = torch.zeros(eh * ew, dtype=torch.bool, device=device)
             n = 0
             for v, res in zip(views, outputs):
                 keep = (res["labels"] == PERSON_LABEL) & (res["scores"] > score)
                 if not bool(keep.any()):
                     continue
                 n += int(keep.sum())
-                vm = (res["masks"][keep, 0] > 0.5).any(0).cpu().numpy()
-                found |= (v["inside"] & vm[v["py"], v["px"]]).astype(np.uint8)
-            return found, n
+                vm = (res["masks"][keep, 0] > 0.5).any(0).reshape(-1)
+                found |= v["inside_t"].reshape(-1) & vm[v["flat_t"].reshape(-1)]
+            return found.reshape(eh, ew).cpu().numpy().astype(np.uint8), n
     else:
         import torch
         from PIL import Image
@@ -295,7 +311,10 @@ def main() -> int:
                                     else m[i]).astype(bool)
             return u, n
 
-        def segment(work):
+        def prepare(work):
+            return None
+
+        def segment(work, _):
             found, n = sam(work, eh, ew)
             for v in views:
                 tile = cv2.remap(work, v["map_x"], v["map_y"], cv2.INTER_LINEAR,
@@ -308,28 +327,55 @@ def main() -> int:
     kernel = (np.ones((args.dilate, args.dilate), np.uint8)
               if args.dilate > 0 else None)
 
-    stats, empty, t0 = [], [], time.time()
-    for i, src in enumerate(files):
+    def load(src):
+        """Everything about one frame that needs no GPU, on a reader thread."""
         dst = out / f"{src.stem}.png"
         if dst.exists() and not args.force:
+            prev = cv2.imread(str(dst), cv2.IMREAD_GRAYSCALE)
+            if prev is not None:
+                prev = cv2.resize(prev, (ew, eh), interpolation=cv2.INTER_NEAREST)
+            return "cached", prev
+        full = cv2.imread(str(src), cv2.IMREAD_COLOR)
+        if full is None:
+            return "unreadable", None
+        work = cv2.resize(full, (ew, eh), interpolation=cv2.INTER_AREA)
+        return "new", (full.shape[1], full.shape[0], work, prepare(work))
+
+    def write_mask(people, size, dst, src_name):
+        # White = keep, black = ignore. Written at source resolution so the same
+        # file can be handed to COLMAP, which requires an exact size match.
+        mask_full = 255 - cv2.resize(people * 255, size, interpolation=cv2.INTER_NEAREST)
+        if not cv2.imwrite(str(dst), mask_full):
+            return False
+        publish_colmap(src_name, dst)
+        return True
+
+    def write_overlay(work, people, dst):
+        tinted = work.copy()
+        sel = people > 0
+        tinted[sel] = (0.35 * tinted[sel] + 0.65 * np.array([0, 0, 255])).astype(np.uint8)
+        return cv2.imwrite(str(dst), tinted, [cv2.IMWRITE_JPEG_QUALITY, 88])
+
+    stats, empty, t0 = [], [], time.time()
+    writer = WriteBehind()
+    for i, (src, (kind, data)) in enumerate(read_ahead(load, files)):
+        dst = out / f"{src.stem}.png"
+        if kind == "cached":
             # Measure it anyway. The summary is what the caller gates on, and a
             # resumed run that reported "0% covered" because it did no work
             # would look exactly like a run where the detector found nobody.
-            prev = cv2.imread(str(dst), cv2.IMREAD_GRAYSCALE)
             publish_colmap(src.name, dst)
-            if prev is not None:
-                prev = cv2.resize(prev, (ew, eh), interpolation=cv2.INTER_NEAREST)
-                inv = (prev < 128).astype(np.uint8)
+            if data is not None:
+                inv = (data < 128).astype(np.uint8)
                 stats.append(float((inv * solid_angle_w).sum()
                                    / (np.ones_like(inv) * solid_angle_w).sum()))
             continue
-        full = cv2.imread(str(src), cv2.IMREAD_COLOR)
-        if full is None:
+        if kind == "unreadable":
             print(f"  skipping unreadable {src.name}", file=sys.stderr)
             continue
-        work = cv2.resize(full, (ew, eh), interpolation=cv2.INTER_AREA)
+        full_w, full_h, work, prepared = data
 
-        people, n_det = segment(work)
+        people, n_det = segment(work, prepared)
 
         if kernel is not None and people.any():
             people = cv2.dilate(people, kernel, iterations=1)
@@ -340,25 +386,17 @@ def main() -> int:
         if n_det == 0:
             empty.append(src.name)
 
-        # White = keep, black = ignore. Written at source resolution so the same
-        # file can be handed to COLMAP, which requires an exact size match.
-        mask_full = 255 - cv2.resize(people * 255, (full.shape[1], full.shape[0]),
-                                     interpolation=cv2.INTER_NEAREST)
-        cv2.imwrite(str(dst), mask_full)
-        publish_colmap(src.name, dst)
-
+        writer.submit(dst, write_mask, people, (full_w, full_h), dst, src.name)
         if overlay_dir:
-            tinted = work.copy()
-            sel = people > 0
-            tinted[sel] = (0.35 * tinted[sel] + 0.65 * np.array([0, 0, 255])).astype(np.uint8)
-            cv2.imwrite(str(overlay_dir / f"{src.stem}.jpg"), tinted,
-                        [cv2.IMWRITE_JPEG_QUALITY, 88])
+            writer.submit(f"overlay for {src.name}", write_overlay, work, people,
+                          overlay_dir / f"{src.stem}.jpg")
 
         # Every five, not every twenty: the queue scrapes this line for the
         # mask progress bar, and at ~0.7 s per panorama twenty is fourteen
         # seconds of a bar that does not move.
         if (i + 1) % 5 == 0 or i + 1 == len(files):
             print(f"  {i+1}/{len(files)}  {time.time()-t0:.0f}s", flush=True)
+    writer.close()   # every mask, link and overlay on disk before counting them
 
     summary = {
         "frames": len(files),
