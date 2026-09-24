@@ -23,7 +23,8 @@ Mapping goes through colmap_incremental.incremental_mapping, which lifts COLMAP'
 frames) COLMAP's own mapper makes every global pass iterative: a 7-minute clip
 spent about two hours per pass. With the limit lifted the same 1404 frames
 mapped in 4 h 57 min and converged to a slightly lower cost
-(colmap_incremental.py has the measurements).
+(colmap_incremental.py has the measurements). Global bundle adjustment also
+runs less often than COLMAP's default (see the mapper options below).
 
 usage (venv): 82_fisheye_sfm.py --calib calibration.json --images DIR/images
               --masks DIR/fmasks_colmap --out DIR/sfm_fish_fixed
@@ -136,6 +137,21 @@ def main():
     opts.ba_refine_sensor_from_rig = True
     opts.mapper.abs_pose_refine_focal_length = a.refine_intrinsics
     opts.mapper.abs_pose_refine_extra_params = a.refine_intrinsics
+    # COLMAP's defaults run a global bundle adjustment each time the model grows
+    # by 10 % and repeat each one up to 5 times, which was 74 % of mapping on a
+    # 957-frame clip. 1.4 is COLMAP's own video preset, 2 refinements its
+    # medium-quality one. Clip 0005 (957 rig frames, nosacz-llm, 16 threads):
+    # mapping 80.4 -> 40.7 min, global BA 59.9 -> 20.1 min; 957/957 frames and
+    # 1.069 px either way, camera centres within 0.014 % of the path length.
+    opts.ba_global_frames_ratio = 1.4
+    opts.ba_global_points_ratio = 1.4
+    opts.ba_global_max_refinements = 2
+    ba_local, ba_global = opts.get_local_bundle_adjustment(), opts.get_global_bundle_adjustment()
+    logging.info(f"mapper: global BA ratio {opts.ba_global_frames_ratio}/{opts.ba_global_points_ratio} "
+                 f"refinements {opts.ba_global_max_refinements}; ceres threads local "
+                 f"{ba_local.ceres.solver_options.num_threads} global "
+                 f"{ba_global.ceres.solver_options.num_threads}, gpu {opts.ba_use_gpu}, "
+                 f"{pycolmap.COLMAP_build}")
     sparse = out / "sparse"
     if sparse.is_symlink():
         sparse.unlink()

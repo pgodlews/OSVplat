@@ -310,6 +310,13 @@ FISHEYE_PIPELINE = "fisheye-rig-1"
 # so those cache entries keep their keys. Bump it after changing how
 # 80_fisheye_frames.py scores candidates with the orientation stream.
 IMU_SELECT = "imu-select-1"
+
+# Joins the sfm key -- and so train and export -- of fisheye jobs only. Bump it
+# after changing what 82/88_fisheye_sfm.py or colmap_incremental.py reconstruct
+# from the same selection and masks: frames, selection and masks keep their
+# cache entries, where a FISHEYE_PIPELINE bump would redo all three. 2: global
+# bundle adjustment every 40 % of growth, 2 refinements (was 10 %, 5).
+FISHEYE_SFM = "fisheye-sfm-2"
 # What the API sets for .OSV input when a request leaves select.imu out.
 IMU_SELECT_DEFAULT = False
 
@@ -421,7 +428,8 @@ class JobConfig(Cfg):
 
     def k_sfm(self) -> str:
         return key_of("sfm", self.k_select(), self.sfm.model_dump(),
-                      self._sfm_mask_term())
+                      self._sfm_mask_term(),
+                      *((FISHEYE_SFM,) if self.is_fisheye else ()))
 
     def k_mask(self) -> str:
         # A disabled mask stage produces nothing, so every disabled config has

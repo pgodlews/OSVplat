@@ -782,6 +782,20 @@ except Exception as _e:                                          # noqa: BLE001
     _imu_refused = "select.imu" in str(_e)
 check("select.imu is refused for stitched input, which has no orientation stream", _imu_refused)
 
+# FISHEYE_SFM re-runs a fisheye reconstruction without redoing frames,
+# selection or masks, and never touches a stitched key.
+from app.jobs import FISHEYE_SFM                               # noqa: E402
+
+check("the fisheye sfm term forks sfm, train and export of fisheye jobs only",
+      _osv.k_sfm() == key_of("sfm", _osv.k_select(), _osv.sfm.model_dump(),
+                             _osv._sfm_mask_term(), FISHEYE_SFM)
+      and _mp4.k_sfm() == key_of("sfm", _mp4.k_select(), _mp4.sfm.model_dump(),
+                                 _mp4._sfm_mask_term()))
+check("the fisheye sfm term leaves frames, select and mask keys alone",
+      _osv.k_frames() == key_of("frames", _osv.config_version, "deadbeef", None, None,
+                                _osv.frames.model_dump(), FISHEYE_PIPELINE)
+      and _osv.k_select() == key_of("select", _osv.k_frames(), _sel_dump))
+
 with tempfile.TemporaryDirectory() as _d:
     _root = Path(_d)
 

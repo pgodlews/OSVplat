@@ -39,8 +39,9 @@ time, and a test that forgot once wrote into a live queue database.
 - **Cache keys.** Each stage is cached by a hash of the options that affect
   it (`JobConfig.keys()`). If you change what a script outputs for the same
   options, bump its version term in `queue/app/jobs.py` so stale caches are not
-  served: `FISHEYE_PIPELINE` for any fisheye script, `IMU_SELECT` for gyro
-  selection scoring, `config_version` for everything. Adding an option that
+  served: `FISHEYE_SFM` for the fisheye reconstruction (`82`/`88_fisheye_sfm.py`,
+  `colmap_incremental.py`), `FISHEYE_PIPELINE` for any other fisheye script,
+  `IMU_SELECT` for gyro selection scoring, `config_version` for everything. Adding an option that
   does not change pixels (like `mask.review`) must *not* enter the key.
   `test_stages.py` pins existing keys; update the pins only on purpose.
 - **Never `pkill -f` / `pgrep -f`.** They match the shell running them.
