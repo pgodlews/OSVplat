@@ -744,7 +744,12 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
     if gut:
         argv.append("--gut")
     if t.eval:
-        argv.append("--eval")
+        # Nothing reads LichtFeld's per-eval PNGs (240 held-out views at
+        # 3840x7684 per eval on a 957-frame clip): 8.4 GB of cache and 3.7 min
+        # of a 144-min Standard train on a 3090 (0005, 2026-09-24). PSNR and SSIM
+        # still land in metrics.csv, and the splat is the same run to run
+        # (21.920 saving, 21.916 not; same-GPU noise ~0.005 dB). Not a key term.
+        argv += ["--eval", "--no-save-eval-images"]
     if t.enable_mip:
         argv.append("--enable-mip")
     if t.background_improvements:

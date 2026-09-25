@@ -180,7 +180,7 @@ MASK_OUTPUT_FIELDS = {"enabled", "backend", "prompts", "nadir_view",
 MANAGED_TRAIN_FLAGS = {
     "-d", "--images", "-o", "--headless", "--strategy", "--max-cap",
     "--sh-degree", "--iter", "--steps-scaler", "--max-width", "--gut",
-    "--eval", "--enable-mip", "--background-improvements",
+    "--eval", "--no-save-eval-images", "--enable-mip", "--background-improvements",
     "--exposure-correction", "--bilateral-grid", "--min-opacity",
     "--max-screen-share", "--export", "--mask-mode", "--invert-masks",
 }

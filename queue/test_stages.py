@@ -686,6 +686,23 @@ with tempfile.TemporaryDirectory() as _d:
     check("stitched training is unchanged: LichtFeld directly, masked view, --gut",
           _sl[0].endswith("LichtFeld-Studio") and "--gut" in _sl
           and _sl[_sl.index("--mask-mode") + 1] == "ignore")
+    check("eval keeps its metrics but writes no per-view PNGs, on both pipelines",
+          "--eval" in _sl and "--no-save-eval-images" in _sl
+          and "--eval" in _lfs and "--no-save-eval-images" in _lfs)
+    _ne = _ctx_for(_cfg("samples/x.mp4", train={"eval": False}))
+    _ne.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"), needs_gut=True)
+    _nl = _stages.STAGES["train"]["argv"](_ne)
+    check("and neither flag without train.eval",
+          "--eval" not in _nl and "--no-save-eval-images" not in _nl)
+    check("the eval-image switch is not a cache-key term",
+          _mp4.k_train() == key_of("train", _mp4.k_sfm(), _mp4.k_mask(),
+                                   _mp4.train.model_dump()))
+    try:
+        _cfg("samples/x.mp4", train={"extra_args": "--no-save-eval-images"})
+        _dup_refused = False
+    except Exception as _e:                                      # noqa: BLE001
+        _dup_refused = "--no-save-eval-images" in str(_e)
+    check("extra_args cannot repeat the eval-image switch", _dup_refused)
 
 check("images_dir points a fisheye job at the rig dataset's renamed images",
       str(_stages.images_dir(_osv, Path("/c/sfm"), Path("/c/select"))) == "/c/sfm/dataset/images")
