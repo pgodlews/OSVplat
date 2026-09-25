@@ -114,7 +114,7 @@ request carries `X-OSVplat-Signature: sha256=<HMAC-SHA256 of the body>`.
 | `stages[]` | stage, state (done, cached, skipped, failed…), cache key, start/end, `wall_s`, `planned_s`, the numeric results the stage reported (`info`), and `resources` |
 | `stages[].resources` | sampled every 5 s over the stage's process tree: CPU seconds, average cores busy, peak RSS, GPU utilisation p50/p95/mean and peak GPU memory (whole device), GPU health ([below](#gpu-health)), and `host`: the machine over the whole stage ([Machine load](#machine-load)) |
 | `metrics` | the job's metrics table: PSNR, SSIM, splats, peak VRAM, train seconds… |
-| `host` | OS, whether in a container; CPU model, logical CPUs, physical cores, effective CPUs (affinity and cgroup quota), AVX/AVX2/FMA/AVX-512; RAM, cgroup memory limit, `/dev/shm` size; free/total disk under `QUEUE_ROOT`; per GPU: name, memory, compute capability, driver, max PCIe gen/width, power limit, the card's default and max power limit, max SM and memory clocks |
+| `host` | OS, whether in a container; CPU model, logical CPUs, physical cores, effective CPUs (affinity and cgroup quota), AVX/AVX2/FMA/AVX-512; RAM, cgroup memory limit, `/dev/shm` size; `disk`: used/free/total under `QUEUE_ROOT` when the record is written, and the job's peak ([Disk space](#disk-space)); per GPU: name, memory, compute capability, driver, max PCIe gen/width, power limit, the card's default and max power limit, max SM and memory clocks |
 | `software` | image version and git revision (`OSVPLAT_VERSION`, `OSVPLAT_REVISION`; the Dockerfile and `deploy.sh` set them), Python version |
 | `transfers` | `input`: the `INPUT_URL` download of this job's clip; `output`: the `OUTPUT_UPLOAD_URL` upload ([below](#transfers)) |
 | `placement` | `QUEUE_TELEMETRY_PLACEMENT`, or null |
@@ -140,13 +140,30 @@ them with the card's limits under `host.gpus`.
 | `gpu_pcie_gen_max`, `gpu_pcie_width_max` | the highest PCIe link seen. The link trains down when idle, so only a stage that used the GPU says what the slot can do; below `host.gpus[].pcie_gen`/`pcie_width` there means a narrower slot or a riser |
 | `gpu_ecc_uncorrected` | uncorrected ECC errors since the driver loaded; null on cards without ECC |
 | `gpu_clock_reasons` | for each reason that held the clocks down, the share of samples it did: `gpu_idle`, `sw_power_cap`, `hw_slowdown`, `sw_thermal`, `hw_thermal`, `hw_power_brake`, `applications_clocks`, `sync_boost`, `display_clocks` |
+| `gpu_sw_power_cap_busy` | share of busy samples in which the power cap held the clocks down. Use this, not `gpu_clock_reasons.sw_power_cap`: an idle card can report the cap too |
+| `gpu_power_limit_w_min`, `gpu_power_limit_w_max` | the power limit the card enforced (`enforced.power.limit`), lowest and highest over the stage. Below `host.gpus[].power_default_w` means the host capped the card; `host.gpus[].power_limit_w` is read once, at service start |
+| `gpu_power_limit_changes` | each change of that limit, `{t, from_w, to_w}`, at most 20 per stage. Compared with the last value seen on that GPU, so a change between two stages lands in the later one. Each is also a line in the service log. Null where the driver cannot report the limit |
 
 One unknown field fails a whole `nvidia-smi` query. The sampler tries the
 newer name (`clocks_event_reasons`), then the older one
-(`clocks_throttle_reasons`), then utilisation and memory only, and keeps the
-first that works. A driver with none of these gives null health fields, not a
-failed job. Xid errors are not recorded: `nvidia-smi` cannot query them, and a
+(`clocks_throttle_reasons`), each first with `enforced.power.limit` and then
+without, then utilisation and memory only, and keeps the first that works. A
+driver with none of these gives null health fields, not a failed job. Xid errors are not recorded: `nvidia-smi` cannot query them, and a
 container usually cannot read the kernel log where they appear.
+
+### Disk space
+
+The filesystem under `QUEUE_ROOT`, read in the same 5 s samples (`statvfs`,
+cheap). Used counts every file on it: the clip, the cache, runs and, in a
+container, the image's writable layer. So the peak is the disk a machine needs
+for this job, which is what a rented container disk is sized on.
+
+| Field | Content |
+|---|---|
+| stage `disk_used_bytes_start`, `disk_used_bytes_peak` | used at the stage's first sample, and the most during it |
+| stage `disk_free_bytes_min` | the least free space during the stage |
+| `host.disk.used_peak_bytes`, `host.disk.free_min_bytes` | the same over the whole job |
+| `host.disk.job_growth_peak_bytes` | peak used minus used at the start of the stage that ran first: what the job itself wrote on top of the clip and what was already there. Cached stages write little, so compare jobs that ran every stage |
 
 ### Machine load
 
@@ -181,8 +198,9 @@ the service log.
 |---|---|
 | `t`, `stage` | wall-clock time and the running stage |
 | `cores_busy`, `rss_mb` | the stage's process tree: cores' worth of CPU over the interval, resident memory |
+| `disk_used_mb`, `disk_free_mb` | the filesystem under `QUEUE_ROOT` ([Disk space](#disk-space)) |
 | `host` | [machine load](#machine-load) over the interval, with `core_busy_pct` |
-| `gpu` | this job's GPU at the sample: `util`, `mem_mib`, `power_w`, `sm_mhz`, `mem_mhz`, `temp_c`, `pcie_gen`, `pcie_width`, `clock_reasons` (the reasons active); null without a GPU |
+| `gpu` | this job's GPU at the sample: `util`, `mem_mib`, `power_w`, `sm_mhz`, `mem_mhz`, `temp_c`, `pcie_gen`, `pcie_width`, `clock_reasons` (the reasons active), `power_limit_w` (the enforced limit); null without a GPU |
 
 ### Transfers
 
@@ -235,9 +253,11 @@ above, as the kernel's own counters: `rate()` them for shares and speeds.
 | `splatqueue_host_pressure_stalled_seconds_total{scope,resource,kind}` | PSI stall time; `scope` is `system` or `cgroup` |
 | `splatqueue_cgroup_cpu_periods_total`, `…_throttled_periods_total`, `…_throttled_seconds_total` | CPU-quota throttling of this container |
 | `splatqueue_host_disk_read_bytes_total`, `…_written_bytes_total` | all disks |
+| `splatqueue_queue_root_used_bytes`, `…_free_bytes` | the filesystem under `QUEUE_ROOT`, gauges at scrape time |
 | `splatqueue_host_network_receive_bytes_total`, `…_transmit_bytes_total` | all interfaces but `lo` |
 | `splatqueue_gpu_power_watts`, `…_sm_clock_hertz`, `…_memory_clock_hertz`, `…_temperature_celsius`, `…_pcie_link_generation`, `…_pcie_link_width`, `…_ecc_uncorrected_errors` | per `gpu`, gauges at scrape time |
 | `splatqueue_gpu_clock_event_reason{gpu,reason}` | 1 while that reason holds the clocks down |
+| `splatqueue_gpu_power_limit_watts` | per `gpu`, the power limit the card enforces now; below the card's default is a host cap |
 
 ## What is left out
 

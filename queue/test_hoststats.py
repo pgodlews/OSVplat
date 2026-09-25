@@ -227,6 +227,20 @@ class Metrics(unittest.TestCase):
         self.assertNotIn("nvme", out)
         self.assertNotIn("eth0", out)
 
+    def test_power_limit_gauge(self):
+        row = ["0", "97", "4000", "149.5", "510", "9501", "60", "4", "16",
+               "[N/A]", "0x0000000000000004"]
+        with patch.object(metrics.telemetry, "_gpu_sample_rows", lambda: [row]):
+            self.assertNotIn("gpu_power_limit_watts", metrics.render([]))   # driver without it
+        with patch.object(metrics.telemetry, "_gpu_sample_rows", lambda: [row + ["150.00"]]):
+            self.assertIn('splatqueue_gpu_power_limit_watts{gpu="0"} 150', metrics.render([]))
+
+    def test_disk_space_gauges(self):
+        with patch.object(metrics.telemetry, "_disk_space", lambda: (6_000, 44_000, 50_000)):
+            out = metrics.render([])
+        self.assertIn("splatqueue_queue_root_used_bytes 6000", out)
+        self.assertIn("splatqueue_queue_root_free_bytes 44000", out)
+
     def test_old_driver_rows_are_skipped(self):
         with patch.object(metrics.telemetry, "_gpu_sample_rows", lambda: [["0", "50", "100"]]):
             out = metrics.render([])

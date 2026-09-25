@@ -94,8 +94,10 @@ def _gpu_health(e: Exposition) -> None:
     def fam(name, help_text, i, scale=1.0, cast=float):
         e.add(name, help_text, "gauge",
               [({"gpu": g}, num(r[i], cast) * scale) for g, r in rows
-               if num(r[i], cast) is not None])
+               if len(r) > i and num(r[i], cast) is not None])
     fam("gpu_power_watts", "GPU power draw.", 3)
+    fam("gpu_power_limit_watts", "Power limit the GPU enforces now. Below the "
+        "card's default: a host power cap.", 11)
     fam("gpu_sm_clock_hertz", "GPU SM clock.", 4, 1e6)
     fam("gpu_memory_clock_hertz", "GPU memory clock.", 5, 1e6)
     fam("gpu_temperature_celsius", "GPU temperature.", 6)
@@ -159,6 +161,12 @@ def _host(e: Exposition) -> None:
         e.scalar("host_disk_read_bytes_total", "Bytes read, all disks.", "counter", d["read"])
         e.scalar("host_disk_written_bytes_total", "Bytes written, all disks.",
                  "counter", d["write"])
+    sp = telemetry._disk_space()
+    if sp:
+        e.scalar("queue_root_used_bytes", "Bytes used on the filesystem under "
+                 "QUEUE_ROOT (clip, cache, runs).", "gauge", sp[0])
+        e.scalar("queue_root_free_bytes", "Bytes free on the filesystem under "
+                 "QUEUE_ROOT.", "gauge", sp[1])
     n = h.get("net")
     if n:
         e.scalar("host_network_receive_bytes_total",

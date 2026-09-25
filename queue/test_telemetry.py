@@ -3,6 +3,7 @@
 
     python3 queue/test_telemetry.py
 """
+import gzip
 import http.server
 import io
 import json
@@ -308,7 +309,7 @@ class GpuHealth(unittest.TestCase):
         return smi, asked
 
     def test_old_driver_falls_back_to_throttle_reasons(self):
-        known = set(telemetry._SAMPLE_QUERIES[1].split("=", 1)[1].split(","))
+        known = set(telemetry._SAMPLE_QUERIES[3].split("=", 1)[1].split(","))
         seq = iter([
             # util, mem, power, sm, mem clk, temp, gen, width, ecc, reasons
             ["0", "90", "4000", "300.5", "1900", "9500", "70", "4", "16", "[N/A]", "0x0000000000000004"],
@@ -321,8 +322,9 @@ class GpuHealth(unittest.TestCase):
             for _ in range(3):
                 s.sample()
         self.assertIn("clocks_throttle_reasons.active", telemetry._sample_query)
-        # The event-reasons query was tried once, not on every sample.
-        self.assertEqual(sum("clocks_event_reasons" in q for q in asked), 1)
+        # Each event-reasons query (with and without the limit) was tried
+        # once, not on every sample.
+        self.assertEqual(sum("clocks_event_reasons" in q for q in asked), 2)
         out = s.summary(15)
         self.assertEqual(out["gpu_busy_samples"], 2)
         self.assertEqual(out["gpu_power_w_max"], 320.0)
@@ -333,6 +335,60 @@ class GpuHealth(unittest.TestCase):
         self.assertEqual(out["gpu_clock_reasons"],
                          {"gpu_idle": 0.33, "sw_power_cap": 0.67, "sw_thermal": 0.33})
         self.assertEqual(out["gpu_mem_peak_mib"], 4100)
+
+    def test_power_limit_lowered_while_running(self):
+        telemetry._limit_seen.clear()
+        known = set(telemetry._SAMPLE_QUERIES[0].split("=", 1)[1].split(","))
+        seq = iter([
+            # util, mem, power, sm, mem clk, temp, gen, width, ecc, reasons, limit
+            ["0", "95", "4000", "340.0", "1900", "9500", "70", "4", "16", "[N/A]", "0x0000000000000004", "350.00"],
+            ["0", "10", "4000", "20.0", "210", "405", "45", "1", "16", "[N/A]", "0x0000000000000004", "350.00"],
+            ["0", "95", "4000", "149.0", "510", "9500", "60", "4", "16", "[N/A]", "0x0000000000000004", "150.00"],
+            ["0", "95", "4000", "150.0", "520", "9500", "60", "4", "16", "[N/A]", "0x0000000000000000", "150.00"],
+        ])
+        smi, _ = self.fake_smi(lambda fields: [next(seq)], known)
+        s = telemetry.ResourceSampler(0, os.getpid())
+        with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+            for _ in range(3):
+                s.sample()
+            self.assertEqual(s._gpu_now["power_limit_w"], 150.0)
+            # The next stage's sampler starts at the lowered limit: no new change.
+            s2 = telemetry.ResourceSampler(0, os.getpid())
+            s2.sample()
+        out = s.summary(15)
+        self.assertEqual((out["gpu_power_limit_w_min"], out["gpu_power_limit_w_max"]), (150.0, 350.0))
+        self.assertEqual([(c["from_w"], c["to_w"]) for c in out["gpu_power_limit_changes"]],
+                         [(350.0, 150.0)])
+        # Capped in both busy samples; the idle one does not count.
+        self.assertEqual(out["gpu_sw_power_cap_busy"], 1.0)
+        out2 = s2.summary(5)
+        self.assertEqual(out2["gpu_power_limit_changes"], [])
+        self.assertEqual(out2["gpu_sw_power_cap_busy"], 0.0)
+
+    def test_power_limit_changed_between_stages(self):
+        telemetry._limit_seen.clear()
+        known = set(telemetry._SAMPLE_QUERIES[0].split("=", 1)[1].split(","))
+        row = lambda lim: ["0", "95", "4000", "140.0", "1900", "9500", "70", "4", "16", "[N/A]", "0x0", lim]
+        for lim in ("350.00", "150.00"):
+            smi, _ = self.fake_smi(lambda fields, lim=lim: [row(lim)], known)
+            s = telemetry.ResourceSampler(0, os.getpid())
+            with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+                s.sample()
+        self.assertEqual([(c["from_w"], c["to_w"]) for c in s.summary(5)["gpu_power_limit_changes"]],
+                         [(350.0, 150.0)])
+
+    def test_driver_without_enforced_limit_keeps_the_rest(self):
+        known = set(telemetry._SAMPLE_QUERIES[1].split("=", 1)[1].split(","))
+        row = ["0", "95", "4000", "300.0", "1900", "9500", "70", "4", "16", "[N/A]", "0x0000000000000004"]
+        smi, _ = self.fake_smi(lambda fields: [row], known)
+        s = telemetry.ResourceSampler(0, os.getpid())
+        with patch.object(telemetry.gpu, "_nvidia_smi", smi):
+            s.sample()
+        self.assertNotIn("enforced.power.limit", telemetry._sample_query)
+        out = s.summary(5)
+        self.assertEqual((out["gpu_power_w_max"], out["gpu_sw_power_cap_busy"]), (300.0, 1.0))
+        self.assertIsNone(out["gpu_power_limit_w_min"])
+        self.assertIsNone(out["gpu_power_limit_changes"])
 
     def test_driver_without_health_fields_still_samples_utilisation(self):
         known = {"index", "utilization.gpu", "memory.used"}
@@ -365,6 +421,56 @@ class GpuHealth(unittest.TestCase):
             g = telemetry._gpus()[0]
         self.assertEqual((g["power_default_w"], g["power_max_w"], g["sm_clock_max_mhz"],
                           g["mem_clock_max_mhz"]), (350.0, 400.0, 2100, 9751))
+
+
+class DiskUse(unittest.TestCase):
+    """Disk used/free under QUEUE_ROOT: per sample, per stage, over the job."""
+
+    def setUp(self):
+        db.init()
+        db.conn().execute("DELETE FROM jobs")
+
+    def test_peak_per_stage_and_over_the_job(self):
+        jid = make_job()
+        G = 10 ** 9
+        seq = iter([(5 * G, 45 * G, 50 * G), (9 * G, 41 * G, 50 * G), (7 * G, 43 * G, 50 * G),
+                    (7 * G, 43 * G, 50 * G), (12 * G, 38 * G, 50 * G)])
+        with patch.object(telemetry, "_disk_space", lambda: next(seq)):
+            a = telemetry.ResourceSampler(None, os.getpid(), job_id=jid, stage="frames")
+            for _ in range(3):
+                a.sample()
+            b = telemetry.ResourceSampler(None, os.getpid(), job_id=jid, stage="sfm")
+            for _ in range(2):
+                b.sample()
+        fa = a.summary(15)
+        self.assertEqual((fa["disk_used_bytes_start"], fa["disk_used_bytes_peak"],
+                          fa["disk_free_bytes_min"]), (5 * G, 9 * G, 41 * G))
+        # Inserted out of order: the baseline goes by start time, not row order.
+        db.upsert_stage(jid, "sfm", "k2", "done", started=20, ended=30)
+        db.upsert_stage(jid, "frames", "k1", "done", started=1, ended=16)
+        telemetry.record_resources(jid, "frames", fa)
+        telemetry.record_resources(jid, "sfm", b.summary(10))
+        # Each stage's first sample is its baseline; the rest are lines.
+        lines = [json.loads(l) for l in gzip.open(telemetry.samples_path(jid)).read().splitlines()]
+        self.assertEqual([(l["stage"], l["disk_used_mb"], l["disk_free_mb"]) for l in lines],
+                         [("frames", 9000, 41000), ("frames", 7000, 43000), ("sfm", 12000, 38000)])
+        with patch.object(telemetry, "_disk_space", lambda: (6 * G, 44 * G, 50 * G)):
+            d = telemetry.build(jid)["host"]["disk"]
+        self.assertEqual(d, {"queue_root_total_bytes": 50 * G, "queue_root_free_bytes": 44 * G,
+                             "queue_root_used_bytes": 6 * G, "used_peak_bytes": 12 * G,
+                             "free_min_bytes": 38 * G, "job_growth_peak_bytes": 7 * G})
+
+    def test_no_statvfs(self):
+        jid = make_job()
+        with patch.object(telemetry, "_disk_space", lambda: None):
+            s = telemetry.ResourceSampler(None, os.getpid(), job_id=jid, stage="frames")
+            s.sample()
+            s.sample()
+            out = s.summary(10)
+            db.upsert_stage(jid, "frames", "k1", "done", started=1, ended=11)
+            telemetry.record_resources(jid, "frames", out)
+            self.assertEqual(telemetry.build(jid)["host"]["disk"], {})
+        self.assertIsNone(out["disk_used_bytes_peak"])
 
 
 class Transfers(unittest.TestCase):

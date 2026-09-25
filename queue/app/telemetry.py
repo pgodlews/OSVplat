@@ -154,13 +154,43 @@ def _memory() -> dict:
     return {"total_bytes": total, "cgroup_limit_bytes": limit, "shm_bytes": shm}
 
 
-def _disk() -> dict:
+def _disk_space() -> Optional[tuple[int, int, int]]:
+    """(used, free, total) bytes of the filesystem under QUEUE_ROOT, or None.
+
+    used counts every file on it (the clip, cache, runs, the image's writable
+    layer in a container), so its peak is the disk a job needs.
+    """
     try:
         st = os.statvfs(QUEUE_ROOT)
-        return {"queue_root_total_bytes": st.f_blocks * st.f_frsize,
-                "queue_root_free_bytes": st.f_bavail * st.f_frsize}
     except OSError:
+        return None
+    return ((st.f_blocks - st.f_bfree) * st.f_frsize, st.f_bavail * st.f_frsize,
+            st.f_blocks * st.f_frsize)
+
+
+def _disk() -> dict:
+    sp = _disk_space()
+    if sp is None:
         return {}
+    return {"queue_root_total_bytes": sp[2], "queue_root_free_bytes": sp[1],
+            "queue_root_used_bytes": sp[0]}
+
+
+def _disk_peak(stages: list[dict]) -> dict:
+    """Disk use over the whole job, from the stage samplers' figures."""
+    res = [st for st in stages if st.get("resources")]
+    peaks = [st["resources"].get("disk_used_bytes_peak") for st in res]
+    peaks = [p for p in peaks if p is not None]
+    frees = [st["resources"].get("disk_free_bytes_min") for st in res]
+    frees = [f for f in frees if f is not None]
+    if not peaks:
+        return {}
+    # The baseline is the stage that started first: before the job wrote anything.
+    first = min((st for st in res if st["resources"].get("disk_used_bytes_start") is not None),
+                key=lambda st: st.get("started") or float("inf"), default=None)
+    return {"used_peak_bytes": max(peaks), "free_min_bytes": min(frees) if frees else None,
+            "job_growth_peak_bytes": (max(peaks) - first["resources"]["disk_used_bytes_start"]
+                                      if first else None)}
 
 
 def _num(s: str, cast=float):
@@ -287,16 +317,26 @@ _GPU_SAMPLE = "gpu=index,utilization.gpu,memory.used"
 _GPU_HEALTH = (",power.draw,clocks.sm,clocks.mem,temperature.gpu,"
                "pcie.link.gen.current,pcie.link.width.current,"
                "ecc.errors.uncorrected.volatile.total,")
+# The limit in force now, after the clock reasons so their column stays put.
+# Read every sample, not once: a host can lower it while a job runs.
+_GPU_LIMIT_NOW = ",enforced.power.limit"
 # Most complete first. clocks_event_reasons is the newer name (drivers from
 # about 535); older drivers only know clocks_throttle_reasons. The last is
 # what this sampler asked before it recorded health.
-_SAMPLE_QUERIES = (_GPU_SAMPLE + _GPU_HEALTH + "clocks_event_reasons.active",
+_SAMPLE_QUERIES = (_GPU_SAMPLE + _GPU_HEALTH + "clocks_event_reasons.active" + _GPU_LIMIT_NOW,
+                   _GPU_SAMPLE + _GPU_HEALTH + "clocks_event_reasons.active",
+                   _GPU_SAMPLE + _GPU_HEALTH + "clocks_throttle_reasons.active" + _GPU_LIMIT_NOW,
                    _GPU_SAMPLE + _GPU_HEALTH + "clocks_throttle_reasons.active",
                    _GPU_SAMPLE)
 _sample_query: Optional[str] = None      # the first that worked on this driver
 # A busy sample: clocks and power are read from these only, since an idle GPU
 # drops its clocks and PCIe link on purpose.
 BUSY_UTIL = 50.0
+# Power limit last seen per GPU, across stages and samplers, so a change
+# between two stages is caught too.
+_limit_seen: dict[int, float] = {}
+_limit_lock = threading.Lock()
+LIMIT_CHANGES_MAX = 20
 
 
 def _gpu_sample_rows() -> Optional[list[list[str]]]:
@@ -354,6 +394,17 @@ class ResourceSampler(threading.Thread):
         self.ecc_max: Optional[int] = None
         self.reasons: dict[str, int] = {}
         self.reason_samples = 0
+        # Busy samples whose clocks the power cap held down. The share over
+        # all samples misleads: an idle card can report sw_power_cap too.
+        self.busy_reason_samples = 0
+        self.busy_power_capped = 0
+        self.limit_min: Optional[float] = None
+        self.limit_max: Optional[float] = None
+        self.limit_changes: list[dict] = []
+        self.disk_used_start: Optional[int] = None
+        self.disk_used_peak: Optional[int] = None
+        self.disk_free_min: Optional[int] = None
+        self._disk_now: Optional[tuple[int, int, int]] = None
         self.samples = 0
         # Not _stop: that name is threading.Thread's own method, which join()
         # calls; an Event there made join() raise TypeError.
@@ -383,15 +434,36 @@ class ResourceSampler(threading.Thread):
             if v is not None:
                 cur = getattr(self, attr)
                 setattr(self, attr, v if cur is None else max(cur, v))
+        if len(r) > 11:
+            self._limit(int(r[0]), _num(r[11]))
         try:
             bits = int(r[10], 16)
         except ValueError:
             return
         self.reason_samples += 1
+        if util >= BUSY_UTIL:
+            self.busy_reason_samples += 1
+            self.busy_power_capped += bool(bits & 0x4)
         for bit, name in CLOCK_REASONS.items():
             if bits & bit:
                 self.reasons[name] = self.reasons.get(name, 0) + 1
         self._gpu_now["clock_reasons"] = [n for b, n in CLOCK_REASONS.items() if bits & b]
+
+    def _limit(self, index: int, limit: Optional[float]) -> None:
+        """The enforced power limit: range over the stage, and every change."""
+        if limit is None:
+            return
+        self._gpu_now["power_limit_w"] = limit
+        self.limit_min = limit if self.limit_min is None else min(self.limit_min, limit)
+        self.limit_max = limit if self.limit_max is None else max(self.limit_max, limit)
+        with _limit_lock:
+            prev = _limit_seen.get(index)
+            _limit_seen[index] = limit
+        if prev is not None and prev != limit:
+            print(f"gpu {index}: power limit changed {prev:g} -> {limit:g} W")
+            if len(self.limit_changes) < LIMIT_CHANGES_MAX:
+                self.limit_changes.append({"t": round(time.time(), 1),
+                                           "from_w": prev, "to_w": limit})
 
     def sample(self) -> None:
         rss = 0
@@ -410,6 +482,13 @@ class ResourceSampler(threading.Thread):
                         self._gpu_row(r)
                 except (IndexError, ValueError):
                     pass
+        self._disk_now = _disk_space()
+        if self._disk_now:
+            used, free, _ = self._disk_now
+            if self.disk_used_start is None:
+                self.disk_used_start = used
+            self.disk_used_peak = used if self.disk_used_peak is None else max(self.disk_used_peak, used)
+            self.disk_free_min = free if self.disk_free_min is None else min(self.disk_free_min, free)
         self.samples += 1
         host = hoststats.read()
         if self._host_first is None:
@@ -436,6 +515,8 @@ class ResourceSampler(threading.Thread):
                 "cores_busy": (round((cpu_now - cpu_prev) / dt, 2)
                                if dt and cpu_now is not None and cpu_prev is not None else None),
                 "rss_mb": round(rss / 1e6) if rss else None,
+                "disk_used_mb": round(self._disk_now[0] / 1e6) if self._disk_now else None,
+                "disk_free_mb": round(self._disk_now[1] / 1e6) if self._disk_now else None,
                 "host": rates, "gpu": self._gpu_now}
         try:
             p = samples_path(self.job_id)
@@ -497,6 +578,15 @@ class ResourceSampler(threading.Thread):
             "gpu_clock_reasons": ({k: round(v / self.reason_samples, 2)
                                    for k, v in sorted(self.reasons.items())}
                                   if self.reason_samples else None),
+            "gpu_sw_power_cap_busy": (round(self.busy_power_capped / self.busy_reason_samples, 2)
+                                      if self.busy_reason_samples else None),
+            "gpu_power_limit_w_min": self.limit_min,
+            "gpu_power_limit_w_max": self.limit_max,
+            "gpu_power_limit_changes": self.limit_changes if self.limit_min is not None else None,
+            # The filesystem under QUEUE_ROOT: what the stage needed of the disk.
+            "disk_used_bytes_start": self.disk_used_start,
+            "disk_used_bytes_peak": self.disk_used_peak,
+            "disk_free_bytes_min": self.disk_free_min,
             # The machine over the whole stage: steal, pressure, throttling.
             "host": hoststats.rates(self._host_first, self._host_prev),
         }
@@ -679,7 +769,7 @@ def build(job_id: int) -> Optional[dict]:
         "plan": plan,
         "stages": stages,
         "metrics": _metrics(job_id),
-        "host": {**host(), "disk": _disk()},
+        "host": {**host(), "disk": {**_disk(), **_disk_peak(stages)}},
         "software": _software(),
         "transfers": {"input": _input_transfer(f), "output": _output_transfer(job_id)},
         "placement": TELEMETRY_PLACEMENT or None,
