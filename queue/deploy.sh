@@ -51,7 +51,9 @@ rsync -az "$REPO/queue/requirements.txt" "$DEST$APP/"
 # have to be there; test_api.py is stdlib-only and runs from anywhere.
 rsync -az "$REPO/queue/test_stages.py" "$REPO/queue/test_worker.py" \
   "$REPO/queue/test_api.py" "$REPO/queue/test_regressions.py" \
-  "$REPO/queue/test_distance.py" "$DEST$APP/"
+  "$REPO/queue/test_distance.py" "$REPO/queue/test_telemetry.py" \
+  "$REPO/queue/test_remote.py" "$REPO/queue/test_benchmark.py" \
+  "$REPO/queue/test_hoststats.py" "$DEST$APP/"
 # summarize_sweep.py reads the queue over HTTP and is meant to be run on the
 # target, where it can pick the token out of .queue_env; it was never shipped there.
 rsync -az "$REPO/queue/summarize_sweep.py" "$DEST$APP/"

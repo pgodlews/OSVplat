@@ -1,5 +1,7 @@
 # OSVplat
 
+[![Tests](https://github.com/pgodlews/OSVplat/actions/workflows/tests.yml/badge.svg)](https://github.com/pgodlews/OSVplat/actions/workflows/tests.yml)
+
 **Raw DJI `.OSV` dual-fisheye → Gaussian splat. No stitch.**
 
 OSVplat turns a DJI Osmo 360 or Avata 360 `.OSV` into a flyable 3D Gaussian
