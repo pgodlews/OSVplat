@@ -1,0 +1,100 @@
+name: Tests
+
+# CPU-only checks: everything here runs on a GitHub-hosted runner with no GPU
+# and no pycolmap/torch build, so it covers a subset of AGENTS.md's "Tests"
+# list. Skipped on purpose: queue/test_api.py (needs a running service),
+# scripts/test_fisheye.py (needs pycolmap), and the GPU half of
+# scripts/test_benchmark.py (skips itself when there is no CUDA device).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  queue:
+    name: Queue service tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: queue/requirements.txt
+
+      - name: Install queue dependencies
+        run: pip install -r queue/requirements.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # Each suite sets its own SPLAT_ROOT/QUEUE_ROOT/QUEUE_GPUS before
+      # importing app.* (AGENTS.md, "Tests") -- nothing to configure here.
+      - name: test_stages.py
+        run: python3 queue/test_stages.py
+      - name: test_worker.py
+        run: python3 queue/test_worker.py
+      - name: test_regressions.py
+        run: python3 queue/test_regressions.py
+      - name: test_distance.py
+        run: python3 queue/test_distance.py
+      - name: test_telemetry.py
+        run: python3 queue/test_telemetry.py
+      - name: test_remote.py
+        run: python3 queue/test_remote.py
+      - name: test_benchmark.py
+        run: python3 queue/test_benchmark.py
+      - name: test_hoststats.py
+        run: python3 queue/test_hoststats.py
+
+  scripts:
+    name: Pipeline script tests (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # numpy + OpenCV only: the same subset venv_gs/venv carry that these
+      # suites actually touch. No torch/gsplat/pycolmap here, so the GPU
+      # half of test_benchmark.py skips itself and test_fisheye.py is not run.
+      - name: Install script dependencies
+        run: pip install numpy opencv-python-headless
+
+      - name: test_avata_motion.py
+        run: python3 scripts/test_avata_motion.py
+      - name: test_imu_select.py
+        run: python3 scripts/test_imu_select.py
+      - name: test_upright.py
+        run: python3 scripts/test_upright.py
+      - name: test_benchmark.py (CPU part; GPU part skips without CUDA)
+        run: python3 scripts/test_benchmark.py
+
+  guardrails:
+    name: queue/app stays free of heavy deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # AGENTS.md: "The service's own venv has no numpy/OpenCV, so heavy
+      # work belongs in a script, not in queue/app/." Cheap to check for
+      # every push instead of finding out at deploy time.
+      - name: No numpy/cv2/torch imports in queue/app
+        run: |
+          if grep -rEn '^\s*(import|from)\s+(numpy|cv2|torch)\b' queue/app --include='*.py'; then
+            echo "::error::queue/app imported a heavy dependency; that work belongs in scripts/ (AGENTS.md)"
+            exit 1
+          fi

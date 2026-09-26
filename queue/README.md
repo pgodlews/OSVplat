@@ -341,7 +341,7 @@ POST   /api/cache/gc[?dry_run&budget_gb]
 
 ## Tests
 
-Five suites, installed by `deploy.sh`. Only the API suite needs a running
+Ten suites, installed by `deploy.sh`. Only the API suite needs a running
 service and reads `QUEUE_TOKEN` from the service's own env file:
 
 ```bash
@@ -352,9 +352,21 @@ set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_a
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_stages.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_worker.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_regressions.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_distance.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_telemetry.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_remote.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_benchmark.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_hoststats.py
 ~/splat/venv/bin/python ~/splat/scripts/test_fisheye.py
 ```
+
+None of the nine non-API suites need a GPU, and every one of them sets its
+own `SPLAT_ROOT`/`QUEUE_ROOT`/`QUEUE_GPUS` to a scratch directory before
+importing `app.*`, so they never touch a live queue. `.github/workflows/tests.yml`
+runs the CPU-only subset (everything above except `test_api.py` and
+`test_fisheye.py`, which need a running service and pycolmap respectively) on
+every push and pull request; see [AGENTS.md](../AGENTS.md#tests) for the full
+list, including the `scripts/` suites that need `venv_gs`.
 
 `test_worker.py` covers the lifecycle paths that used to be reasoned about and
 never exercised, each one a way a job could end up holding a GPU or a cache
@@ -377,8 +389,16 @@ key while each variant gets a distinct `train` key.
 
 `test_regressions.py` uses ffmpeg and an isolated database to check dual-lens
 trimming, concurrent thumbnails, scheduling estimates, pagination and fitted
-history. `scripts/test_fisheye.py` uses numpy and pycolmap on CPU to check stale
-model rejection and the distortion refit; neither suite starts GPU work.
+history. `test_distance.py` covers the Avata distance-selection option's cache
+keys and API surface (see below). `test_remote.py` covers CPU/GPU discovery and
+the output upload for rented-GPU runs (docs/cloud.md), against a local HTTP
+server standing in for S3. `test_benchmark.py` covers the host-benchmark
+service side (the machine hold, the run record); the workload itself
+(`scripts/benchmark.py`) is tested by `scripts/test_benchmark.py`, which needs
+`venv_gs`. `test_hoststats.py` covers the machine-load counters and the
+per-job time series against a faked `/proc` and cgroup tree. `scripts/test_fisheye.py`
+uses numpy and pycolmap on CPU to check stale model rejection and the
+distortion refit; none of these suites starts GPU work.
 
 ## Validated end to end
 

@@ -35,6 +35,13 @@ Every test must set `SPLAT_ROOT`/`QUEUE_ROOT` to a temporary directory and
 `QUEUE_GPUS=""` **before** importing `app.*` — `config.py` reads them at import
 time, and a test that forgot once wrote into a live queue database.
 
+**CI** (`.github/workflows/tests.yml`) runs everything above except
+`test_api.py` (needs a running service) and `test_fisheye.py` (needs
+pycolmap) on every push and pull request, on a GitHub-hosted runner with no
+GPU — `scripts/test_benchmark.py`'s GPU half skips itself there, same as
+locally. A separate job greps `queue/app/` for `numpy`/`cv2`/`torch` imports
+to keep the layout rule above honest.
+
 ## Rules
 
 - **Cache keys.** Each stage is cached by a hash of the options that affect
