@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pycolmap
+import upright
 from osmo_fisheye import colmap_params, theta_d
 
 HERE = Path(__file__).resolve().parent
@@ -56,6 +57,69 @@ class FisheyeRegressions(unittest.TestCase):
         unchanged = dict(lens)
         unchanged.pop("k5")
         self.assertEqual(colmap_params(unchanged)[4:], [0, 0, 0, 0])
+
+
+def rig_model(root, frames=30):
+    """A synthetic two-lens rig model named the way 85/upright.py expect."""
+    o = pycolmap.SyntheticDatasetOptions()
+    o.num_rigs, o.num_cameras_per_rig, o.num_frames_per_rig, o.num_points3D = 1, 2, frames, 200
+    rec = pycolmap.synthesize_dataset(o)
+    order = sorted(rec.images, key=lambda i: rec.images[i].name)
+    for i in order:
+        img = rec.images[i]
+        k = int(img.name.split("frame")[1].split(".")[0])
+        img.name = f"lens{img.camera_id - 1}/frame_{k:04d}.jpg"
+    root.mkdir(parents=True)
+    rec.write_binary(str(root))
+    return rec
+
+
+class UprightModel(unittest.TestCase):
+    """upright.align_model on a real pycolmap rig: the transform, the rig baseline, the fail-safe."""
+
+    def telemetry(self, rec, W):
+        lens0 = sorted((rec.images[i].name, i) for i in rec.reg_image_ids()
+                       if rec.images[i].name.startswith("lens0/"))
+        X = upright.quat_matrix([0.3, -0.5, 0.7, 0.2])
+        R_wb = np.array([W @ np.asarray(rec.images[i].cam_from_world().rotation.matrix()).T @ X
+                         for _, i in lens0])
+        centres = np.array([rec.images[i].projection_center() for _, i in lens0])
+        return np.arange(len(lens0)) * 5e5, R_wb, centres
+
+    def test_levels_the_model_and_scales_the_rig(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rec = rig_model(root / "model")
+            W = upright.quat_matrix([0.9, 0.1, -0.3, 0.2])        # stream world from SfM world
+            when, R_wb, centres = self.telemetry(rec, W)
+            ned = 40.0 * centres @ W.T                              # GPS: 40 m per SfM unit
+            gps = {"t_us": when, "lat": 47.3 + ned[:, 0] / 111_200, "alt_m": 400 - ned[:, 2],
+                   "lon": 8.5 + ned[:, 1] / (111_200 * np.cos(np.radians(47.3)))}
+            with patch.object(upright, "frame_telemetry", return_value=(when, R_wb)), \
+                    patch.object(upright, "gps_track", return_value=gps):
+                rep = upright.align_model(root / "model", root / "aligned", "clip.OSV", "selection.json")
+            self.assertTrue(rep["upright"], rep.get("reason"))
+            self.assertTrue(rep["metric"], rep.get("gps_skipped"))
+            s = rep["transform"]["scale"]
+            self.assertAlmostEqual(s, 40.0, delta=0.2)
+            out = pycolmap.Reconstruction(str(root / "aligned"))
+            down_sfm = W.T @ np.array([0., 0., 1.])
+            R = np.asarray(rep["transform"]["rotation"])
+            self.assertGreater((R @ down_sfm)[1], 0.9999)             # down is +y
+            for i in out.reg_image_ids():                             # lens 1 too: the baseline scaled
+                c_old = np.asarray(rec.images[i].projection_center())
+                c_new = np.asarray(out.images[i].projection_center())
+                self.assertLess(np.linalg.norm(s * R @ c_old + rep["transform"]["translation"] - c_new), 1e-5)
+
+    def test_an_unreadable_stream_leaves_the_model_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rig_model(root / "model")
+            with patch.object(upright, "frame_telemetry", side_effect=SystemExit("no orientation block")):
+                rep = upright.align_model(root / "model", root / "aligned", "clip.OSV", "selection.json")
+            self.assertFalse(rep["upright"])
+            self.assertIn("no orientation block", rep["reason"])
+            self.assertFalse((root / "aligned").exists())
 
 
 if __name__ == "__main__":

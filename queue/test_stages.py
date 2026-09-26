@@ -803,10 +803,13 @@ check("select.imu is refused for stitched input, which has no orientation stream
 # selection or masks, and never touches a stitched key.
 from app.jobs import FISHEYE_SFM                               # noqa: E402
 
+# The sfm dump is the two fields that existed before sfm.upright, spelled out,
+# so a new SfmCfg field cannot slip into the key unnoticed.
+_sfm_dump = {"render": "spherical", "mapper": "incremental"}
 check("the fisheye sfm term forks sfm, train and export of fisheye jobs only",
-      _osv.k_sfm() == key_of("sfm", _osv.k_select(), _osv.sfm.model_dump(),
+      _osv.k_sfm() == key_of("sfm", _osv.k_select(), _sfm_dump,
                              _osv._sfm_mask_term(), FISHEYE_SFM)
-      and _mp4.k_sfm() == key_of("sfm", _mp4.k_select(), _mp4.sfm.model_dump(),
+      and _mp4.k_sfm() == key_of("sfm", _mp4.k_select(), _sfm_dump,
                                  _mp4._sfm_mask_term()))
 check("the fisheye sfm term leaves frames, select and mask keys alone",
       _osv.k_frames() == key_of("frames", _osv.config_version, "deadbeef", None, None,
@@ -849,6 +852,77 @@ with tempfile.TemporaryDirectory() as _d:
     check("with one, the summary lands in the stage record",
           _stages.STAGES["select"]["finalize"](_c).get("imu") == {"overruled": 4})
 
+# ------------------------------------------------ upright and in metres (.OSV)
+# sfm.upright off keeps every key; on forks sfm and after, never frames, select
+# or mask; stitched input is refused; the sfm stage hands 88 the clip, the
+# selection and the trim; and a run that never recorded an alignment is not
+# cached, while one that fell back is, with a warning.
+from app.jobs import UPRIGHT, UPRIGHT_DEFAULT                  # noqa: E402
+
+_up = _cfg("samples/x.OSV", sfm={"upright": True})
+check("sfm.upright on forks sfm, train and export, and nothing before them",
+      _up.k_sfm() == key_of("sfm", _osv.k_select(), _sfm_dump, _osv._sfm_mask_term(),
+                            FISHEYE_SFM, UPRIGHT)
+      and all(_up.keys()[k] == _osv.keys()[k] for k in ("frames", "select", "mask"))
+      and all(_up.keys()[k] != _osv.keys()[k] for k in ("sfm", "train", "export")))
+try:
+    _cfg("samples/x.mp4", sfm={"upright": True})
+    _up_refused = False
+except Exception as _e:                                          # noqa: BLE001
+    _up_refused = "sfm.upright" in str(_e)
+check("sfm.upright is refused for stitched input", _up_refused)
+check("the API turns sfm.upright on for .OSV by default", UPRIGHT_DEFAULT is True)
+
+with tempfile.TemporaryDirectory() as _d:
+    _root = Path(_d)
+
+    def _sfm_ctx(cfg):
+        c = Ctx(job_id=1, cfg=cfg, gpu=0, keys=cfg.keys())
+        c.dir = lambda stage, _r=_root: _r / stage             # type: ignore[assignment]
+        c.derived["n_panos"] = 8
+        return c
+
+    _a = _stages.STAGES["sfm"]["argv"](_sfm_ctx(_cfg(
+        "samples/x.OSV", sfm={"upright": True},
+        input={"file": "samples/x.OSV", "quick_hash": "deadbeef", "trim_start": 4})))
+    check("fisheye sfm with upright reads the clip, the selection and the trim",
+          _a[_a.index("--upright") + 1] == str(_stages.SPLAT_ROOT / "samples" / "x.OSV")
+          and _a[_a.index("--selection") + 1] == str(_root / "select" / "selection.json")
+          and _a[_a.index("--start") + 1] == "4")
+    check("and without it passes none of them",
+          not {"--upright", "--selection", "--start"} & set(_stages.STAGES["sfm"]["argv"](_sfm_ctx(_osv))))
+
+    _ds = _root / "sfm" / "dataset"
+    (_ds / "sparse" / "0").mkdir(parents=True)
+    (_ds / "images").mkdir()
+    (_ds / "images" / "lens0_frame_0000.jpg").touch()
+    (_ds / "masks").mkdir()
+    (_ds / "masks" / "lens0_frame_0000.png").touch()
+    _base = {"num_reg_frames": 8, "registration_pct": 100.0, "n_panos": 8}
+
+    def _finalize(extra, cfg=_up):
+        (_root / "sfm" / "summary.json").write_text(json.dumps(dict(_base, **extra)))
+        return _stages.STAGES["sfm"]["finalize"](_sfm_ctx(cfg))
+
+    try:
+        _finalize({})
+        _unaligned = False
+    except RuntimeError as _e:
+        _unaligned = "no alignment" in str(_e)
+    check("an upright sfm run that recorded no alignment is not cached", _unaligned)
+    _w = _finalize({"alignment": {"upright": False, "metric": False, "reason": "barely rotated"}})["warnings"]
+    check("one that fell back is cached, with the reason as a warning",
+          any("not levelled" in w and "barely rotated" in w for w in _w))
+    _w = _finalize({"alignment": {"upright": True, "metric": False,
+                                  "gps_skipped": "the clip carries no GPS fix"}})["warnings"]
+    check("levelled without GPS is the normal Osmo case, not a warning",
+          not any("level" in w for w in _w))
+    _w = _finalize({"alignment": {"upright": True, "metric": False,
+                                  "gps_skipped": "the GPS path spans 4.0 m, under 20 m"}})["warnings"]
+    check("GPS that was there but unusable is a warning", any("not scaled" in w for w in _w))
+    check("the stage without the option ignores alignment entirely",
+          not any("level" in w for w in _finalize({}, cfg=_osv)["warnings"]))
+
 if _osmo_sample.is_file():
     _samples = Path(os.environ["SPLAT_ROOT"]).resolve() / "samples"
     _samples.mkdir(parents=True, exist_ok=True)
@@ -869,6 +943,14 @@ if _osmo_sample.is_file():
                             "select": {"imu": True}}).select.imu is True)
     check("a stitched request never gets select.imu",
           _prepare({"name": "imu-mp4", "input": {"file": "samples/imu_test.mp4"}}).select.imu is False)
+    if _t_imu.is_file():
+        check("an .OSV request without sfm.upright gets the default, an explicit one is kept",
+              _prepare({"name": "up", "input": {"file": "samples/imu_test.osv"}}).sfm.upright
+              is UPRIGHT_DEFAULT
+              and _prepare({"name": "up-off", "input": {"file": "samples/imu_test.osv"},
+                            "sfm": {"upright": False}}).sfm.upright is False)
+    check("a stitched request never gets sfm.upright",
+          _prepare({"name": "up-mp4", "input": {"file": "samples/imu_test.mp4"}}).sfm.upright is False)
     _t_imu.unlink(missing_ok=True)
     _t_mp4.unlink(missing_ok=True)
 

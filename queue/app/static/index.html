@@ -236,6 +236,7 @@ summary{cursor:pointer;font-size:12px;color:var(--muted);
             </div>
           </div>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="imuOn" style="width:auto" disabled> <span>Gyro blur veto (raw .OSV only)<span class="i" data-tip="imu">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="uprightOn" style="width:auto" disabled> <span>Upright, in metres with GPS (raw .OSV only)<span class="i" data-tip="upright">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="mip" style="width:auto"> <span>--enable-mip<span class="i" data-tip="mip">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bgimp" style="width:auto" disabled> <span class="muted">--background-improvements (crashes on the pinned LichtFeld)<span class="i" data-tip="bgimp">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="expcorr" style="width:auto"> <span>--exposure-correction<span class="i" data-tip="expcorr">i</span></span></label>
@@ -366,7 +367,9 @@ function buildConfig() {
              ...($('#selectionMode').value === 'distance'
                ? {distance_m: +$('#distanceM').value, max_gap_s: +$('#maxGapS').value} : {}),
              ...(sel.pipeline === 'fisheye_rig' ? {imu: $('#imuOn').checked} : {})},
-    sfm: {render: 'spherical', mapper: 'incremental'},
+    // sfm.upright likewise: only a raw .OSV carries the stream and GPS.
+    sfm: {render: 'spherical', mapper: 'incremental',
+          ...(sel.pipeline === 'fisheye_rig' ? {upright: $('#uprightOn').checked} : {})},
     train: {
       strategy: $('#strategy').value,
       steps_scaler: budget,
@@ -741,6 +744,13 @@ const TIPS = {
     sees a smear of a few pixels, which is what 1/100 s indoor exposures produce:
     on an indoor clip it swapped 78 of 330 frames and cut those predicted over
     4 px from 101 to 85. In daylight nothing is that blurred, and it changes no frame.`,
+  upright: `Raw .OSV only. After SfM, the clip's orientation stream turns the model
+    so gravity points along +y (what SuperSplat shows as down), and when the clip
+    carries GPS the path is fitted to the fixes: the splat comes out in metres
+    with +z north. Without GPS (the Osmo 360 today) it is levelled only and keeps
+    SfM's units. If the stream does not fit the reconstruction the model is left
+    as it was and the sfm stage shows a warning; it never fails the job.
+    Changes the sfm key, so it re-runs SfM, not frames, selection or masks.`,
   budget: `Scales iterations <em>and</em> every schedule with them — densification
     pacing, SH warm-up, refine interval. <b>Never combine it with a raw
     <code>--iter</code></b>: the scaler is applied after the CLI assignment, so
@@ -1230,6 +1240,8 @@ function showClip() {
   const osv = !!i && i.usable !== false && i.pipeline === 'fisheye_rig';
   $('#imuOn').disabled = !osv;
   $('#imuOn').checked = osv && !!i.recommended_imu;
+  $('#uprightOn').disabled = !osv;
+  $('#uprightOn').checked = osv && !!i.recommended_upright;
   $('#distanceOption').disabled = !i?.supports_distance_selection;
   if (!i?.supports_distance_selection) $('#selectionMode').value = 'window';
   showSelection();

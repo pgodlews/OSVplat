@@ -14,14 +14,18 @@ same masks. Intrinsics are still refined here, seeded from the stored values,
 which costs nothing and absorbs a unit or a temperature that drifts.
 
 Then the usual model pick and outlier drop (32_pick_model.py), the refined
-calibration (84), reprojection error in degrees (83), and a LichtFeld dataset
-with flattened names and valid-circle masks (85). Person masks, when the job
+calibration (84), reprojection error in degrees (83), with --upright the model
+levelled from the clip's orientation stream and put in metres by its GPS
+(upright.py; fails safe to the model as it was), and a LichtFeld dataset with
+flattened names and valid-circle masks (85). Person masks, when the job
 has them, go into the SfM masks here; training masks are combined later by
 89_fisheye_train_view.py under the train stage's own key.
 
 usage (venv): 88_fisheye_sfm.py --images SELECT/images --calib FRAMES/calibration.json \
               --out SFM_DIR [--person-masks MASK/fisheye_masks] [--overlap 10] [--max-deg 88]
-Writes SFM_DIR/summary.json and prints it as the final line.
+              [--upright CLIP.OSV --selection SELECT/selection.json [--start S]]
+Writes SFM_DIR/summary.json and prints it as the final line; with --upright
+also SFM_DIR/alignment.json (the transform, and the GPS reference when there is one).
 """
 import argparse
 import json
@@ -39,6 +43,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from osmo_fisheye import lenses, theta_d  # noqa: E402
+import upright as upright_mod  # noqa: E402
 
 PY = sys.executable
 MIN_REGISTERED = 0.9
@@ -121,7 +126,14 @@ def main():
     ap.add_argument("--overlap", type=int, default=15)
     ap.add_argument("--min-registered", type=float, default=0.85)
     ap.add_argument("--max-deg", type=float, default=88.0)
+    ap.add_argument("--upright", default="", metavar="CLIP",
+                    help="the .OSV the frames came from: level the model with its orientation "
+                         "stream, and scale it to metres when it carries GPS")
+    ap.add_argument("--selection", default="", help="selection.json of the frames, for --upright")
+    ap.add_argument("--start", type=float, default=0.0, help="trim start the frames were decoded from")
     a = ap.parse_args()
+    if a.upright and not a.selection:
+        ap.error("--upright needs --selection")
     images, out = Path(a.images), Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     person = Path(a.person_masks) if a.person_masks else None
@@ -152,6 +164,31 @@ def main():
     run([PY, HERE / "84_refined_calib.py", model, a.calib, out / "calibration_refined.json"], "refined calibration")
     angular = next(iter(json.loads(run_capture([PY, HERE / "83_sfm_angular_error.py", model],
                                                "angular error")).values()))
+
+    # Upright and in metres: after everything that reads the model as SfM left
+    # it (84, 83 are invariant to it anyway), before the dataset LichtFeld trains
+    # on. Anything that cannot be trusted leaves the model as it was.
+    align = None
+    aligned = out / "aligned"
+    if aligned.exists():  # a rerun in the same directory must not reuse an earlier alignment
+        import shutil
+        shutil.rmtree(aligned)
+    (out / "alignment.json").unlink(missing_ok=True)
+    if a.upright:
+        t = time.time()
+        align = upright_mod.align_model(model, aligned, a.upright, a.selection, a.start)
+        json.dump(align, open(out / "alignment.json", "w"), indent=1)
+        if align["upright"]:
+            model = aligned
+            rec = pycolmap.Reconstruction(str(model))
+        if not align["upright"]:
+            state = f"NOT levelled, model left as SfM made it: {align['reason']}"
+        elif align["metric"]:
+            state = f"levelled and in metres (GPS {align['gps']['rms_m']} m RMS)"
+        else:
+            state = f"levelled, units unchanged: {align['gps_skipped']}"
+        print(f"upright: {state} ({time.time() - t:.1f}s)", flush=True)
+
     # Training sees the same circle the features came from; people are added by
     # the train stage when the job masks them.
     build_masks(images, out / "valid_masks", L, radii, None)
@@ -160,6 +197,7 @@ def main():
 
     # 32_pick_model walks images, and a rig registers two per frame: count
     # frames, and measure the path along one lens so it does not zig-zag.
+    # Measured on the model the dataset holds, so it is in metres when that is.
     centres = sorted((rec.images[i].name, np.asarray(rec.images[i].projection_center()))
                      for i in rec.reg_image_ids() if rec.images[i].name.startswith("lens0/"))
     path = float(sum(np.linalg.norm(b[1] - c[1]) for c, b in zip(centres, centres[1:])))
@@ -183,6 +221,20 @@ def main():
         "seconds_sfm": round(t_sfm, 1),
         "seconds": round(time.time() - t_all, 1),
     })
+    if align is not None:
+        # Numbers and flags only at the top level (job telemetry keeps those);
+        # the GPS reference stays in alignment.json.
+        summary.update({"upright_requested": True, "upright": align["upright"], "metric": align["metric"]})
+        if align["upright"]:
+            summary["upright_residual_deg"] = align["gravity"]["residual_median_deg"]
+            summary["upright_scale"] = align["scale"]
+            if align["metric"]:
+                summary["gps_rms_m"] = align["gps"]["rms_m"]
+                summary["gps_yaw_correction_deg"] = align["gps"]["yaw_correction_deg"]
+                if "gravity_vs_gps_deg" in align["gps"]:
+                    summary["gravity_vs_gps_deg"] = align["gps"]["gravity_vs_gps_deg"]
+        summary["alignment"] = {k: v for k, v in align.items()
+                                if k in ("upright", "metric", "reason", "gravity", "gps", "gps_skipped")}
     json.dump(summary, open(out / "summary.json", "w"), indent=1)
     print(json.dumps(summary))
 

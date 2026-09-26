@@ -38,7 +38,9 @@ download `.ply`, `.sog` and `.spz` files.
   (Mask R-CNN, or SAM 3 with text prompts like `"person", "dog"`), with an
   optional review step before the GPU-hour is spent.
 - **Uses the camera's telemetry.** Decodes the `.OSV` orientation stream (1–4 kHz)
-  and can veto frames whose rotation predicts motion blur.
+  and can veto frames whose rotation predicts motion blur. The splat comes out
+  upright, and in metres facing north when the clip has GPS (Avata 360)
+  ([how it works](docs/how-it-works.md#upright-and-in-metres)).
 
 ![Queue web UI](docs/images/queue-ui.png)
 

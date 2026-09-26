@@ -104,6 +104,7 @@ Slots **3 and 4** carry the calibration: `native_refine_far_slave` drives stream
 - **Update rate:** 711 distinct fixes over 71 s, about 10 Hz, each held for five frames. Altitude is GPS–barometer fusion.
 - **Extraction:** ExifTool cannot read the embedded copy. `scripts/osv_meta.py` writes `lat`, `lon`, `abs_alt_m` and `rel_alt_m` per record to `telemetry.csv`.
 - **The Osmo 360 has no fix:** its `GpsBasic` carries only `gps_status` = invalid.
+- **Used by** [`scripts/upright.py`](../scripts/upright.py) to put the splat in metres and turn it to north ([how-it-works](how-it-works.md#upright-and-in-metres)). Each fix is timed at the first record that carries it.
 
 ## 7. The orientation stream
 
@@ -120,6 +121,7 @@ Slots **3 and 4** carry the calibration: `native_refine_far_slave` drives stream
 ## 9. Open questions
 
 - `3-2-9`, `-10`, `-12`, `-13`, `-16`, `-18`, `-19`; whether `3-4-3` is the aircraft's attitude or the gimbal's; `3-4-14`.
+- Whether the orientation stream's world is gravity-down as on the Osmo 360 (§6 there checked it against the accelerometer; the Avata's is not decoded). A levelled job with GPS reports the angle between the two as `gravity_vs_gps_deg`.
 - The `dbgi` tracks.
 - Slots 1–2 holding only a temperature.
 - Confirming the resize-not-crop scaling with a rig SfM on this clip.
