@@ -1236,7 +1236,30 @@ def fisheye_sfm_argv(ctx: Ctx) -> list[str]:
             "--out", str(out)]
     if ctx.cfg.mask.enabled and ctx.cfg.mask.use_for_sfm:
         argv += ["--person-masks", str(ctx.dir("mask") / "fisheye_masks")]
+    if ctx.cfg.sfm.upright:
+        # The stream and GPS are read from the clip itself; selection.json maps
+        # each rig frame to its video frame, counted from the trim.
+        argv += ["--upright", str(SPLAT_ROOT / ctx.cfg.input.file),
+                 "--selection", str(ctx.dir("select") / "selection.json")]
+        if ctx.cfg.input.trim_start:
+            argv += ["--start", f"{ctx.cfg.input.trim_start:g}"]
     return argv
+
+
+def _upright_warnings(summary: dict) -> list[str]:
+    """What sfm.upright could not do. Levelled without GPS is the normal Osmo 360 case, not a warning."""
+    align = summary.get("alignment") or {}
+    if not align.get("upright"):
+        return [f"not levelled, the splat keeps SfM's orientation and scale: "
+                f"{align.get('reason', 'no reason recorded')}"]
+    out = []
+    skipped = align.get("gps_skipped", "")
+    if not align.get("metric") and skipped and not skipped.startswith("the clip carries no GPS"):
+        out.append(f"levelled, but not scaled to metres: {skipped}")
+    g = summary.get("gravity_vs_gps_deg")
+    if g is not None and g > 5:
+        out.append(f"the orientation stream's gravity and the GPS path disagree by {g:.1f} deg")
+    return out
 
 
 def fisheye_sfm_finalize(ctx: Ctx) -> dict:
@@ -1246,6 +1269,12 @@ def fisheye_sfm_finalize(ctx: Ctx) -> dict:
     summary = json.loads(path.read_text())
     n_frames = ctx.derived.get("n_panos") or summary.get("n_panos") or 0
     summary["warnings"] = _sfm_warnings(summary, n_frames)
+    if ctx.cfg.sfm.upright:
+        # Failing safe is the script's job, and it always records the outcome;
+        # a summary without one never tried, and the key says it did.
+        if "alignment" not in summary:
+            raise RuntimeError("sfm ran with sfm.upright but summary.json records no alignment")
+        summary["warnings"] += _upright_warnings(summary)
     dataset = ctx.dir("sfm") / "dataset"
     images = dataset / "images"
     if not (dataset / "sparse" / "0").exists() or not images.is_dir() \

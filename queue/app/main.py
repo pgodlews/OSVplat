@@ -27,7 +27,7 @@ from . import (benchmark, db, estimate, gpu, metrics, outputs, progress, resourc
 from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED,
                      MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
-from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, JobConfig, quick_hash
+from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, UPRIGHT_DEFAULT, JobConfig, quick_hash
 from . import mask_backends
 from .stages import ARTIFACT_EXTS, ORDER, images_dir, is_cached
 
@@ -235,6 +235,8 @@ def api_inputs() -> list[dict]:
                 "recommended_mask": rec_mask,
                 # What _prepare fills in for select.imu when a request leaves it out.
                 "recommended_imu": IMU_SELECT_DEFAULT if fisheye else False,
+                # And for sfm.upright.
+                "recommended_upright": UPRIGHT_DEFAULT if fisheye else False,
                 "supports_distance_selection": fisheye and camera == "avata360",
                 "note": RAW_NOTE if raw else (
                     f"{cam_name or 'raw DJI dual fisheye'} — reconstructed as a calibrated two-lens rig, no stitch"
@@ -320,6 +322,9 @@ def _prepare(cfg_in: dict) -> JobConfig:
     explicit_imu = isinstance(select_in, dict) and "imu" in select_in
     if not explicit_imu and cfg.is_fisheye:
         cfg.select.imu = IMU_SELECT_DEFAULT
+    sfm_in = cfg_in.get("sfm")
+    if not (isinstance(sfm_in, dict) and "upright" in sfm_in) and cfg.is_fisheye:
+        cfg.sfm.upright = UPRIGHT_DEFAULT
 
     if cfg.select.mode == "distance":
         from avata_motion import load

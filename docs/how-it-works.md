@@ -30,7 +30,7 @@ input. Per-stage detail is in [queue/README.md](../queue/README.md).
 | `frames` | ffmpeg decode (CUDA) at `frames.fps` (default 10). For `.OSV`: both lens streams, plus `calibration.json` read out of the file. |
 | `select` | Keep the sharpest frame of every `select.window` (Laplacian variance; for a rig, scored on the blurrier lens). Optional gyro veto, below. |
 | `mask` | Optional person masks, below. |
-| `sfm` | COLMAP 4.2 via pycolmap-cuda: GPU SIFT, sequential matching, incremental mapping. Picks the largest model, drops stray cameras, and gates on registration rate and reprojection error. |
+| `sfm` | COLMAP 4.2 via pycolmap-cuda: GPU SIFT, sequential matching, incremental mapping. Picks the largest model, drops stray cameras, and gates on registration rate and reprojection error. For `.OSV`: levels the model, and puts it in metres when the clip has GPS (below). |
 | `train` | LichtFeld Studio headless, MRNF strategy, 3M splat cap, SH degree 1, 30k iterations, 3DGUT rasterizer (`--gut`), which is the only way it trains fisheye and equirect cameras. |
 | `export` | Collects `.ply`, `.sog` and `.spz`. |
 
@@ -93,6 +93,7 @@ What the stitched path gives up, compared with the raw `.OSV`:
 | Seams | none | whatever the stitcher left |
 | Gyro blur veto (`select.imu`) | yes | refused: no orientation stream |
 | Distance-based selection (Avata 360) | yes | no: needs the flight telemetry |
+| Upright splat, in metres with GPS (`sfm.upright`) | yes | refused: no orientation stream or GPS |
 | Person masking, review gate, presets, sweeps | yes | yes |
 | Training resolution | full 3840² per lens | LichtFeld's `--max-width` (default 3840, i.e. 3840×1920 per panorama) |
 
@@ -140,6 +141,61 @@ the swapped frames are visibly sharper. But the final splat came out the same
 (+0.04 dB over 64 held-out views, p = 0.53), and in daylight exposures are too
 short for it to change anything. It is **off by default**; try it for indoor
 or dusk footage.
+
+## Upright and in metres
+
+SfM has no idea which way is down or how big anything is: the model comes out
+in whatever frame and scale its first image pair implied, so a splat opens
+tilted in a viewer and a measuring tool reads arbitrary units. The `.OSV`
+knows both. With `"sfm": {"upright": true}` — **on by default for `.OSV`**
+— `scripts/upright.py` fixes the model after SfM and before training:
+
+1. **Gravity.** For each rig frame, the orientation stream is interpolated at
+   mid-exposure and paired with lens 0's SfM pose. The lens-to-body rotation
+   is *solved* from the frames' relative turns (the same turn seen by two
+   sensors) instead of being read from the calibration, whose frame is
+   unverified. Then the rotation from the SfM world to the stream's
+   gravity-down world is averaged over the frames. It needs turns about two
+   axes, which a walk or a flight has.
+2. **Metres and north, when the clip has GPS fixes.** The levelled camera path
+   is fitted to the fixes in local metres: scale, heading about the vertical
+   and offset. Tilt stays gravity's, so a straight flight line is enough. The
+   Avata 360 records GPS in every clip. The GPS message is found by content,
+   so an Osmo 360 clip gets the same treatment once it carries a fix.
+
+The trainer sees the transformed model, so the `.ply`, `.sog` and `.spz` come
+out in this frame: **+y down** (COLMAP's and OpenCV's convention, which
+SuperSplat shows upright, since it turns a loaded splat 180° about z), and
+with GPS **metres, x east, z north**. The origin is the median camera
+position. `sfm/alignment.json` keeps the transform and, with GPS, the
+geographic reference of the origin. That file is the job's own; the stage
+record, and so job telemetry, carry only the residuals and flags.
+
+**It fails safe, never fails the job.**
+
+| The clip | What you get | Stage record |
+|---|---|---|
+| Stream and GPS fit | upright, metres, north | `upright`, `metric` true; `gps_rms_m`, `gps_yaw_correction_deg` |
+| No GPS fix (Osmo 360 today) | upright; SfM's units; heading is the stream's own, not verified to be north | `metric` false, no warning |
+| GPS present but unusable: path under 20 m, or fit worse than 10 % of it | upright, SfM's units | warning with the reason |
+| The stream does not fit the model: median residual over 2°, p90 over 5°, or turns about one axis only | the model as SfM made it | warning with the reason |
+
+Where the path allows (not a straight line), the GPS fit also gives an
+independent tilt; `gravity_vs_gps_deg` reports how far it is from the
+stream's gravity, with a warning past 5°.
+
+**What is measured, and what is not yet.** The solve is tested on synthetic
+flights with a known answer (`scripts/test_upright.py`, `test_fisheye.py`):
+tilt within 0.3°, scale within 1 % from exact fixes and 2 % with 1.5 m of GPS
+noise, and a stream heading 30° off corrected by the GPS. pycolmap 4.2's
+transform scales the rig baseline with the world, which the test checks. No
+real clip has been run through it yet. Three things to check on the first
+ones: that the Avata 360's stream is gravity-referenced like the Osmo 360's
+(checked against the accelerometer there, [osmo360-telemetry.md](osmo360-telemetry.md) §6;
+unverified on the Avata, which is what `gravity_vs_gps_deg` shows), the
+residuals the gates were set for, and whether the splat's PSNR moves at all.
+LichtFeld scales its position learning rate by the scene's extent, so it
+should not.
 
 ## Capturing for a good splat
 

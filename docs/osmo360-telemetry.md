@@ -138,7 +138,7 @@ Both carry their own ISO, shutter, colour temperature and exposure block, and at
 | `3-4-1-1`, `3-4-1-2` | both* | 1, 1 | — | ? |
 | `3-4-1-4` | both* | `Osmo OQ001` | internal model code | ✓ (ExifTool: "model code?") |
 | `3-4-1-5` | both* | f32 50 (LRF: 25) | frame rate | new |
-| `3-4-2-3` | both | 1 | the only field in the GPS subtree: **no `3-4-2-1` GPSInfo, `3-4-2-2` altitude or `3-4-2-6-1` time** — the camera has no GNSS | ✓ path, no fix |
+| `3-4-2-3` | both | 1 | the only field in the GPS subtree: **no `3-4-2-1` GPSInfo, `3-4-2-2` altitude or `3-4-2-6-1` time** — the camera has no GNSS. Read as `GpsBasic.gps_status` = invalid, the message the Avata 360 fills at `3-4-4` ([avata360-telemetry.md](avata360-telemetry.md) §6); [`scripts/upright.py`](../scripts/upright.py) finds that message by content, so a clip that carries a fix here is used for scale without a code change (not yet seen) | ✓ path, no fix |
 
 \* field 4 exists in both records; the values shown were read from the light record.
 
@@ -216,6 +216,6 @@ ExifTool extracts the ✓ rows: `exiftool -ee -G3 file.OSV`. Running it on the `
 - Calibration sub-fields 15, 20/27, 24, 25; what slots 11–24 are for; the quaternion component order.
 - Image exposure time on the IMU clock: which instant `3-1-2` marks, the rolling-shutter readout time, any fusion-filter lag (§7).
 - The zero point of `3-3-2-1-4`, and why the IMU's rate wanders ~180 ppm within a minute (oscillator warm-up?).
-- The frame of the calibration quaternion (sub-field 21), and whether the per-lens yaw/pitch/roll are expressed in the orientation stream's body frame.
+- The frame of the calibration quaternion (sub-field 21), and whether the per-lens yaw/pitch/roll are expressed in the orientation stream's body frame. `scripts/upright.py` solves lens 0's rotation from the body frame on every levelled job (`lens_from_body` in `sfm/alignment.json`), which is the data to compare them against.
 - Why `3-1-1` steps by 2 in the OSV but 1 in the LRF.
 - Whether the Avata 360 (`DJI_*.OSV`) uses the same schema.

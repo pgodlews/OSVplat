@@ -110,6 +110,14 @@ class SfmCfg(Cfg):
     render: Literal["spherical", "perspective_overlapping",
                     "perspective_non_overlapping"] = "spherical"
     mapper: Literal["incremental", "global"] = "incremental"
+    # Raw .OSV only: level the reconstruction with the clip's orientation
+    # stream, and scale it to metres and turn it to north when the clip carries
+    # GPS (scripts/upright.py, docs/how-it-works.md, "Upright and in metres").
+    # Fails safe: without GPS the model is levelled only; when levelling cannot
+    # be trusted it is left as SfM made it, with a warning. Stitched input has
+    # no stream, so JobConfig refuses it there. The API fills it in for .OSV
+    # input when a request leaves it out (main._prepare, UPRIGHT_DEFAULT).
+    upright: bool = False
 
 
 class MaskCfg(Cfg):
@@ -320,6 +328,15 @@ FISHEYE_SFM = "fisheye-sfm-2"
 # What the API sets for .OSV input when a request leaves select.imu out.
 IMU_SELECT_DEFAULT = False
 
+# Joins the sfm key -- and so train and export -- only while sfm.upright is on,
+# so a job with it off keeps every key it had before the option existed. Bump
+# it after changing what scripts/upright.py does to a model.
+UPRIGHT = "upright-1"
+# What the API sets for .OSV input when a request leaves sfm.upright out. On:
+# it only moves and scales the model, and falls back on its own when the clip
+# cannot support it.
+UPRIGHT_DEFAULT = True
+
 
 class JobConfig(Cfg):
     # Bumping this invalidates every cache entry for jobs submitted afterwards,
@@ -356,6 +373,11 @@ class JobConfig(Cfg):
                 f"apply to stitched equirect input; {Path(self.input.file).name} "
                 f"is raw dual fisheye and always runs the incremental fisheye "
                 f"rig reconstruction. Leave both at their defaults")
+        if self.sfm.upright and not self.is_fisheye:
+            raise ValueError(
+                f"sfm.upright reads the orientation stream and GPS inside a "
+                f"raw DJI .OSV; {Path(self.input.file).name} is stitched and "
+                f"carries neither. Leave sfm.upright off")
         if self.select.imu and not self.is_fisheye:
             raise ValueError(
                 f"select.imu reads the orientation stream inside a raw DJI "
@@ -427,9 +449,12 @@ class JobConfig(Cfg):
         return "no-sfm-mask"
 
     def k_sfm(self) -> str:
-        return key_of("sfm", self.k_select(), self.sfm.model_dump(),
+        # sfm.upright is a term, and only while on (UPRIGHT), so every entry
+        # cached before the option keeps its key.
+        return key_of("sfm", self.k_select(), self.sfm.model_dump(exclude={"upright"}),
                       self._sfm_mask_term(),
-                      *((FISHEYE_SFM,) if self.is_fisheye else ()))
+                      *((FISHEYE_SFM,) if self.is_fisheye else ()),
+                      *((UPRIGHT,) if self.sfm.upright else ()))
 
     def k_mask(self) -> str:
         # A disabled mask stage produces nothing, so every disabled config has
