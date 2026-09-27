@@ -697,6 +697,38 @@ with tempfile.TemporaryDirectory() as _d:
     check("the eval-image switch is not a cache-key term",
           _mp4.k_train() == key_of("train", _mp4.k_sfm(), _mp4.k_mask(),
                                    _mp4.train.model_dump()))
+
+    # A bare iter != 30000 has to reach LichtFeld as --steps-scaler, not
+    # --iter: --iter alone leaves LichtFeld's internal eval schedule (and so
+    # metrics.csv's last logged iteration) anchored to its own 30000-iteration
+    # default, which train_finalize then reads as a truncated run even though
+    # training reached the requested length (2026-09-27, iter=50000: job
+    # reported "training stopped at step 30000 of 50000" after a completed
+    # run that had exported splat_50000.*).
+    _bi = _ctx_for(_cfg("samples/x.mp4", train={"iter": 50000}))
+    _bi.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"))
+    _bl = _stages.STAGES["train"]["argv"](_bi)
+    check("a bare iter above the default is sent as an equivalent steps-scaler",
+          "--iter" not in _bl and "--steps-scaler" in _bl
+          and _bl[_bl.index("--steps-scaler") + 1] == "1.66667")
+    _bi2 = _ctx_for(_cfg("samples/x.mp4", train={"iter": 15000}))
+    _bi2.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"))
+    _bl2 = _stages.STAGES["train"]["argv"](_bi2)
+    check("a bare iter below the default is scaled the same way",
+          "--iter" not in _bl2 and "--steps-scaler" in _bl2
+          and _bl2[_bl2.index("--steps-scaler") + 1] == "0.5")
+    _bd = _ctx_for(_cfg("samples/x.mp4", train={"iter": 30000}))
+    _bd.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"))
+    _bld = _stages.STAGES["train"]["argv"](_bd)
+    check("the default iter still needs neither flag",
+          "--iter" not in _bld and "--steps-scaler" not in _bld)
+    _bs = _ctx_for(_cfg("samples/x.mp4", train={"steps_scaler": 0.5}))
+    _bs.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"))
+    _bls = _stages.STAGES["train"]["argv"](_bs)
+    check("an explicit steps_scaler is passed through unchanged",
+          "--iter" not in _bls and "--steps-scaler" in _bls
+          and _bls[_bls.index("--steps-scaler") + 1] == "0.5")
+
     try:
         _cfg("samples/x.mp4", train={"extra_args": "--no-save-eval-images"})
         _dup_refused = False
