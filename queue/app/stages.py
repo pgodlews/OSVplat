@@ -732,12 +732,33 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
             "--max-cap", str(t.max_cap),
             "--sh-degree", str(t.sh_degree)]
 
-    # Budget: steps_scaler scales iterations AND every schedule. Passing both
-    # --iter and --steps-scaler double-scales, so emit exactly one of them.
+    # Budget: steps_scaler scales iterations AND every schedule (eval_steps
+    # included); a bare --iter changes only the training length and leaves
+    # LichtFeld's internal eval schedule anchored to its own 30000-iteration
+    # default. That schedule is where metrics.csv's last "iteration" comes
+    # from, and train_finalize takes the LOWER of that and the exported
+    # filename's step as completion evidence - so a bare --iter of anything
+    # other than 30000 makes metrics.csv's last eval land short of (or, for
+    # a shorter run, past) the real finish line, and a fully completed run
+    # gets reported as a truncated one and its result discarded (2026-09-27,
+    # iter=50000: exports and logs said 50000, metrics.csv said 30000 - its
+    # last reachable schedule point below the real target - job failed
+    # "training stopped at step 30000 of 50000" although training had not).
+    # Passing both --iter and --steps-scaler double-scales (LichtFeld applies
+    # steps_scaler AFTER the CLI --iter assignment), so translate a bare iter
+    # into the equivalent scaler relative to LichtFeld's own default instead
+    # of emitting both: exactly one budget flag ever reaches the trainer, and
+    # its internal schedule - and therefore metrics.csv - always tracks the
+    # real target.
+    LFS_DEFAULT_ITER = 30000
     if t.steps_scaler != 1.0:
-        argv += ["--steps-scaler", f"{t.steps_scaler:g}"]
+        scaler = t.steps_scaler
+    elif t.iter != LFS_DEFAULT_ITER:
+        scaler = t.iter / LFS_DEFAULT_ITER
     else:
-        argv += ["--iter", str(t.iter)]
+        scaler = 1.0
+    if scaler != 1.0:
+        argv += ["--steps-scaler", f"{scaler:g}"]
 
     if t.max_width:
         argv += ["--max-width", str(t.max_width)]
