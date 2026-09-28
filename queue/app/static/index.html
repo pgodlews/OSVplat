@@ -75,10 +75,11 @@ tr.sel td{background:color-mix(in srgb,var(--accent) 12%,transparent)}
   min-width:2px}
 .seg>span>i{display:block;height:100%;width:0;background:var(--accent);
   transition:width .8s linear}
-.seg>span.s_done>i,.seg>span.s_cached>i{background:var(--ok)}
+.seg>span.s_done>i,.seg>span.s_cached>i,.seg>span.s_imported>i{background:var(--ok)}
 .seg>span.s_failed>i,.seg>span.s_cancelled>i{background:var(--err)}
-/* A cached stage cost nothing, so it gets a sliver rather than a share. */
-.seg>span.s_cached{background:repeating-linear-gradient(45deg,
+/* A cached stage cost nothing, so it gets a sliver rather than a share; so
+   does one imported from a handoff bundle, which ran on another machine. */
+.seg>span.s_cached,.seg>span.s_imported{background:repeating-linear-gradient(45deg,
   var(--ok) 0 2px,transparent 2px 4px);opacity:.6}
 /* Two reserved single-line rows, never wrapping. The caption is rewritten
    every second, and letting it reflow made the whole queue table breathe in and
@@ -499,16 +500,18 @@ function segBar(j) {
   const plan = j.plan || {};
   const runnable = (j.stages || []).filter(s => s.state !== 'skipped');
   if (!runnable.length) return '';
-  const priced = runnable.filter(s => s.state !== 'cached');
+  const free = s => s.state === 'cached' || s.state === 'imported';
+  const priced = runnable.filter(s => !free(s));
   const cost = s => Math.max(plan[s.stage] || 0, 1);
   const total = priced.reduce((a, s) => a + cost(s), 0) || 1;
-  const fill = s => s.state === 'done' || s.state === 'cached' ? 1
+  const fill = s => s.state === 'done' || free(s) ? 1
     : s.state === 'running' ? (s.fraction || 0) : 0;
   return `<div class="seg" data-seg="${j.id}">` + runnable.map(s =>
-    `<span class="s_${s.state}" style="flex:${s.state === 'cached'
+    `<span class="s_${s.state}" style="flex:${free(s)
         ? `0 0 ${CACHED_PX}px` : `1 1 ${100*cost(s)/total}%`}"
-           title="${s.stage} — ${s.state}${s.state === 'cached'
-             ? ' (reused, no cost)'
+           title="${s.stage} — ${s.state}${s.state === 'imported'
+             ? ' (from a handoff bundle; ran on another machine)'
+             : s.state === 'cached' ? ' (reused, no cost)'
              : s.est != null ? `, est ${fmtT(s.est)}` : ''}">
        <i data-fill="${s.stage}" style="width:${100*fill(s)}%"></i></span>`
   ).join('') + '</div>';
@@ -530,7 +533,8 @@ function captionText(j) {
   if (j.state === 'queued') return {stage: '', head: 'waiting'};
   if (j.state !== 'running') {
     const n = j.stages.filter(s => s.state === 'cached').length;
-    return {stage: '', head: `${n} cached`};
+    const m = j.stages.filter(s => s.state === 'imported').length;
+    return {stage: '', head: `${n} cached` + (m ? ` · ${m} imported` : '')};
   }
   return {stage: e.stage || '', head: e.detail ? ` · ${e.detail}` : ''};
 }
@@ -667,7 +671,7 @@ function patchRow(tr, j) {
     for (const s of j.stages || []) {
       const i = seg.querySelector(`[data-fill="${s.stage}"]`);
       if (!i) continue;
-      const w = `${100 * (s.state === 'done' || s.state === 'cached' ? 1
+      const w = `${100 * (['done', 'cached', 'imported'].includes(s.state) ? 1
         : s.state === 'running' ? (s.fraction || 0) : 0)}%`;
       if (i.style.width !== w) i.style.width = w;
     }

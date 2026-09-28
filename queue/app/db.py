@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS stages (
     job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     stage       TEXT NOT NULL,
     cache_key   TEXT NOT NULL,
-    state       TEXT NOT NULL,           -- pending|cached|running|done|failed|skipped
+    state       TEXT NOT NULL,           -- pending|cached|imported|running|done|failed|skipped
     path        TEXT,
     log_path    TEXT,
     progress    TEXT,                    -- JSON blob, stage-specific
@@ -99,6 +99,10 @@ def init() -> None:
     # cannot be compared against what that job is actually doing.
     if "plan" not in cols:
         c.execute("ALTER TABLE jobs ADD COLUMN plan TEXT")
+    # A job queued from a handoff bundle (handoff.py): which bundle, and the
+    # upstream stages it brought. The worker starts such a job at train.
+    if "handoff" not in cols:
+        c.execute("ALTER TABLE jobs ADD COLUMN handoff TEXT")
 
 
 # ------------------------------------------------------------------ settings
@@ -157,6 +161,23 @@ def count_jobs() -> int:
 def set_plan(job_id: int, plan: dict) -> None:
     conn().execute("UPDATE jobs SET plan=? WHERE id=?",
                    (json.dumps(plan), job_id))
+
+
+def set_handoff(job_id: int, handoff: dict) -> None:
+    conn().execute("UPDATE jobs SET handoff=? WHERE id=?",
+                   (json.dumps(handoff), job_id))
+
+
+def job_handoff(row) -> Optional[dict]:
+    """The imported-bundle record of a job row, or None for an ordinary job."""
+    try:
+        raw = row["handoff"]
+    except (IndexError, KeyError):
+        return None
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
 
 
 def set_review(job_id: int, state: str, note: str = "") -> None:

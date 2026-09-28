@@ -1,7 +1,14 @@
-# OSVplat: the whole pipeline and its queue in one image.
+# OSVplat: the whole pipeline and its queue in one image, or split in two.
 #
 #   docker compose up -d --build        build it yourself (~1 h for one GPU type, no GPU needed)
 #   docker compose pull && docker compose up -d   or use the prebuilt image
+#
+# Three targets from one build stage, so LichtFeld is compiled once
+# (docs/docker.md, "Three images"; docs/cloud.md, "Split pipeline"):
+#   all    the default: every stage, frames to export
+#   prep   frames -> select -> mask -> SfM and a handoff bundle; no LichtFeld
+#   train  imports a handoff bundle, trains and exports; no ffmpeg, no venv_gs
+#   docker build --target train -t osvplat:dev-train .
 #
 # The build runs the same scripts/setup_*.sh as a native install, so both get
 # identical pins. Tools live at /opt/splat; clips and job data are volumes.
@@ -38,18 +45,20 @@ RUN LFS_MARCH=x86-64-v3 /src/scripts/setup_lichtfeld.sh \
 COPY scripts/setup_gsplat_venv.sh /src/scripts/
 RUN /src/scripts/setup_gsplat_venv.sh && rm -rf /root/.cache/pip /opt/splat/gsplat_src/.git
 
-############################################################ runtime
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
+############################################################ runtime base
+# What every target shares, so their layers are shared too.
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS base
 ENV DEBIAN_FRONTEND=noninteractive \
     SPLAT_ROOT=/opt/splat QUEUE_ROOT=/data \
     PYTHONUNBUFFERED=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 # video: ffmpeg's -hwaccel cuda needs the driver's NVDEC library in here.
 
-# Runtime side of the build packages: ffmpeg for decoding, and the GTK/X11/
-# Wayland libraries LichtFeld links against even when run --headless.
+# The GTK/X11/Wayland libraries LichtFeld links against even when run
+# --headless; pycolmap needs libSM/libICE, and venv_gs's OpenCV the GL ones.
+# ffmpeg comes per target: the train image decodes nothing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg python3 python3-venv ca-certificates curl openssh-server rsync \
+      python3 python3-venv ca-certificates curl openssh-server rsync \
       libgtk-3-0t64 libglu1-mesa libegl1 libxinerama1 libxcursor1 libxkbcommon0 \
       libwayland-client0 libwayland-cursor0 libwayland-egl1 libdecor-0-0 libdbus-1-3 \
       libgomp1 libstdc++6 libjpeg-turbo8 libpng16-16t64 libsm6 libice6 \
@@ -58,6 +67,82 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # openssh-server's install made host keys; one baked-in key pair would be shared
 # by every container from this image. The entrypoint makes them per container,
 # and only when an SSH key variable turns sshd on (docs/cloud.md).
+
+COPY queue/requirements.txt /opt/splat/queue_app/requirements.txt
+RUN python3 -m venv /opt/splat/queue_app/venv \
+    && /opt/splat/queue_app/venv/bin/pip install -q --no-cache-dir -r /opt/splat/queue_app/requirements.txt
+
+############################################################ prep
+FROM base AS prep
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+# Same absolute paths as the build stage: the venvs point at them.
+COPY --from=build /opt/splat/venv /opt/splat/venv
+COPY --from=build /opt/splat/venv_gs /opt/splat/venv_gs
+RUN /opt/splat/venv/bin/python -c "import pycolmap, cv2, numpy; print('venv ok', pycolmap.__version__)" \
+    && /opt/splat/venv_gs/bin/python -c "import torch, torchvision, gsplat, cv2, pycolmap, transformers; from transformers import Sam3Model; print('venv_gs ok', torch.__version__, gsplat.__version__, transformers.__version__)"
+COPY scripts/ /opt/splat/scripts/
+COPY queue/app/ /opt/splat/queue_app/app/
+COPY queue/test_*.py queue/summarize_sweep.py /opt/splat/queue_app/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/sshd_config /etc/ssh/sshd_config.d/osvplat.conf
+COPY LICENSE THIRD_PARTY.md /opt/splat/
+RUN chmod +x /usr/local/bin/entrypoint.sh && chmod -R a+rX /opt/splat
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CUDA_ARCH
+# OSVPLAT_VARIANT: the service refuses jobs this image cannot finish.
+ENV OSVPLAT_VERSION=${VERSION} OSVPLAT_REVISION=${REVISION} OSVPLAT_CUDA_ARCH=${CUDA_ARCH} \
+    OSVPLAT_VARIANT=prep
+LABEL org.opencontainers.image.title="OSVplat (prep)" \
+      org.opencontainers.image.description="OSVplat frames, masks and SfM; writes a handoff bundle for the train image." \
+      org.opencontainers.image.source="https://github.com/pgodlews/OSVplat" \
+      org.opencontainers.image.url="https://github.com/pgodlews/OSVplat" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+WORKDIR /opt/splat/queue_app
+EXPOSE 8090 22
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+############################################################ train
+# venv stays: 89_fisheye_train_view.py combines the training masks in it.
+# venv_gs does not: nothing in train or export imports torch. Without it the
+# host benchmark and compare renders refuse (they run in venv_gs).
+FROM base AS train
+COPY --from=build /opt/splat/venv /opt/splat/venv
+COPY --from=build /opt/splat/LichtFeld-Studio /opt/splat/LichtFeld-Studio
+RUN missing=$(ldd /opt/splat/LichtFeld-Studio/build/LichtFeld-Studio | grep 'not found' | grep -v libcuda.so || true); \
+    if [ -n "$missing" ]; then echo "LichtFeld is missing libraries:"; echo "$missing"; exit 1; fi
+RUN /opt/splat/venv/bin/python -c "import pycolmap, cv2, numpy; print('venv ok', pycolmap.__version__)"
+COPY scripts/ /opt/splat/scripts/
+COPY queue/app/ /opt/splat/queue_app/app/
+COPY queue/test_*.py queue/summarize_sweep.py /opt/splat/queue_app/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/sshd_config /etc/ssh/sshd_config.d/osvplat.conf
+COPY LICENSE THIRD_PARTY.md /opt/splat/
+RUN chmod +x /usr/local/bin/entrypoint.sh && chmod -R a+rX /opt/splat
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CUDA_ARCH
+ENV OSVPLAT_VERSION=${VERSION} OSVPLAT_REVISION=${REVISION} OSVPLAT_CUDA_ARCH=${CUDA_ARCH} \
+    OSVPLAT_VARIANT=train
+LABEL org.opencontainers.image.title="OSVplat (train)" \
+      org.opencontainers.image.description="OSVplat training from a handoff bundle made by the prep image." \
+      org.opencontainers.image.source="https://github.com/pgodlews/OSVplat" \
+      org.opencontainers.image.url="https://github.com/pgodlews/OSVplat" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+WORKDIR /opt/splat/queue_app
+EXPOSE 8090 22
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+############################################################ all (default)
+# Last, so a plain `docker build` and compose build it.
+FROM base AS all
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Same absolute paths as the build stage: the venvs and LichtFeld's RUNPATH
 # point at them.
@@ -75,10 +160,6 @@ RUN missing=$(ldd /opt/splat/LichtFeld-Studio/build/LichtFeld-Studio | grep 'not
 # Importing is the test that matches what a job does.
 RUN /opt/splat/venv/bin/python -c "import pycolmap, cv2, numpy; print('venv ok', pycolmap.__version__)" \
     && /opt/splat/venv_gs/bin/python -c "import torch, torchvision, gsplat, cv2, pycolmap, transformers; from transformers import Sam3Model; print('venv_gs ok', torch.__version__, gsplat.__version__, transformers.__version__)"
-
-COPY queue/requirements.txt /opt/splat/queue_app/requirements.txt
-RUN python3 -m venv /opt/splat/queue_app/venv \
-    && /opt/splat/queue_app/venv/bin/pip install -q --no-cache-dir -r /opt/splat/queue_app/requirements.txt
 
 COPY scripts/ /opt/splat/scripts/
 COPY queue/app/ /opt/splat/queue_app/app/

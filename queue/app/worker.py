@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from . import db, debugdump, gpu, outputs, retention, telemetry
+from . import db, debugdump, gpu, handoff, outputs, retention, telemetry
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
                      SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
@@ -659,9 +659,14 @@ def run_job(job_id: int, gpu_index: int) -> None:
                   f"({cur['state'] if cur else 'deleted'}); not starting it")
             return
 
-        _check_input_unchanged(cfg)
+        # A job imported from a handoff bundle has its upstream stages in the
+        # cache already and never reads the clip, which is on another machine.
+        imported = db.job_handoff(row)
+        if imported is None:
+            _check_input_unchanged(cfg)
         review_ok = (db.get_job(job_id)["review_state"] or "") == "approved"
-        for stage in ORDER:
+        last = ORDER.index(cfg.run_until) + 1 if cfg.run_until else len(ORDER)
+        for stage in ORDER[:last]:
             if job_id in _cancel:
                 raise RuntimeError("cancelled")
             # Gate everything downstream of the masks, checked before the stage
@@ -683,6 +688,12 @@ def run_job(job_id: int, gpu_index: int) -> None:
                 db.upsert_stage(job_id, stage, key, "skipped", path=str(d))
                 telemetry.write(job_id)
                 telemetry.notify("stage.finished", job_id, stage, "skipped")
+                continue
+
+            if imported is not None and stage in handoff.UPSTREAM:
+                _take_imported(ctx, job_id, stage, spec, d, key, imported)
+                telemetry.write(job_id)
+                telemetry.notify("stage.finished", job_id, stage, "imported")
                 continue
 
             if spec["prepare"]:
@@ -712,12 +723,29 @@ def run_job(job_id: int, gpu_index: int) -> None:
             telemetry.write(job_id)
             telemetry.notify("stage.finished", job_id, stage, "done")
 
+        # run_until: the rest is left for another machine, or not wanted.
+        for stage in ORDER[last:]:
+            db.upsert_stage(job_id, stage, ctx.keys[stage], "skipped",
+                            progress=json.dumps({"reason": f"run_until={cfg.run_until}"}),
+                            ended=time.time())
+        # The bundle is this job's result: failing to write it fails the job,
+        # like a finalizer, rather than ending done with nothing to hand on.
+        bundle = handoff.export(job_id) if cfg.run_until == "sfm" else None
         db.set_job_state(job_id, "done", ended=time.time())
-        # With a result to upload, the record goes after it (outputs.py), so
-        # its one upload includes how that transfer went.
-        telemetry.write(job_id, final=True, upload=not outputs.OUTPUT_UPLOAD)
-        telemetry.notify("job.finished", job_id, state="done")
-        outputs.upload_async(job_id)
+        if cfg.run_until:
+            # No splat to deliver. The bundle is, when there is one and a
+            # target, and the record's upload waits for it as it does below.
+            send = bool(bundle and handoff.HANDOFF_UPLOAD)
+            telemetry.write(job_id, final=True, upload=not send)
+            telemetry.notify("job.finished", job_id, state="done")
+            if send:
+                handoff.upload_async(job_id)
+        else:
+            # With a result to upload, the record goes after it (outputs.py), so
+            # its one upload includes how that transfer went.
+            telemetry.write(job_id, final=True, upload=not outputs.OUTPUT_UPLOAD)
+            telemetry.notify("job.finished", job_id, state="done")
+            outputs.upload_async(job_id)
     except ReviewRequired as exc:
         # Deliberately leaves the pending stages pending: this job is going to
         # run them, just not yet.
@@ -744,6 +772,39 @@ def run_job(job_id: int, gpu_index: int) -> None:
         _cancel.discard(job_id)
         with _lock:
             _held.pop(job_id, None)
+
+
+def _take_imported(ctx: Ctx, job_id: int, stage: str, spec: dict, d: Path,
+                   key: str, imported: dict) -> None:
+    """Record an upstream stage that came in a handoff bundle.
+
+    Never builds: this machine has no clip. A shipped stage has to still be a
+    valid cache entry (the same check a cache hit runs); one that is gone fails
+    the job with what to do, rather than trying to make frames from nothing.
+    Frames are not shipped at all; their record comes from the bundle.
+    """
+    ent = (imported.get("stages") or {}).get(stage) or {}
+    hid = str(imported.get("id") or "")[:12]
+    if ent.get("key") != key:
+        raise RuntimeError(f"{stage} key {key} is not the {ent.get('key')} handoff "
+                           f"{hid} brought; the job's config no longer matches it")
+    if ent.get("shipped"):
+        if not _cache_ok(ctx, job_id, stage, spec, d, key):
+            raise RuntimeError(
+                f"{stage} {key}, imported from handoff {hid}, is no longer a valid "
+                f"cache entry here (evicted or deleted); import "
+                f"{imported.get('bundle') or 'the bundle'} again")
+        info = read_done(d)
+        db.cache_touch(key)
+    else:
+        info = ent.get("info") or {}
+    _rehydrate(ctx, stage, info)
+    # "imported", not "cached": it ran on another host. No start or end time
+    # either, so nothing reads it as a stage this machine ran or timed.
+    db.upsert_stage(job_id, stage, key, "imported",
+                    path=str(d) if ent.get("shipped") else None,
+                    progress=json.dumps({**info, "imported_from": imported.get("id")}))
+    _record_metrics(job_id, stage, info)
 
 
 def _rehydrate(ctx: Ctx, stage: str, info: dict) -> None:

@@ -746,6 +746,41 @@ def _output_transfer(job_id: int) -> Optional[dict]:
             "pack_s": st.get("pack_s"), "ended": st.get("ended")}
 
 
+def _handoff(job_id: int) -> tuple[Optional[dict], Optional[dict]]:
+    """The handoff bundle this job wrote (prep) or was queued from (train),
+    and its transfer: HANDOFF_UPLOAD_URL's upload, or HANDOFF_URL's download.
+
+    The id is a random one both halves share, so a clip's prep and train
+    records can be joined without naming anything. handoff.json also names the
+    bundle file and upload URL; neither comes along.
+    """
+    try:
+        st = json.loads((run_dir(job_id) / "handoff.json").read_text())
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(st, dict) or st.get("role") not in ("prep", "train"):
+        return None, None
+    rec = {"id": st.get("id"), "role": st["role"], "bytes": _num(st.get("bytes"), int),
+           "payload_bytes": _num(st.get("payload_bytes"), int),
+           "files": _num(st.get("files"), int),
+           "stages": [x for x in st.get("stages") or [] if isinstance(x, str)],
+           "pack_s": _num(st.get("pack_s")), "import_s": _num(st.get("import_s"))}
+    if st["role"] == "train":
+        rec["already_cached"] = [x for x in st.get("already_cached") or [] if isinstance(x, str)]
+        src = st.get("source_image") or {}
+        rec["source_version"] = src.get("version") if isinstance(src, dict) else None
+    t = st.get("upload") if st["role"] == "prep" else st.get("fetch")
+    xfer = None
+    if isinstance(t, dict):
+        nbytes, secs = _num(t.get("bytes"), int), _num(t.get("transfer_s") or t.get("seconds"))
+        xfer = {"direction": "upload" if st["role"] == "prep" else "download",
+                "state": t.get("state") if st["role"] == "prep" else "done",
+                "bytes": nbytes, "seconds": secs, "mb_s": _rate(nbytes, secs),
+                "attempts": t.get("attempts"), "first_byte_s": _num(t.get("first_byte_s")),
+                "ended": _num(t.get("ended"))}
+    return rec, xfer
+
+
 def build(job_id: int) -> Optional[dict]:
     row = db.get_job(job_id)
     if row is None:
@@ -777,12 +812,22 @@ def build(job_id: int) -> Optional[dict]:
         pass
     with _res_lock:
         res.update(_resources.get(job_id, {}))
+    imported = db.job_handoff(row)
     stages = []
     for st in db.job_stages(job_id):
         try:
             prog = json.loads(st["progress"]) if st["progress"] else None
         except (TypeError, ValueError):
             prog = None
+        if st["state"] == "imported":
+            # Ran on the prep host, which has its own record of it (joined
+            # downstream by handoff id). Nothing measured here is claimed.
+            stages.append({"stage": st["stage"], "state": "imported",
+                           "cache_key": st["cache_key"],
+                           "handoff_id": (imported or {}).get("id"),
+                           "started": None, "ended": None, "wall_s": None,
+                           "planned_s": None, "info": {}, "resources": None})
+            continue
         wall = (round(st["ended"] - st["started"], 1)
                 if st["started"] and st["ended"] else None)
         stages.append({
@@ -793,6 +838,9 @@ def build(job_id: int) -> Optional[dict]:
             "info": _scalars(prog),
             "resources": res.get(st["stage"]),
         })
+    handoff, handoff_xfer = _handoff(job_id)
+    if imported and imported.get("id") and (handoff or {}).get("id") != imported["id"]:
+        handoff = {"id": imported["id"], "role": "train"}
     return {
         "schema": SCHEMA,
         "written": round(time.time(), 1),
@@ -811,7 +859,9 @@ def build(job_id: int) -> Optional[dict]:
         "metrics": _metrics(job_id),
         "host": {**host(), "disk": {**_disk(), **_disk_peak(stages)}},
         "software": _software(),
-        "transfers": {"input": _input_transfer(f), "output": _output_transfer(job_id)},
+        "transfers": {"input": _input_transfer(f), "output": _output_transfer(job_id),
+                      "handoff": handoff_xfer},
+        "handoff": handoff,
         "placement": TELEMETRY_PLACEMENT or None,
         "timeline": {"host_boot": _boot_time(),
                      "service_started": round(SERVICE_STARTED, 1)},

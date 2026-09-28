@@ -179,6 +179,28 @@ try:
 except ValueError as exc:
     OUTPUT_UPLOAD, OUTPUT_UPLOAD_ERROR = {}, f"OUTPUT_UPLOAD_URL: {exc}"
 
+# Handoff bundles (queue/app/handoff.py, docs/cloud.md "Split pipeline"): a
+# job with run_until="sfm" stops after SfM and packs what training reads as
+# runs/job<id>/job<id>-handoff.tar; HANDOFF_UPLOAD_URL (the OUTPUT_UPLOAD_URL
+# shape) sends it on. The train side imports bundles from HANDOFF_ROOT, where
+# the entrypoint puts HANDOFF_URL's download. Like the output upload, a bad
+# HANDOFF_UPLOAD_URL keeps the service up but refuses the jobs that need it.
+HANDOFF_ROOT = QUEUE_ROOT / "handoffs"
+HANDOFF_UPLOAD_ERROR = None
+try:
+    HANDOFF_UPLOAD = _upload_target("HANDOFF_UPLOAD_URL")
+except ValueError as exc:
+    HANDOFF_UPLOAD, HANDOFF_UPLOAD_ERROR = {}, f"HANDOFF_UPLOAD_URL: {exc}"
+
+# Which image this is (Dockerfile targets): "all" runs everything, "prep" has
+# no trainer and only takes jobs that stop at SfM or earlier, "train" has no
+# ffmpeg or mask models and only runs imported handoff bundles. A native
+# install is "all".
+IMAGE_VARIANT = os.environ.get("OSVPLAT_VARIANT", "all").strip().lower() or "all"
+if IMAGE_VARIANT not in ("all", "prep", "train"):
+    print(f"WARNING: OSVPLAT_VARIANT={IMAGE_VARIANT!r} is not all, prep or train; using all")
+    IMAGE_VARIANT = "all"
+
 # Failure debug bundles (queue/app/debugdump.py, docs/cloud.md "Debug bundles"):
 # when a job fails, a tar for offline analysis goes to QUEUE_ROOT/runs/job<id>/.
 # QUEUE_DEBUG picks how much: off, basic (logs, samples, crash logs, GPU and
@@ -222,5 +244,5 @@ WEBHOOK_SECRET = os.environ.get("QUEUE_WEBHOOK_SECRET", "").strip()
 QUEUE_TOKEN = os.environ.get("QUEUE_TOKEN", "").strip()
 TOKEN_COOKIE = "queue_token"
 
-for d in (QUEUE_ROOT, CACHE_ROOT, RUNS_ROOT, LOG_ROOT, RENDER_ROOT):
+for d in (QUEUE_ROOT, CACHE_ROOT, RUNS_ROOT, LOG_ROOT, RENDER_ROOT, HANDOFF_ROOT):
     d.mkdir(parents=True, exist_ok=True)

@@ -6,6 +6,13 @@
 #                                             scan that exact image, then publish + sign
 #   scripts/publish_image.sh --scan IMAGE     only run the leak scan on a local image
 #
+# Three images per version, one package (docs/docker.md, "Three images"):
+#   IMAGE:<ver>          all-in-one (and :latest), the Dockerfile's default target
+#   IMAGE:<ver>-prep     frames to SfM, writes handoff bundles
+#   IMAGE:<ver>-train    trains from a handoff bundle
+# Each is built from the same fresh clone, scanned, published with its SBOM and
+# provenance, and signed. TARGETS="all" publishes the all-in-one alone.
+#
 # Before --push, once:  docker login ghcr.io -u <github-user>  (a token with
 # write:packages), and a signing key:  cosign generate-key-pair  in the repo
 # root. Commit cosign.pub; keep cosign.key private (it is git- and
@@ -39,6 +46,7 @@ STAGING=${STAGING:-${IMAGE_NAME}-staging}
 # Any image known to be public, to prove the privacy probe below works before
 # trusting its "not public". Not IMAGE_NAME: a test run may publish privately.
 PROBE_PUBLIC=${PROBE_PUBLIC:-ghcr.io/pgodlews/osvplat}
+TARGETS=${TARGETS:-all prep train}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -175,15 +183,31 @@ publicly_readable() {
         "https://ghcr.io/v2/$path/tags/list")" = 200 ]
 }
 
+# Tag suffix per Dockerfile target: all is the plain version.
+suffix() { [ "$1" = all ] && echo "" || echo "-$1"; }
+for t in $TARGETS; do
+  case "$t" in all|prep|train) ;; *) die "unknown target $t in TARGETS" ;; esac
+done
+size_of() { docker image inspect -f '{{.Size}}' "$1" | awk '{printf "%.1f GB", $1/1e9}'; }
+
 t0=$(date +%s)
 if [ $PUSH = 0 ]; then
   # ---------------------------------------------------------------- build + scan
-  echo "==> building for CUDA_ARCH=$CUDA_ARCH (hours for the full list)"
-  "${BUILD[@]}" -t "$IMAGE_NAME:$VERSION" --load "$WORK/src"
-  echo "==> built in $(( ($(date +%s)-t0)/60 )) min: $(docker image inspect -f '{{.Size}}' "$IMAGE_NAME:$VERSION" | awk '{printf "%.1f GB", $1/1e9}')"
-  scan_image "$IMAGE_NAME:$VERSION"
+  # One builder, so the build stage (LichtFeld, the venvs) is built once and
+  # every target after the first reuses it from the builder's cache.
+  for t in $TARGETS; do
+    img="$IMAGE_NAME:$VERSION$(suffix "$t")"
+    echo "==> building $t for CUDA_ARCH=$CUDA_ARCH (hours for the full list, the first time)"
+    "${BUILD[@]}" --target "$t" -t "$img" --load "$WORK/src"
+    echo "==> $img built after $(( ($(date +%s)-t0)/60 )) min: $(size_of "$img")"
+    scan_image "$img"
+  done
   echo
-  echo "Built and scanned $IMAGE_NAME:$VERSION ($REVISION). Nothing pushed; rerun with --push."
+  for t in $TARGETS; do
+    img="$IMAGE_NAME:$VERSION$(suffix "$t")"
+    echo "  $img  $(size_of "$img")"
+  done
+  echo "Built and scanned at $REVISION. Nothing pushed; rerun with --push."
   exit 0
 fi
 
@@ -191,40 +215,53 @@ fi
 # The probe must work, or its "not public" means nothing: the released image is public.
 publicly_readable "$PROBE_PUBLIC" || die "the privacy probe cannot read public $PROBE_PUBLIC; is ghcr.io reachable?"
 ! publicly_readable "$STAGING" || die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)"
-echo "==> building for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION"
-"${BUILD[@]}" -t "$STAGING:$VERSION" --sbom=true --provenance=mode=max \
-  --metadata-file "$WORK/meta.json" --push "$WORK/src"
-DIGEST=$(python3 -c "import json;print(json.load(open('$WORK/meta.json'))['containerimage.digest'])")
-echo "==> built and staged in $(( ($(date +%s)-t0)/60 )) min: $STAGING@$DIGEST"
-! publicly_readable "$STAGING" \
-  || die "$STAGING is publicly readable after the push: make it private or delete $STAGING:$VERSION now, it is not scanned"
-docker pull -q "$STAGING@$DIGEST" >/dev/null
-scan_image "$STAGING@$DIGEST"
+declare -A DIGEST
+for t in $TARGETS; do
+  sfx=$(suffix "$t")
+  echo "==> building $t for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION$sfx"
+  "${BUILD[@]}" --target "$t" -t "$STAGING:$VERSION$sfx" --sbom=true --provenance=mode=max \
+    --metadata-file "$WORK/meta-$t.json" --push "$WORK/src"
+  DIGEST[$t]=$(python3 -c "import json;print(json.load(open('$WORK/meta-$t.json'))['containerimage.digest'])")
+  echo "==> $t staged after $(( ($(date +%s)-t0)/60 )) min: $STAGING@${DIGEST[$t]}"
+  ! publicly_readable "$STAGING" \
+    || die "$STAGING is publicly readable after the push: make it private or delete $STAGING:$VERSION$sfx now, it is not scanned"
+  docker pull -q "$STAGING@${DIGEST[$t]}" >/dev/null
+  echo "    unpacked size $(size_of "$STAGING@${DIGEST[$t]}")"
+  scan_image "$STAGING@${DIGEST[$t]}"
+done
 
 # ------------------------------------------------------------- publish + sign
-# A registry-side copy of the index: image, SBOM and provenance, same digest.
-echo "==> publishing $IMAGE_NAME:$VERSION and :latest (copy, no rebuild)"
-docker buildx imagetools create -t "$IMAGE_NAME:$VERSION" -t "$IMAGE_NAME:latest" "$STAGING@$DIGEST"
-got=$(docker buildx imagetools inspect "$IMAGE_NAME:$VERSION" --format '{{json .Manifest}}' \
-      | python3 -c "import json,sys;print(json.load(sys.stdin)['digest'])")
-[ "$got" = "$DIGEST" ] || die "published digest $got is not the scanned $DIGEST"
-REF="$IMAGE_NAME@$DIGEST"
-if [ $SIGN = 1 ]; then
-  echo "==> signing $REF (asks for the key's password)"
-  cosign sign --yes --key "$COSIGN_KEY" "$REF"
-fi
+# Only once every target scanned clean: the three are one release.
+for t in $TARGETS; do
+  sfx=$(suffix "$t")
+  tags=(-t "$IMAGE_NAME:$VERSION$sfx")
+  [ "$t" = all ] && tags+=(-t "$IMAGE_NAME:latest")
+  # A registry-side copy of the index: image, SBOM and provenance, same digest.
+  echo "==> publishing $IMAGE_NAME:$VERSION$sfx$([ "$t" = all ] && echo ' and :latest') (copy, no rebuild)"
+  docker buildx imagetools create "${tags[@]}" "$STAGING@${DIGEST[$t]}"
+  got=$(docker buildx imagetools inspect "$IMAGE_NAME:$VERSION$sfx" --format '{{json .Manifest}}' \
+        | python3 -c "import json,sys;print(json.load(sys.stdin)['digest'])")
+  [ "$got" = "${DIGEST[$t]}" ] || die "published digest $got for $t is not the scanned ${DIGEST[$t]}"
+  if [ $SIGN = 1 ]; then
+    echo "==> signing $IMAGE_NAME@${DIGEST[$t]} (asks for the key's password)"
+    cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_NAME@${DIGEST[$t]}"
+  fi
+done
 
+echo
+echo "Published. For the GitHub release notes of $TAG:"
+echo
+for t in $TARGETS; do
+  REF="$IMAGE_NAME@${DIGEST[$t]}"
+  echo "    Image:   $IMAGE_NAME:$VERSION$(suffix "$t")"
+  echo "    Digest:  ${DIGEST[$t]}"
+  echo "    docker pull $REF"
+  [ $SIGN = 1 ] && echo "    cosign verify --key cosign.pub $REF"
+  echo "    docker buildx imagetools inspect $REF --format '{{json .SBOM}}'"
+  echo
+done
 cat <<EOF
-
-Published. For the GitHub release notes of $TAG:
-
-    Image:   $IMAGE_NAME:$VERSION
-    Digest:  $DIGEST
     Source:  https://github.com/pgodlews/OSVplat/tree/$REVISION
-
-    docker pull $REF
-$( [ $SIGN = 1 ] && echo "    cosign verify --key cosign.pub $REF" )
-    docker buildx imagetools inspect $REF --format '{{json .SBOM}}'
 
 New packages on GHCR start private: make it public once under
 https://github.com/users/pgodlews/packages/container/osvplat/settings

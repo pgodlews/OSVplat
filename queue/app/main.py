@@ -22,10 +22,10 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import (benchmark, db, debugdump, estimate, gpu, metrics, outputs, progress,
-               resources, retention, telemetry, worker)
-from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED,
-                     MODELS_ROOT, QUEUE_TOKEN,
+from . import (benchmark, db, debugdump, estimate, gpu, handoff, metrics, outputs,
+               progress, resources, retention, telemetry, worker)
+from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, HANDOFF_ROOT,
+                     IMAGE_VARIANT, METRICS_ENABLED, MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, UPRIGHT_DEFAULT, JobConfig, quick_hash
 from . import mask_backends
@@ -388,15 +388,47 @@ def _refuse_if_cannot_deliver() -> None:
               f"a job accepted now may finish after it")
 
 
+def _refuse_for_image(cfg: Optional[JobConfig] = None) -> None:
+    """Jobs this image cannot finish, refused at submission (docs/docker.md).
+
+    Called without a config before _prepare, which needs the clip: the train
+    image has none to find, and saying so beats "input not found".
+    """
+    if IMAGE_VARIANT == "train":
+        raise HTTPException(400, "this is the train image: it has no ffmpeg or mask "
+                            "models and runs imported handoff bundles only "
+                            "(POST /api/handoff/import). Prep jobs run on the prep "
+                            "or all-in-one image")
+    if cfg is None:
+        return
+    if IMAGE_VARIANT == "prep" and not cfg.run_until:
+        raise HTTPException(400, "this is the prep image: it has no trainer. Set "
+                            "run_until (\"sfm\" writes a handoff bundle to train from)")
+    if cfg.run_until == "sfm":
+        bad = handoff.problems()
+        if bad:
+            raise HTTPException(400, "; ".join(bad) + " -- the handoff bundle could "
+                                "not be delivered; fix HANDOFF_UPLOAD_URL and restart")
+
+
+def _stage_rows(jid: int, cfg: JobConfig) -> None:
+    """A row per stage: cached, pending, or skipped past run_until."""
+    last = ORDER.index(cfg.run_until) if cfg.run_until else len(ORDER)
+    for stage, key in cfg.keys().items():
+        d = CACHE_ROOT / stage / key
+        state = ("skipped" if ORDER.index(stage) > last
+                 else "cached" if is_cached(d) else "pending")
+        db.upsert_stage(jid, stage, key, state, path=str(d))
+
+
 @app.post("/api/jobs")
 def api_create(req: CreateReq) -> dict:
     _refuse_if_cannot_deliver()
+    _refuse_for_image()
     cfg = _prepare(req.config)
+    _refuse_for_image(cfg)
     jid = db.create_job(cfg.name, cfg.model_dump(), priority=req.priority)
-    for stage, key in cfg.keys().items():
-        d = CACHE_ROOT / stage / key
-        db.upsert_stage(jid, stage, key,
-                        "cached" if is_cached(d) else "pending", path=str(d))
+    _stage_rows(jid, cfg)
     _store_plan(jid, cfg)
     return {"id": jid, "keys": cfg.keys(), "cached": _cache_state(cfg),
             "upload_expires_in_s": outputs.seconds_left()}
@@ -446,6 +478,7 @@ def api_sweep(req: SweepReq) -> dict:
     A variant with an empty `set` is the control.
     """
     _refuse_if_cannot_deliver()
+    _refuse_for_image()
     if not req.axes and not req.variants:
         raise HTTPException(400, "give either axes or variants")
     if req.axes and req.variants:
@@ -496,6 +529,7 @@ def api_sweep(req: SweepReq) -> dict:
         cfg_d["name"] = f"{req.base.get('name', 'sweep')} [{label}]"
         try:
             cfg = _prepare(cfg_d)
+            _refuse_for_image(cfg)
         except HTTPException as exc:
             raise HTTPException(
                 exc.status_code,
@@ -508,11 +542,7 @@ def api_sweep(req: SweepReq) -> dict:
     for label, cfg, priority in prepared:
         jid = db.create_job(cfg.name, cfg.model_dump(), sweep_id=sweep_id,
                             priority=priority)
-        for stage, key in cfg.keys().items():
-            d = CACHE_ROOT / stage / key
-            db.upsert_stage(jid, stage, key,
-                            "cached" if is_cached(d) else "pending",
-                            path=str(d))
+        _stage_rows(jid, cfg)
         _store_plan(jid, cfg)
         created.append({"id": jid, "name": cfg.name, "label": label,
                         "keys": cfg.keys(), "cached": _cache_state(cfg)})
@@ -580,7 +610,9 @@ def api_job(job_id: int) -> dict:
     if row is None:
         raise HTTPException(404, "no such job")
     # upload: OUTPUT_UPLOAD_URL's result for this job (outputs.py), or None.
-    return {**_job_dict(row), "upload": outputs.status(job_id)}
+    # handoff: the bundle this job wrote or was imported from (handoff.py).
+    return {**_job_dict(row), "upload": outputs.status(job_id),
+            "handoff": handoff.status(job_id)}
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -686,6 +718,88 @@ def api_debug_download(job_id: int):
         raise HTTPException(404, "no debug bundle for this job; POST to build one")
     return FileResponse(p, media_type="application/x-tar",
                         filename=f"job{job_id:05d}-debug.tar")
+
+
+# ---------------------------------------------------------------- handoff
+# docs/cloud.md, "Split pipeline": prep writes a bundle (run_until="sfm", or
+# POST below for any job whose SfM is done), train imports it.
+
+@app.post("/api/jobs/{job_id}/handoff")
+def api_handoff_build(job_id: int, send: bool = Query(False)) -> dict:
+    """Write this job's handoff bundle now; send=1 also uploads it to
+    HANDOFF_UPLOAD_URL. For a job that ran past SfM, or to rebuild one."""
+    if db.get_job(job_id) is None:
+        raise HTTPException(404, "no such job")
+    try:
+        st = handoff.export(job_id)
+    except handoff.HandoffError as exc:
+        raise HTTPException(400, str(exc))
+    if send:
+        if not handoff.HANDOFF_UPLOAD:
+            raise HTTPException(400, "HANDOFF_UPLOAD_URL is not set; the bundle is "
+                                "built, download it instead")
+        st = handoff.upload(job_id)
+    return st
+
+
+@app.get("/api/jobs/{job_id}/handoff")
+def api_handoff_status(job_id: int) -> dict:
+    st = handoff.status(job_id)
+    if st is None:
+        raise HTTPException(404, "no handoff bundle for this job")
+    return st
+
+
+@app.get("/api/jobs/{job_id}/handoff/download")
+def api_handoff_download(job_id: int):
+    p = handoff.bundle_path(job_id)
+    if not p.is_file():
+        raise HTTPException(404, "no handoff bundle for this job; POST to build one")
+    return FileResponse(p, media_type="application/x-tar", filename=p.name)
+
+
+@app.get("/api/handoff/bundles")
+def api_handoff_bundles() -> list[dict]:
+    """Bundles waiting in QUEUE_ROOT/handoffs/ (HANDOFF_URL puts one there)."""
+    return [{"name": p.name, "bytes": p.stat().st_size}
+            for p in sorted(HANDOFF_ROOT.glob("*.tar")) if p.is_file()]
+
+
+class HandoffImportReq(BaseModel):
+    bundle: str                           # a file name in QUEUE_ROOT/handoffs/
+    sha256: Optional[str] = None          # checked before anything is unpacked
+    name: Optional[str] = None            # job name; the prep job's by default
+    train: Optional[dict] = None          # replaces the bundle's train section
+    export: Optional[dict] = None         # replaces its export section
+    priority: int = 0
+
+
+@app.post("/api/handoff/import")
+def api_handoff_import(req: HandoffImportReq) -> dict:
+    """Verify a handoff bundle, install its stages in the cache, and queue a
+    job that starts at train. Blocks while it unpacks (a minute for 2 GB)."""
+    if IMAGE_VARIANT == "prep":
+        raise HTTPException(400, "this is the prep image: it has no trainer to run "
+                            "an imported bundle")
+    _refuse_if_cannot_deliver()
+    try:
+        out = handoff.import_bundle(handoff.bundle_file(req.bundle), sha256=req.sha256,
+                                    name=req.name, train=req.train, export=req.export,
+                                    priority=req.priority)
+    except handoff.HandoffError as exc:
+        raise HTTPException(400, str(exc))
+    # The estimate, for the stages this job will run: upstream is imported.
+    row = db.get_job(out["id"])
+    secs = (db.job_handoff(row) or {}).get("clip_seconds")
+    if secs:
+        try:
+            cfg = JobConfig.model_validate(json.loads(row["config"]))
+            cached = {st: True for st in handoff.UPSTREAM}
+            db.set_plan(out["id"], estimate.estimate(cfg, secs, cached=cached))
+        except Exception:                                     # noqa: BLE001
+            pass                                              # no ETA, as for a clip that will not probe
+    return {**out, "cached": _cache_state(JobConfig.model_validate(json.loads(row["config"]))),
+            "upload_expires_in_s": outputs.seconds_left()}
 
 
 @app.get("/api/jobs/{job_id}/log")
@@ -921,6 +1035,7 @@ def api_status() -> dict:
                 active, worker.schedulable_capacity(), now=now,
                 paused=st["paused"]),
             "metrics": METRICS_ENABLED,
+            "image_variant": IMAGE_VARIANT,
             "splat_root": str(SPLAT_ROOT)}
 
 
@@ -982,6 +1097,9 @@ def api_render(req: RenderReq) -> dict:
     """
     if not req.ids:
         raise HTTPException(400, "no jobs selected")
+    if not GS_PY.exists():
+        raise HTTPException(400, "the renderer needs venv_gs, which this image "
+                            f"({IMAGE_VARIANT}) does not carry")
 
     models, dataset, images = [], None, None
     held_out_split = True

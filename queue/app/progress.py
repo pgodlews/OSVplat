@@ -158,7 +158,7 @@ def stage_remaining(stage: str, cfg: JobConfig, prog: Optional[dict],
 
 # ---------------------------------------------------------------------- job
 
-FINISHED = ("done", "cached", "skipped")
+FINISHED = ("done", "cached", "skipped", "imported")
 
 
 def job_progress(row, stages: list[dict], now: Optional[float] = None) -> dict:
@@ -196,7 +196,7 @@ def job_progress(row, stages: list[dict], now: Optional[float] = None) -> dict:
     weights, live = {}, None
     for name in ORDER:
         st = by_stage.get(name)
-        if st is None or st["state"] in ("cached", "skipped"):
+        if st is None or st["state"] in ("cached", "skipped", "imported"):
             continue
         weights[name] = max(0.0, plan.get(name) or 0.0)
         if st["state"] == "running":
