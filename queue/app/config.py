@@ -179,6 +179,28 @@ try:
 except ValueError as exc:
     OUTPUT_UPLOAD, OUTPUT_UPLOAD_ERROR = {}, f"OUTPUT_UPLOAD_URL: {exc}"
 
+# Failure debug bundles (queue/app/debugdump.py, docs/cloud.md "Debug bundles"):
+# when a job fails, a tar for offline analysis goes to QUEUE_ROOT/runs/job<id>/.
+# QUEUE_DEBUG picks how much: off, basic (logs, samples, crash logs, GPU and
+# host state, repro.sh: a few MB), artifacts (+ whatever the trainer exported
+# and its emergency snapshot), heavy (+ core dumps and the training dataset's
+# model and masks). DEBUG_UPLOAD_URL is a target in the OUTPUT_UPLOAD_URL shape;
+# without it nothing leaves the machine. Unlike telemetry the bundle is not
+# anonymous (it is for whoever runs this machine), only stripped of secrets.
+DEBUG_LEVELS = ("off", "basic", "artifacts", "heavy")
+DEBUG_LEVEL = os.environ.get("QUEUE_DEBUG", "basic").strip().lower() or "basic"
+if DEBUG_LEVEL not in DEBUG_LEVELS:
+    print(f"WARNING: QUEUE_DEBUG={DEBUG_LEVEL!r} is not one of {DEBUG_LEVELS}; using basic")
+    DEBUG_LEVEL = "basic"
+# Under a single S3 PUT's 5 GB; the lowest-priority items are left out to fit.
+DEBUG_MAX_BYTES = int(float(os.environ.get("QUEUE_DEBUG_MAX_GB", "4.5")) * 2**30)
+DEBUG_UPLOAD_ERROR = None
+try:
+    DEBUG_UPLOAD = _upload_target("DEBUG_UPLOAD_URL")
+except ValueError as exc:
+    DEBUG_UPLOAD, DEBUG_UPLOAD_ERROR = {}, f"DEBUG_UPLOAD_URL: {exc}"
+    print(f"WARNING: {DEBUG_UPLOAD_ERROR}; debug bundles stay local")
+
 # Host benchmark (scripts/benchmark.py, docs/job-telemetry.md "Benchmark"):
 # POST /api/benchmark runs it; QUEUE_BENCHMARK=1 also runs it once at startup,
 # before any job is dispatched.

@@ -85,6 +85,10 @@ def samples_path(job_id: int) -> Path:
 # A long job on a many-core host writes about 1 KB per 5 s sample; this cap
 # is weeks of that, and only stops a runaway from filling the disk.
 SAMPLES_MAX_BYTES = 32 * 1024 * 1024
+# The first BURST_S of every stage is sampled every BURST_INTERVAL s instead
+# of every 5 s: stage starts are where memory balloons and processes die.
+BURST_S = float(os.environ.get("QUEUE_SAMPLE_BURST_S", "120"))
+BURST_INTERVAL = float(os.environ.get("QUEUE_SAMPLE_BURST_INTERVAL", "1"))
 
 
 # ------------------------------------------------------------------ host
@@ -367,11 +371,22 @@ class ResourceSampler(threading.Thread):
     """
 
     def __init__(self, gpu_index: Optional[int], pid: int, interval: float = 5.0,
-                 job_id: Optional[int] = None, stage: Optional[str] = None):
+                 job_id: Optional[int] = None, stage: Optional[str] = None,
+                 burst_s: Optional[float] = None, burst_interval: Optional[float] = None):
         super().__init__(daemon=True, name="resources")
         self.gpu = gpu_index
         self.pid = pid
         self.interval = interval
+        # Sampled faster for the first burst_s of the stage: a 5 s interval
+        # showed the RTX 5090 OOM (2026-09-28) as 4.4 GB, then 31 GB, when it
+        # had climbed through everything in between within 20 s.
+        self.burst_s = BURST_S if burst_s is None else burst_s
+        self.burst_interval = min(BURST_INTERVAL if burst_interval is None
+                                  else burst_interval, interval)
+        self._t0 = time.monotonic()
+        # Whole-device GPU memory split by owner, summed: this stage's process
+        # tree against every other process (another job, another tenant).
+        self.gpu_mem_other_peak: Optional[int] = None
         # With a job: one line per sample in its samples.jsonl.gz.
         self.job_id = job_id
         self.stage = stage
@@ -465,10 +480,32 @@ class ResourceSampler(threading.Thread):
                 self.limit_changes.append({"t": round(time.time(), 1),
                                            "from_w": prev, "to_w": limit})
 
+    def _gpu_owners(self, tree: set[int]) -> None:
+        """Split this GPU's memory into our process tree and everyone else.
+
+        Sums only, no pids or process names: telemetry names no process. A
+        container sees only its own pids, so another tenant's memory shows as
+        the device total minus what the listed processes hold, which is why
+        `other_mib` is computed from the total rather than from the list.
+        """
+        if self._gpu_now is None:
+            return
+        procs = gpu.compute_procs()
+        if procs is None:
+            return
+        own = sum(p["mib"] for p in procs.get(self.gpu, []) if p["pid"] in tree)
+        other = max(0, self._gpu_now["mem_mib"] - own)
+        self._gpu_now["own_mib"] = own
+        self._gpu_now["other_mib"] = other
+        self.gpu_mem_other_peak = other if self.gpu_mem_other_peak is None else max(
+            self.gpu_mem_other_peak, other)
+
     def sample(self) -> None:
         rss = 0
+        tree: set[int] = set()
         if Path("/proc").is_dir():
             for p in _proc_tree(self.pid):
+                tree.add(p)
                 st = _proc_stat(p)
                 if st:
                     self.cpu[p] = st[0]
@@ -482,6 +519,7 @@ class ResourceSampler(threading.Thread):
                         self._gpu_row(r)
                 except (IndexError, ValueError):
                     pass
+            self._gpu_owners(tree or {self.pid})
         self._disk_now = _disk_space()
         if self._disk_now:
             used, free, _ = self._disk_now
@@ -537,7 +575,8 @@ class ResourceSampler(threading.Thread):
         # a sample; frames and select on a short clip take seconds.
         wait = min(0.5, self.interval)
         while not self._halt.wait(wait):
-            wait = self.interval
+            wait = (self.burst_interval if time.monotonic() - self._t0 < self.burst_s
+                    else self.interval)
             try:
                 self.sample()
             except Exception as exc:                          # noqa: BLE001
@@ -565,6 +604,7 @@ class ResourceSampler(threading.Thread):
             "gpu_util_p50": pct(util, 0.5), "gpu_util_p95": pct(util, 0.95),
             "gpu_util_mean": round(statistics.fmean(util), 1) if util else None,
             "gpu_mem_peak_mib": self.gpu_mem_peak or None,
+            "gpu_mem_other_peak_mib": self.gpu_mem_other_peak,
             "gpu_busy_samples": len(self.power) if self.reason_samples else None,
             "gpu_power_w_busy_p50": pct(self.power, 0.5),
             "gpu_power_w_max": round(max(self.power), 1) if self.power else None,
