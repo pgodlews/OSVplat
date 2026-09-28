@@ -12,6 +12,8 @@ What the image adds for this:
 - **`INPUT_URL`**: the container fetches the clip itself (a presigned S3 GET).
 - **`OUTPUT_UPLOAD_URL`**: each finished job's splats go up as one tar (a
   presigned S3 PUT), so no results have to be pulled.
+- **A split pipeline**: frames, masks and SfM on your own GPU, only training
+  on the rented one, joined by a handoff bundle ([below](#split-pipeline)).
 - **CPU and GPU discovery**, used on every install: stages are sized to the CPUs the container
   is allowed, not the host's cores, and GPUs the image cannot run on are
   listed but never scheduled.
@@ -83,12 +85,15 @@ sha256, then destroy the instance.
 | `INPUT_URL` | URL of one clip, fetched into `samples/` at start | name from the URL path, or `INPUT_NAME` |
 | `INPUT_SHA256` | checked before the clip is used; a mismatch deletes it | recommended |
 | `OUTPUT_UPLOAD_URL` | presigned PUT URL, or a JSON target (below) | upload after each job that ends done |
+| `HANDOFF_URL` | URL of one [handoff bundle](#split-pipeline), fetched into `QUEUE_ROOT/handoffs/` at start | name from the URL path, or `HANDOFF_NAME`; import it with the API |
+| `HANDOFF_SHA256` | checked before the bundle is kept; a mismatch deletes it | recommended |
+| `HANDOFF_UPLOAD_URL` | presigned PUT URL, or a JSON target, like `OUTPUT_UPLOAD_URL` | upload after each job with `run_until: "sfm"` |
 | `QUEUE_DEBUG` | `basic` | how much a failed job's [debug bundle](#debug-bundles) holds: `off`, `basic`, `artifacts`, `heavy` |
 | `QUEUE_DEBUG_MAX_GB` | 4.5 | size cap for the bundle; what does not fit is listed in its manifest |
 | `DEBUG_UPLOAD_URL` | presigned PUT URL, or a JSON target | upload the bundle when a job fails |
 | `QUEUE_CPUS` | discovered | override the CPU count stages are sized to |
 | `QUEUE_MIN_COMPUTE_CAP` | 7.5 | GPUs below this are listed but not scheduled |
-| `QUEUE_TLS_INSECURE` | 0 | `1` accepts self-signed certificates for `INPUT_URL`, `OUTPUT_UPLOAD_URL`, telemetry and the webhook |
+| `QUEUE_TLS_INSECURE` | 0 | `1` accepts self-signed certificates for `INPUT_URL`, `HANDOFF_URL`, the upload URLs, telemetry and the webhook |
 
 SSH needs the container to run as root, which is what both providers do; with
 Compose's `user:` set, the SSH variables are refused with an error.
@@ -226,6 +231,125 @@ not, the log says the host is faulty and jobs are refused
 - Container start command: leave it empty.
 - Container disk: ~60 GB. Anything outside `/workspace` is lost when a pod
   is stopped.
+
+## Split pipeline
+
+On a rented GPU, everything before training is billed at the GPU's rate while
+the GPU mostly waits. Measured on clip 0141 (Avata 360, 473 rig frames = 946
+images, 2026-09-28):
+
+| Stage | 5090 host | L4 host | GPU use | Disk written |
+|---|---|---|---|---|
+| frames | 4.7 min | 3.3 min | ~none (CPU decode works) | 5.5 GB |
+| select | 0.1 min | 0.2 min | none | – |
+| mask | 3.1 min | 8.1 min | yes (Mask R-CNN, 8.5–11 GB) | 3.5 GB |
+| sfm | 38.6 min | 58.2 min | SIFT extraction (3.6 min) and matching (4.0 min) only; ~31 min of CPU mapping | 2.2 GB |
+| train | 61.7 min | 408 min | yes | 2.0 GB |
+
+The train row is two different budgets (the 5090's is the 40k-iteration run
+in [#7](https://github.com/pgodlews/OSVplat/issues/7)), so it shows the share
+of the job, not a card comparison.
+
+The split runs the first four stages on a machine of your own with a GPU (a
+3090 is plenty; mapping is mostly serial, so a strong single-thread CPU
+matters more than cores), and only training on the rented one. Only
+training is then at risk on an interruptible instance.
+
+Two images of the same release do it ([docker.md, "Three
+images"](docker.md#three-images)): `osvplat:<ver>-prep` and
+`osvplat:<ver>-train`. The all-in-one `osvplat:<ver>` does either half too.
+
+**1. Prep, at home.** Start the prep image like the all-in-one one (Compose
+with `IMAGE=ghcr.io/pgodlews/osvplat:<ver>-prep`, or `docker run`), and queue
+the clip with `run_until`:
+
+```bash
+curl -sS -X POST -H "x-queue-token: $QUEUE_TOKEN" -H 'content-type: application/json' \
+  localhost:8090/api/jobs -d '{"config": {"name": "0141", "input": {"file": "samples/0141.OSV"},
+                              "run_until": "sfm"}}'
+```
+
+The job runs frames, select, mask and SfM, marks train and export skipped,
+writes `runs/job<id>/job<id>-handoff.tar`, and ends done. Writing the
+bundle is part of the job: a stage that no longer verifies fails it rather
+than ending done with nothing to hand on. `GET /api/jobs/<id>/handoff` gives
+its `sha256` and size, `GET /api/jobs/<id>/handoff/download` the file. With
+`HANDOFF_UPLOAD_URL` set it also goes up after the job, like
+`OUTPUT_UPLOAD_URL` (streamed, `ETag` checked against its MD5, a fixed URL
+used once, a `{job}` placeholder for more; `upload` in the handoff status).
+A job that has already run past SfM can write one too:
+`POST /api/jobs/<id>/handoff` (`?send=1` also uploads it).
+
+`run_until` enters no cache key: a prep job and an all-in-one job on the
+same clip and options share every cache entry. `frames`, `select` and `mask`
+are accepted too; they stop there and write no bundle.
+
+**2. Train, rented.** Start the train image with the bundle instead of the
+clip:
+
+```bash
+docker run -d --gpus all -p 2222:22 \
+  -e SSH_PUBLIC_KEYS="$(cat ~/.ssh/id_ed25519.pub)" \
+  -e HANDOFF_URL='https://…' -e HANDOFF_SHA256=… -e OUTPUT_UPLOAD_URL='https://…' \
+  ghcr.io/pgodlews/osvplat:<ver>-train
+```
+
+Once it has downloaded (`GET /api/handoff/bundles` lists what is in
+`QUEUE_ROOT/handoffs/`), import it and resume the queue:
+
+```bash
+curl -sS -X POST -H "x-queue-token: $QUEUE_TOKEN" -H 'content-type: application/json' \
+  localhost:8090/api/handoff/import -d '{"bundle": "job00012-handoff.tar", "sha256": "…"}'
+```
+
+The import checks the bundle against its manifest, installs the selected
+images, masks and SfM dataset in the cache under their keys, and queues a job
+that starts at train. Its upstream stages show as `imported`, it never looks
+for the clip, and it delivers through `OUTPUT_UPLOAD_URL` like any job.
+`train` and `export` in the request replace those sections of the bundle's
+config: a different budget trains from the same SfM. `name` and `priority`
+are optional.
+
+**Batches.** Copy more bundles into `QUEUE_ROOT/handoffs/` (`scp`, `rsync`)
+and import each; the jobs run back to back. `HANDOFF_URL` fetches one.
+
+**What the bundle holds.** A tar of the selected images, the person masks
+(when on), and the SfM dataset LichtFeld reads, plus a manifest,
+`handoff.json`, written last: the job config, every cache key, the version
+terms from `queue/app/jobs.py` (`config_version`, `FISHEYE_PIPELINE`,
+`FISHEYE_SFM`, `IMU_SELECT`, `UPRIGHT`), the image version and revision,
+and a sha256 and size per file. The images travel, rather than frames being
+decoded again on the train side, so nothing depends on two hosts decoding a
+clip bit-identically. No frames, overlays, SfM databases or telemetry: each
+side keeps its own record, joined by a random handoff id
+([job-telemetry.md](job-telemetry.md#split-pipeline)). Like a debug bundle,
+it is not anonymous: the manifest holds the job's name and the clip's file
+name.
+
+**What is refused**, with HTTP 400 and nothing installed or queued:
+
+- a whole-file `sha256` that does not match, when one is given;
+- a truncated bundle (the manifest is the last member, so a cut-off tar has
+  none), or one that is not a tar;
+- version terms that differ from this image's, or cache keys this image
+  computes differently from the manifest's config. Prep and train must come
+  from the same release, or at least one with the same version terms;
+- a file whose sha256 or size differs from the manifest, a member the
+  manifest does not list, one it lists that is missing, or a path or link
+  that leaves the bundle's stage directories;
+- masks under review that were never approved;
+- the import on a prep image, and on a train image any job that would have to
+  start from the clip (the error names the image to use). A prep image
+  refuses jobs without `run_until`.
+
+An imported stage whose cache entry is gone by the time its job runs (the
+cache evicted it, or it was deleted) fails the job with the bundle's name to
+import again; it is never rebuilt, because this machine has no clip.
+
+**Not measured yet:** the bundle's size for 0141 (about 2 GB, estimated from
+the disk figures above, not confirmed), the size of each image, and their
+pull times on a rented host. `scripts/publish_image.sh` prints the image
+sizes; this section gets the numbers from the first split run.
 
 ## When the instance dies mid-job
 

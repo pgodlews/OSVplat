@@ -155,6 +155,33 @@ the list comes from `queue/app/mask_backends.py`.
 - Logs of the service itself: `docker compose logs -f queue`. Logs of each
   stage are in the UI.
 
+## Three images
+
+One Dockerfile, three build targets from the same build stage, so LichtFeld
+is compiled once. They are published together under one version, each
+scanned, signed and with its SBOM:
+
+| Tag | Target | Holds | Runs |
+|---|---|---|---|
+| `osvplat:<ver>`, `:latest` | `all` (the default) | ffmpeg, `venv`, `venv_gs`, LichtFeld | everything, as before |
+| `osvplat:<ver>-prep` | `prep` | ffmpeg, `venv`, `venv_gs` (masks, SAM 3); no LichtFeld | jobs with `run_until` (frames to SfM), and writes [handoff bundles](cloud.md#split-pipeline) |
+| `osvplat:<ver>-train` | `train` | `venv` (the fisheye training masks are combined in it) and LichtFeld; no ffmpeg, no `venv_gs` | imported handoff bundles: train and export |
+
+Each image says which it is (`OSVPLAT_VARIANT`, and `image_variant` in
+`GET /api/status`), and the service refuses at submission what that image
+cannot finish, with the image to use instead: on `prep`, a job without
+`run_until`, and imports; on `train`, any job that starts from a clip. On
+`train`, the host benchmark and compare renders are refused too: both run
+in `venv_gs`. Nothing in training or export imports torch.
+
+```bash
+docker build --target prep  -t osvplat:dev-prep  .
+docker build --target train -t osvplat:dev-train .
+docker build -t osvplat:dev .                        # all
+```
+
+The image sizes are not measured yet; `scripts/publish_image.sh` prints them.
+
 ## Verifying the image
 
 Every release is published with its digest, a software bill of materials and
@@ -197,6 +224,12 @@ releases are built on a workstation with `scripts/publish_image.sh`, which:
 4. with `--push`: copies the scanned image to the public `:VERSION` and
    `:latest` tags on the registry (same digest, no rebuild), signs the digest
    with cosign, and prints the lines for the release notes.
+
+It does this for each of the [three images](#three-images) (`TARGETS`, by
+default `all prep train`), publishing `:VERSION`, `:VERSION-prep` and
+`:VERSION-train` only once all three have scanned clean. The build stage
+(LichtFeld, the venvs) comes from the builder's cache after the first
+target, so it is compiled once.
 
 One-time setup:
 

@@ -353,6 +353,11 @@ class JobConfig(Cfg):
     mask: MaskCfg = Field(default_factory=MaskCfg)
     train: TrainCfg = Field(default_factory=TrainCfg)
     export: ExportCfg = Field(default_factory=ExportCfg)
+    # Stop after this stage: the job ends done, the later stages skipped. With
+    # "sfm" it also writes a handoff bundle for another machine to train from
+    # (handoff.py). Where a job stops changes no stage's output, so it is in no
+    # cache key; a prep job and an all-in-one job share every upstream entry.
+    run_until: Optional[Literal["frames", "select", "mask", "sfm"]] = None
 
     @property
     def is_fisheye(self) -> bool:

@@ -241,6 +241,18 @@ def _repro(job: dict, stages: list[dict], secrets: list[str]) -> str:
         json.dumps(cfg, indent=1),
         "JSON",
     ]
+    try:
+        imported = json.loads(job.get("handoff") or "null")
+    except ValueError:
+        imported = None
+    if isinstance(imported, dict):
+        # This machine never had the clip: queueing the config would start at
+        # frames and fail there. The bundle is what reproduces it.
+        lines += ["", f"# Queued from handoff bundle {imported.get('bundle')} (id "
+                      f"{imported.get('id')}), not from a clip. To reproduce, put that",
+                  "# bundle in QUEUE_ROOT/handoffs/ and import it instead of the POST above:",
+                  "#   curl -sS -X POST -H \"x-queue-token: $QUEUE_TOKEN\" -H 'content-type: application/json' \\",
+                  f"#     -d '{{\"bundle\": \"{imported.get('bundle')}\"}}' localhost:8090/api/handoff/import"]
     if failed:
         lines += ["", f"# The stage that failed ({failed['stage']}) ran this; run it by hand",
                   "# inside the container to iterate faster once the cache holds its inputs:"]
@@ -284,7 +296,8 @@ def _collect(job_id: int, level: str) -> list[Item]:
     telemetry.write(job_id)                 # the record as of now, not the last stage
     for name, p in (("telemetry/telemetry.json", telemetry.telemetry_path(job_id)),
                     ("telemetry/samples.jsonl.gz", telemetry.samples_path(job_id)),
-                    ("telemetry/upload.json", outputs.status_path(job_id))):
+                    ("telemetry/upload.json", outputs.status_path(job_id)),
+                    ("telemetry/handoff.json", telemetry.run_dir(job_id) / "handoff.json")):
         try:
             data = p.read_bytes()
         except OSError:

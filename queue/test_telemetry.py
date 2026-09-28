@@ -100,6 +100,59 @@ class Record(unittest.TestCase):
             telemetry.write(jid)                    # printed, not raised
 
 
+class Handoff(unittest.TestCase):
+    """Split pipeline (#8): each side keeps its own record, joined by a random id."""
+
+    def setUp(self):
+        db.init()
+        db.conn().execute("DELETE FROM jobs")
+
+    def test_prep_record_carries_the_id(self):
+        import uuid
+        from app import handoff
+        jid = make_job()
+        hid = str(uuid.uuid4())
+        handoff._set_status(jid, state="built", role="prep", id=hid,
+                            file=f"job{jid:05d}-handoff.tar", bytes=2048, files=7,
+                            stages=["select", "sfm"], pack_s=1.5,
+                            upload={"state": "done", "url": "https://bucket.example/private/x.tar",
+                                    "bytes": 2048, "transfer_s": 2.0, "attempts": 1})
+        rec = telemetry.build(jid)
+        self.assertEqual(rec["handoff"]["id"], hid)
+        self.assertEqual(rec["handoff"]["role"], "prep")
+        self.assertEqual(rec["transfers"]["handoff"]["mb_s"], 0.0)
+        self.assertEqual(rec["transfers"]["handoff"]["direction"], "upload")
+        text = json.dumps(rec)
+        self.assertNotIn("bucket.example", text)
+        self.assertNotIn("handoff.tar", text)
+
+    def test_imported_stages_claim_no_measurement(self):
+        import uuid
+        jid = make_job()
+        hid = str(uuid.uuid4())
+        db.set_handoff(jid, {"id": hid, "bundle": "garden_walk_north.tar", "stages": {}})
+        now = time.time()
+        for st in ("frames", "select", "mask", "sfm"):
+            db.upsert_stage(jid, st, f"key-{st}", "imported", path=None,
+                            progress=json.dumps({"num_reg_frames": 400, "imported_from": hid}))
+        db.upsert_stage(jid, "train", "key-train", "done", started=now - 60, ended=now,
+                        progress=json.dumps({"psnr": 27.0}))
+        telemetry.record_resources(jid, "train", {"cpu_seconds": 5.0})
+        rec = telemetry.build(jid)
+        self.assertEqual(rec["handoff"], {"id": hid, "role": "train"})
+        by = {s["stage"]: s for s in rec["stages"]}
+        for st in ("frames", "select", "mask", "sfm"):
+            self.assertEqual(by[st]["state"], "imported")
+            self.assertEqual(by[st]["handoff_id"], hid)
+            self.assertEqual(by[st]["cache_key"], f"key-{st}")
+            for k in ("resources", "wall_s", "started", "ended", "planned_s"):
+                self.assertIsNone(by[st][k], (st, k))
+            self.assertEqual(by[st]["info"], {})
+        self.assertEqual(by["train"]["wall_s"], 60.0)
+        self.assertEqual(by["train"]["resources"], {"cpu_seconds": 5.0})
+        self.assertNotIn("garden_walk", json.dumps(rec))
+
+
 class Logs(unittest.TestCase):
     def setUp(self):
         db.init()

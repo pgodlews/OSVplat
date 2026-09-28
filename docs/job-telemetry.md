@@ -111,13 +111,14 @@ request carries `X-OSVplat-Signature: sha256=<HMAC-SHA256 of the body>`.
 |---|---|
 | `job` | id, state, sweep id, created/started/ended, first 500 chars of the error (redacted like the logs), input size in bytes, the job config **without** the job name and clip file name (the extension and content hash stay) |
 | `plan` | the per-stage estimate frozen at submit time, with its assumptions (panoramas, iterations, it/s) |
-| `stages[]` | stage, state (done, cached, skipped, failed…), cache key, start/end, `wall_s`, `planned_s`, the numeric results the stage reported (`info`), and `resources` |
+| `stages[]` | stage, state (done, cached, imported, skipped, failed…), cache key, start/end, `wall_s`, `planned_s`, the numeric results the stage reported (`info`), and `resources`. An `imported` stage ran on another machine ([Split pipeline](#split-pipeline)) |
 | `stages[].info` of a `.OSV` sfm stage with `sfm.upright` | `upright_requested`, `upright`, `metric` (flags); `upright_residual_deg`, `upright_scale`, and with GPS `gps_rms_m`, `gps_yaw_correction_deg`, `gravity_vs_gps_deg`. No coordinates: the GPS reference stays in the job's own `sfm/alignment.json` |
 | `stages[].resources` | sampled every 5 s over the stage's process tree: CPU seconds, average cores busy, peak RSS, GPU utilisation p50/p95/mean and peak GPU memory (whole device), GPU health ([below](#gpu-health)), and `host`: the machine over the whole stage ([Machine load](#machine-load)) |
 | `metrics` | the job's metrics table: PSNR, SSIM, splats, peak VRAM, train seconds… |
 | `host` | OS, whether in a container; CPU model, logical CPUs, physical cores, effective CPUs (affinity and cgroup quota), AVX/AVX2/FMA/AVX-512; RAM, cgroup memory limit, `/dev/shm` size; `disk`: used/free/total under `QUEUE_ROOT` when the record is written, and the job's peak ([Disk space](#disk-space)); per GPU: name, memory, compute capability, driver, max PCIe gen/width, power limit, the card's default and max power limit, max SM and memory clocks |
 | `software` | image version and git revision (`OSVPLAT_VERSION`, `OSVPLAT_REVISION`; the Dockerfile and `deploy.sh` set them), Python version |
-| `transfers` | `input`: the `INPUT_URL` download of this job's clip; `output`: the `OUTPUT_UPLOAD_URL` upload ([below](#transfers)) |
+| `transfers` | `input`: the `INPUT_URL` download of this job's clip; `output`: the `OUTPUT_UPLOAD_URL` upload; `handoff`: the handoff bundle's upload or download ([below](#transfers)) |
+| `handoff` | for a job split between two machines, `{"id", "role", …}` ([Split pipeline](#split-pipeline)); null otherwise |
 | `placement` | `QUEUE_TELEMETRY_PLACEMENT`, or null |
 | `timeline` | host boot time, service start time |
 
@@ -217,8 +218,35 @@ shows next to the stage timings. Nothing extra is sent to measure it.
 |---|---|
 | `input` | `bytes`, `seconds`, `mb_s` (10⁶ bytes/s), `first_byte_s`, `ended`, from the entrypoint's curl (`QUEUE_ROOT/runs/input_fetch.json`); timings are of the last attempt if curl retried. Null when the clip came another way or was already there |
 | `output` | `state`, `bytes`, `seconds` (the successful request alone), `mb_s`, `attempts`, `pack_s` (building the archive), `ended`. Null when there is no `OUTPUT_UPLOAD_URL`. The upload ends after the job does, so `telemetry.json` is written once more when it finishes, and only then uploaded |
+| `handoff` | `direction` (`upload` on the prep side, `download` on the train side), `state`, `bytes`, `seconds`, `mb_s`, `attempts`, `first_byte_s`, `ended`. The prep side's is the `HANDOFF_UPLOAD_URL` upload, and like `output` it defers the record's upload until it ends; the train side's is the entrypoint's `HANDOFF_URL` download (`QUEUE_ROOT/runs/handoff_fetch.json`) of the bundle the job was imported from. Null otherwise |
 
-Neither carries the URL, the bucket or the clip name.
+None of them carries the URL, the bucket, the clip or the bundle's file name.
+
+### Split pipeline
+
+A job can be split between two machines ([cloud.md, "Split
+pipeline"](cloud.md#split-pipeline)): a prep job stops after SfM and writes a
+handoff bundle, and a train job on another machine is queued from it. **Each
+side writes its own record**, with its own host, stages, samples and logs, as
+any job does. Neither record is ever merged into the other, and no telemetry
+travels in the bundle.
+
+The two records share an id instead:
+
+| Field | Content |
+|---|---|
+| `handoff.id` | a random UUID (version 4) made when the prep side writes the bundle, and stored in the bundle's manifest; the train side reads it from there on import. Never derived from the clip, a path or the host, so it names nothing |
+| `handoff.role` | `prep` or `train` |
+| `handoff.bytes`, `payload_bytes`, `files` | the bundle's size, the bytes of the files in it, and how many files |
+| `handoff.stages` | the stages whose cache entries the bundle carries (`select`, `mask`, `sfm`) |
+| `handoff.pack_s` / `import_s` | writing the bundle (prep), or verifying and installing it (train) |
+| `handoff.already_cached`, `source_version` | train only: stages this machine already held under the same keys, and the image version that wrote the bundle |
+| `stages[]` with `state: imported` | train only, for `frames`, `select`, `mask` and `sfm`: `cache_key` (the key they were imported under) and `handoff_id`. `started`, `ended`, `wall_s`, `planned_s` and `resources` are null and `info` is empty: those stages ran on the prep host, and its record has them. The train side still checks each imported directory the way it checks a cache hit, but that check is not a stage run and is not timed |
+
+Joining the two records by `handoff.id` is left to whoever consumes them: the
+service never looks for the other half. A bundle imported twice gives two
+train records with the same id, and a prep job whose bundle is rebuilt
+(`POST /api/jobs/<id>/handoff`) gets a new id.
 
 ## Benchmark
 

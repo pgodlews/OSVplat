@@ -128,6 +128,9 @@ def _run(gpus: list[int], hold) -> None:
 
 def start() -> tuple[bool, str]:
     """Start a run in the background. (False, reason) when it cannot now."""
+    if not GS_PY.exists():
+        # The train image carries no venv_gs (docs/docker.md, "Three images").
+        return False, "the benchmark runs in venv_gs, which this image does not carry"
     with _lock:
         if _state["state"] == "running":
             return False, "a benchmark is already running"
