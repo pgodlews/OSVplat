@@ -10,6 +10,10 @@ first. Copy the clip to your Linux GPU workstation, or hand it to a rented GPU
 on Vast.ai or RunPod, pick a preset in a small web UI, and an hour or two later
 download `.ply`, `.sog` and `.spz` files.
 
+**[Live demo: splat.piotrek.uk](https://splat.piotrek.uk/)**. Explore an
+OSVplat splat of Leeds Corn Exchange in your browser, with touch, mouse or
+keyboard.
+
 <p align="center">
   <img src="docs/images/atrium-flythrough.webp" width="320" alt="Fly-through of a Gaussian splat of a domed atrium, trained from one Osmo 360 walk">
 </p>
@@ -52,9 +56,9 @@ download `.ply`, `.sog` and `.spz` files.
 
 ## Requirements
 
-- A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (the published
-  0.1.2/0.1.3 images need RTX 30xx or newer, see
-  [troubleshooting #31](docs/troubleshooting.md); developed on
+- A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (0.1.4 images
+  run on RTX 20xx and newer; the older 0.1.2/0.1.3 images need RTX 30xx or
+  newer, see [troubleshooting #31](docs/troubleshooting.md); developed on
   RTX 3090s; a Standard run peaked at 10 GB of VRAM), and ~20 GB of free disk
   per clip. Or a rented one: see [docs/cloud.md](docs/cloud.md).
 - Clips from a DJI Osmo 360 or Avata 360 (`.OSV`), or any stitched
@@ -74,10 +78,12 @@ docker compose logs queue | grep token          # the URL to open
 cp /media/$USER/SD/DCIM/DJI_001/CAM_*.OSV samples/
 ```
 
-Until a prebuilt image is published on GHCR, use the `--build` form: about an
-hour, once. Details, settings and updating: **[docs/docker.md](docs/docker.md)**.
+`docker compose pull` fetches the prebuilt image
+(`ghcr.io/pgodlews/osvplat:latest`, currently 0.1.4-rc6); the `--build` form
+builds it here instead, about an hour, once. Details, settings, updating and
+verifying the signature: **[docs/docker.md](docs/docker.md)**.
 
-**On a rented GPU** (Vast.ai, RunPod): start `ghcr.io/pgodlews/osvplat:0.1.3`
+**On a rented GPU** (Vast.ai, RunPod): start `ghcr.io/pgodlews/osvplat:0.1.4-rc6`
 with your SSH key and two presigned URLs; `scripts/presign_s3.py` makes them.
 Steps, settings and what to watch out for: **[docs/cloud.md](docs/cloud.md)**.
 
