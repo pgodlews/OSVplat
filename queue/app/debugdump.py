@@ -420,7 +420,9 @@ def _write(job_id: int, level: str, items: list[Item], started: float) -> dict:
         used += size
     manifest = {
         "schema": "osvplat.debug/1", "job": job_id, "level": level,
-        "created": round(time.time(), 1),
+        # Unrounded: build(reuse=True) compares it with the job's `ended`,
+        # and a rounded value could read as before it (CI, 2026-09-28).
+        "created": time.time(),
         "software": {"version": os.environ.get("OSVPLAT_VERSION"),
                      "revision": os.environ.get("OSVPLAT_REVISION")},
         "files": [{"name": it.name, "bytes": it.size} for it in chosen],
