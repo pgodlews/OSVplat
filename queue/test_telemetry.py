@@ -423,6 +423,57 @@ class GpuHealth(unittest.TestCase):
                           g["mem_clock_max_mhz"]), (350.0, 400.0, 2100, 9751))
 
 
+class BurstAndOwners(unittest.TestCase):
+    """Stage starts sampled fast; device memory split into ours and others'."""
+
+    def test_first_seconds_are_sampled_faster(self):
+        # The first look is at 0.5 s whatever the interval (see run()).
+        s = telemetry.ResourceSampler(None, os.getpid(), interval=5.0,
+                                      burst_s=1.2, burst_interval=0.05)
+        with patch.object(s, "sample") as sample:
+            s.start()
+            time.sleep(1.0)
+            in_burst = sample.call_count
+            time.sleep(0.5)                     # the burst is over at 1.2 s
+            past = sample.call_count
+            time.sleep(1.0)
+            later = sample.call_count
+            s.stop()
+            s.join(6)
+        self.assertGreaterEqual(in_burst, 5)
+        # Past the burst the 5 s interval applies: nothing in the next second.
+        self.assertEqual(later, past)
+
+    def test_burst_never_slows_a_faster_interval(self):
+        s = telemetry.ResourceSampler(None, os.getpid(), interval=0.2, burst_interval=1.0)
+        self.assertEqual(s.burst_interval, 0.2)
+
+    def test_memory_split_by_owner(self):
+        # The 5090 case: the device total is all the trainer's; then another
+        # tenant's 8 GB appears that the container cannot list.
+        me = os.getpid()
+        rows = iter([[["0", "90", "31108"]], [["0", "90", "39300"]]])
+        procs = {0: [{"pid": me, "name": "LichtFeld-Studio", "mib": 31100}]}
+        s = telemetry.ResourceSampler(0, me)
+        with patch.object(telemetry, "_gpu_sample_rows", lambda: next(rows)), \
+                patch.object(telemetry.gpu, "compute_procs", lambda: procs):
+            s.sample()
+            self.assertEqual((s._gpu_now["own_mib"], s._gpu_now["other_mib"]), (31100, 8))
+            s.sample()
+            self.assertEqual(s._gpu_now["other_mib"], 8200)
+        self.assertEqual(s.summary(10)["gpu_mem_other_peak_mib"], 8200)
+        # No pids or names in the record: sums only.
+        self.assertEqual(set(s._gpu_now) & {"pid", "name", "procs"}, set())
+
+    def test_no_process_list_leaves_the_split_out(self):
+        s = telemetry.ResourceSampler(0, os.getpid())
+        with patch.object(telemetry, "_gpu_sample_rows", lambda: [["0", "10", "500"]]), \
+                patch.object(telemetry.gpu, "compute_procs", lambda: None):
+            s.sample()
+        self.assertNotIn("own_mib", s._gpu_now)
+        self.assertIsNone(s.summary(5)["gpu_mem_other_peak_mib"])
+
+
 class DiskUse(unittest.TestCase):
     """Disk used/free under QUEUE_ROOT: per sample, per stage, over the job."""
 

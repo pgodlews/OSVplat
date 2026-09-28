@@ -139,6 +139,7 @@ them with the card's limits under `host.gpus`.
 | `gpu_sm_mhz_busy_p50`, `gpu_mem_mhz_busy_p50` | SM and memory clocks, MHz |
 | `gpu_temp_c_max` | highest temperature, °C |
 | `gpu_pcie_gen_max`, `gpu_pcie_width_max` | the highest PCIe link seen. The link trains down when idle, so only a stage that used the GPU says what the slot can do; below `host.gpus[].pcie_gen`/`pcie_width` there means a narrower slot or a riser |
+| `gpu_mem_other_peak_mib` | the most GPU memory held by anything but this stage's processes (see `other_mib` under [Time series](#time-series)): memory this job could not have. Includes the driver's reservation, so a few hundred MiB is normal |
 | `gpu_ecc_uncorrected` | uncorrected ECC errors since the driver loaded; null on cards without ECC |
 | `gpu_clock_reasons` | for each reason that held the clocks down, the share of samples it did: `gpu_idle`, `sw_power_cap`, `hw_slowdown`, `sw_thermal`, `hw_thermal`, `hw_power_brake`, `applications_clocks`, `sync_boost`, `display_clocks` |
 | `gpu_sw_power_cap_busy` | share of busy samples in which the power cap held the clocks down. Use this, not `gpu_clock_reasons.sw_power_cap`: an idle card can report the cap too |
@@ -189,8 +190,12 @@ interface names are recorded.
 
 ### Time series
 
-`samples.jsonl.gz`: one JSON line per 5 s sample, while a stage's process
-runs. Each line is its own gzip member, so a service killed mid-write loses at
+`samples.jsonl.gz`: one JSON line per sample while a stage's process runs:
+every 1 s for the first 120 s of each stage, then every 5 s
+(`QUEUE_SAMPLE_BURST_S`, `QUEUE_SAMPLE_BURST_INTERVAL`). Stage starts are where
+memory balloons and processes die: at 5 s, the RTX 5090 run of 2026-09-28
+showed training going from 4.4 GB straight to 31 GB and out of memory, where
+1 s samples showed the whole climb in the 20 s between. Each line is its own gzip member, so a service killed mid-write loses at
 most that line. The first sample of each stage only sets the baseline, so a
 stage shorter than about 5 s adds no line. Writing stops at 32 MB, with a line in
 the service log.
@@ -201,7 +206,7 @@ the service log.
 | `cores_busy`, `rss_mb` | the stage's process tree: cores' worth of CPU over the interval, resident memory |
 | `disk_used_mb`, `disk_free_mb` | the filesystem under `QUEUE_ROOT` ([Disk space](#disk-space)) |
 | `host` | [machine load](#machine-load) over the interval, with `core_busy_pct` |
-| `gpu` | this job's GPU at the sample: `util`, `mem_mib`, `power_w`, `sm_mhz`, `mem_mhz`, `temp_c`, `pcie_gen`, `pcie_width`, `clock_reasons` (the reasons active), `power_limit_w` (the enforced limit); null without a GPU |
+| `gpu` | this job's GPU at the sample: `util`, `mem_mib`, `power_w`, `sm_mhz`, `mem_mhz`, `temp_c`, `pcie_gen`, `pcie_width`, `clock_reasons` (the reasons active), `power_limit_w` (the enforced limit), and `own_mib`/`other_mib`: of `mem_mib`, what the stage's own process tree holds and the rest (another job, another tenant's container, the driver's own reservation of a few hundred MiB). Sums only, no process ids or names; absent when `nvidia-smi` cannot list processes; null without a GPU |
 
 ### Transfers
 

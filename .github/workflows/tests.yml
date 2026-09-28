@@ -54,6 +54,8 @@ jobs:
         run: python3 queue/test_benchmark.py
       - name: test_hoststats.py
         run: python3 queue/test_hoststats.py
+      - name: test_debugdump.py
+        run: python3 queue/test_debugdump.py
 
   scripts:
     name: Pipeline script tests (CPU)

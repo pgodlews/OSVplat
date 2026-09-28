@@ -83,6 +83,9 @@ sha256, then destroy the instance.
 | `INPUT_URL` | URL of one clip, fetched into `samples/` at start | name from the URL path, or `INPUT_NAME` |
 | `INPUT_SHA256` | checked before the clip is used; a mismatch deletes it | recommended |
 | `OUTPUT_UPLOAD_URL` | presigned PUT URL, or a JSON target (below) | upload after each job that ends done |
+| `QUEUE_DEBUG` | `basic` | how much a failed job's [debug bundle](#debug-bundles) holds: `off`, `basic`, `artifacts`, `heavy` |
+| `QUEUE_DEBUG_MAX_GB` | 4.5 | size cap for the bundle; what does not fit is listed in its manifest |
+| `DEBUG_UPLOAD_URL` | presigned PUT URL, or a JSON target | upload the bundle when a job fails |
 | `QUEUE_CPUS` | discovered | override the CPU count stages are sized to |
 | `QUEUE_MIN_COMPUTE_CAP` | 7.5 | GPUs below this are listed but not scheduled |
 | `QUEUE_TLS_INSECURE` | 0 | `1` accepts self-signed certificates for `INPUT_URL`, `OUTPUT_UPLOAD_URL`, telemetry and the webhook |
@@ -246,6 +249,54 @@ hosts go offline, a pod is terminated by mistake. What that costs:
   late or repeated upload cannot overwrite another run's result.
 - Nothing retries the job on another instance. Check the result exists
   (`upload.state: done` and its sha256), not just that the instance is gone.
+
+## Debug bundles
+
+When a job **fails**, the service writes `runs/job<id>/debug.tar` for
+offline analysis and, with `DEBUG_UPLOAD_URL` set, uploads it. On a rented
+GPU the instance is usually deleted minutes later, and before this existed
+something was always missing afterwards: LichtFeld's crash log in `/tmp`,
+the memory curve at a finer grain than 5 s, the state of the card, or the
+splat a finished training had already exported when its job was marked failed
+(2026-09-27: a 50k-iteration run was reported short by one of its two
+completion checks, and its 6M-splat export was deleted with the instance).
+
+| `QUEUE_DEBUG` | Adds | Typical size |
+|---|---|---|
+| `basic` (default) | job record and config, cache keys, every stage log in full (head and tail beyond 64 MB), `telemetry.json` and `samples.jsonl.gz`, LichtFeld crash logs from the job's time window, `nvidia-smi -q`, host and cgroup state (CPU, memory, pressure, `dmesg` where readable, `core_pattern`), a process list, the environment with secrets redacted, and `repro.sh` | a few MB |
+| `artifacts` | what the failed stages left: exported splats (`.spz`, `.sog`, `.ply`), `metrics.csv`, the trainer's emergency `.licht` snapshot, the sparse model and stage summaries | up to ~1-2 GB with a 6M-splat `.ply` |
+| `heavy` | core dumps from the job's time window, and the training dataset view (sparse model and masks). Never the frames: the clip, the config and the image digest reproduce them | + masks, cores |
+
+- Items go in by priority until `QUEUE_DEBUG_MAX_GB` (4.5, under a single S3
+  PUT's 5 GB); what was left out is listed in `MANIFEST.json` and
+  `debug.json`, never dropped silently. The `basic` items always go in.
+- **Not anonymous**, unlike telemetry: paths, clip and job names are part of
+  what makes it useful, and it only ever goes where the operator points
+  `DEBUG_UPLOAD_URL`. It is stripped of secrets: the queue token, every
+  secret-named environment variable (`*TOKEN*`, `*KEY*`, `*_URL`,
+  `*UPLOAD*`, ...), presigned URL signatures anywhere in the text, and GPU
+  serial numbers and UUIDs.
+- `repro.sh` holds the job's config as a ready `POST /api/jobs` and the failed
+  stage's exact command line: start the same image with the same clip, and
+  every cached stage is rebuilt identically.
+- A cancelled job gets no bundle; build one on demand. `POST
+  /api/jobs/{id}/debug?level=heavy` builds one now (a running job, or one that
+  failed before this version) and returns its status; `&send=1` also uploads
+  it. `GET /api/jobs/{id}/debug` is the status (`state`, `bytes`, `sha256`,
+  `skipped`, `upload`), `GET /api/jobs/{id}/debug/download` the tar. A bundle
+  already built at that level or deeper after the job ended is reused.
+- The upload streams the file in one PUT and checks the returned `ETag`
+  against the tar's MD5, like `OUTPUT_UPLOAD_URL`. A plain presigned URL names
+  one object: the first failed job's bundle goes there, later ones stay local
+  (`upload.state: refused`) unless the target has a `{job}` placeholder.
+- It never changes the job's state, and is built in its own thread, so the
+  GPU goes to the next job meanwhile. A bundle that cannot be written leaves
+  `debug.json` with `state: failed` and the reason.
+
+Traffic costs little: RunPod charges nothing for ingress or egress, Vast
+charges per host (`inet_up_cost` in the offer), GCP egress is about
+$0.12/GB. The bundle adds a minute or two of billed time at most, while it
+uploads.
 
 ## Stopping and destroying
 

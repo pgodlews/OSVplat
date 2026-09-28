@@ -22,8 +22,8 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import (benchmark, db, estimate, gpu, metrics, outputs, progress, resources,
-               retention, telemetry, worker)
+from . import (benchmark, db, debugdump, estimate, gpu, metrics, outputs, progress,
+               resources, retention, telemetry, worker)
 from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, METRICS_ENABLED,
                      MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
@@ -647,6 +647,45 @@ def api_telemetry(job_id: int, logs: bool = Query(False)):
         return FileResponse(p, media_type="application/gzip",
                             filename=f"job{job_id:05d}_logs.tar.gz")
     return FileResponse(p, media_type="application/json")
+
+
+@app.post("/api/jobs/{job_id}/debug")
+def api_debug_build(job_id: int, level: Optional[str] = Query(None),
+                    reuse: bool = Query(True), send: bool = Query(False)) -> dict:
+    """Build this job's debug bundle now (docs/cloud.md "Debug bundles").
+
+    For a job that is still running, or failed before this existed, or when
+    the machine is about to go (the watcher asks before deleting it). Level
+    defaults to QUEUE_DEBUG; with reuse, a bundle already built at that level
+    or above after the job ended is returned as it is. send=1 also uploads it
+    to DEBUG_UPLOAD_URL. Blocks until written: GBs at level heavy take a while.
+    """
+    if db.get_job(job_id) is None:
+        raise HTTPException(404, "no such job")
+    try:
+        st = debugdump.build(job_id, level, reuse=reuse)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if send and st.get("state") in ("built", "upload_failed"):
+        st = debugdump.upload(job_id)
+    return st
+
+
+@app.get("/api/jobs/{job_id}/debug")
+def api_debug_status(job_id: int) -> dict:
+    st = debugdump.status(job_id)
+    if st is None:
+        raise HTTPException(404, "no debug bundle for this job")
+    return st
+
+
+@app.get("/api/jobs/{job_id}/debug/download")
+def api_debug_download(job_id: int):
+    p = debugdump.bundle_path(job_id)
+    if not p.is_file():
+        raise HTTPException(404, "no debug bundle for this job; POST to build one")
+    return FileResponse(p, media_type="application/x-tar",
+                        filename=f"job{job_id:05d}-debug.tar")
 
 
 @app.get("/api/jobs/{job_id}/log")

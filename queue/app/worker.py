@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from . import db, gpu, outputs, retention, telemetry
+from . import db, debugdump, gpu, outputs, retention, telemetry
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
                      SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
@@ -736,6 +736,10 @@ def run_job(job_id: int, gpu_index: int) -> None:
                                 ended=time.time())
         telemetry.write(job_id, final=True)
         telemetry.notify("job.finished", job_id, failed_stage, state)
+        # A cancel is deliberate; a failure is what the bundle is for. Built in
+        # its own thread: the GPU goes to the next job meanwhile.
+        if state == "failed":
+            debugdump.on_failure(job_id)
     finally:
         _cancel.discard(job_id)
         with _lock:
