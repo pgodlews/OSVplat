@@ -317,8 +317,9 @@ IMU_SELECT = "imu-select-1"
 # after changing what 82/88_fisheye_sfm.py or colmap_incremental.py reconstruct
 # from the same selection and masks: frames, selection and masks keep their
 # cache entries, where a FISHEYE_PIPELINE bump would redo all three. 2: global
-# bundle adjustment every 40 % of growth, 2 refinements (was 10 %, 5).
-FISHEYE_SFM = "fisheye-sfm-2"
+# bundle adjustment every 40 % of growth, 2 refinements (was 10 %, 5). 3: every
+# 100 % of growth; local bundle adjustment threaded from 5,000 residuals.
+FISHEYE_SFM = "fisheye-sfm-3"
 # What the API sets for .OSV input when a request leaves select.imu out.
 IMU_SELECT_DEFAULT = False
 
