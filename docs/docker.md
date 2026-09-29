@@ -227,9 +227,12 @@ releases are built on a workstation with `scripts/publish_image.sh`, which:
 
 It does this for each of the [three images](#three-images) (`TARGETS`, by
 default `all prep train`), publishing `:VERSION`, `:VERSION-prep` and
-`:VERSION-train` only once all three have scanned clean. The build stage
-(LichtFeld, the venvs) comes from the builder's cache after the first
-target, so it is compiled once.
+`:VERSION-train` only once all three have scanned clean. All three are built
+in one `docker buildx bake`, so the shared build stage (LichtFeld and gsplat
+for every GPU architecture) is compiled once and handed to each of them.
+Built one after another, they relied on the builder's cache to keep that
+stage, and it did not: 0.2.0-rc2's third image recompiled LichtFeld (91 min)
+and gsplat (over 3 h) after the first two had already built them.
 
 One-time setup:
 

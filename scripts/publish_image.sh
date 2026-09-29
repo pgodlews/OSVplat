@@ -10,8 +10,9 @@
 #   IMAGE:<ver>          all-in-one (and :latest), the Dockerfile's default target
 #   IMAGE:<ver>-prep     frames to SfM, writes handoff bundles
 #   IMAGE:<ver>-train    trains from a handoff bundle
-# Each is built from the same fresh clone, scanned, published with its SBOM and
-# provenance, and signed. TARGETS="all" publishes the all-in-one alone.
+# All are built in one `docker buildx bake` from the same fresh clone, so the
+# shared build stage is compiled once; each is then scanned, published with its
+# SBOM and provenance, and signed. TARGETS="all" publishes the all-in-one alone.
 #
 # Before --push, once:  docker login ghcr.io -u <github-user>  (a token with
 # write:packages), and a signing key:  cosign generate-key-pair  in the repo
@@ -167,9 +168,37 @@ echo "    commit $REVISION"
 # A docker-container builder is what can attach SBOM and provenance on push.
 docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
   || docker buildx create --name "$BUILDER" --driver docker-container >/dev/null
-BUILD=(docker buildx build --builder "$BUILDER" --platform linux/amd64
-       --build-arg "CUDA_ARCH=$CUDA_ARCH" --build-arg "JOBS=$BUILD_JOBS"
-       --build-arg "VERSION=$VERSION" --build-arg "REVISION=$REVISION")
+
+# Every target in ONE bake, so one solve builds the shared build stage
+# (LichtFeld and gsplat for every CUDA architecture, hours) once and hands it
+# to all three. Built target by target, the stage had to survive in the
+# builder's cache between builds, and its garbage collection evicted it:
+# 0.2.0-rc1 and -rc2 compiled it twice, about 10 h instead of 6.
+#   write_bake <push|load> <image name>   -> $WORK/bake.json, bake targets osvplat-<t>
+write_bake() {
+  python3 - "$1" "$2" "$VERSION" "$CUDA_ARCH" "$BUILD_JOBS" "$REVISION" "$WORK/src" $TARGETS \
+    > "$WORK/bake.json" <<'PY'
+import json, sys
+mode, image, version, arch, jobs, rev, ctx, *targets = sys.argv[1:]
+spec = {}
+for t in targets:
+    d = {"context": ctx, "dockerfile": "Dockerfile", "target": t,
+         "platforms": ["linux/amd64"],
+         "args": {"CUDA_ARCH": arch, "JOBS": jobs, "VERSION": version, "REVISION": rev},
+         "tags": [f"{image}:{version}{'' if t == 'all' else '-' + t}"]}
+    if mode == "push":
+        # The image, its SBOM and build provenance, to the (private) registry.
+        d["attest"] = ["type=sbom", "type=provenance,mode=max"]
+        d["output"] = ["type=registry"]
+    else:
+        d["output"] = ["type=docker"]
+    spec[f"osvplat-{t}"] = d
+json.dump({"group": {"default": {"targets": list(spec)}}, "target": spec}, sys.stdout, indent=1)
+PY
+}
+# --allow: bake refuses to read a build context outside its working directory
+# unless told to (buildx 0.37); this grants the fresh clone and nothing else.
+BAKE=(docker buildx bake --builder "$BUILDER" --allow "fs.read=$WORK/src" -f "$WORK/bake.json")
 
 # Can anyone read this ghcr.io repository? Asked the way a stranger would:
 # an anonymous pull token, then its tag list. 200 = public; a private or
@@ -193,12 +222,11 @@ size_of() { docker image inspect -f '{{.Size}}' "$1" | awk '{printf "%.1f GB", $
 t0=$(date +%s)
 if [ $PUSH = 0 ]; then
   # ---------------------------------------------------------------- build + scan
-  # One builder, so the build stage (LichtFeld, the venvs) is built once and
-  # every target after the first reuses it from the builder's cache.
+  write_bake load "$IMAGE_NAME"
+  echo "==> building $TARGETS in one bake for CUDA_ARCH=$CUDA_ARCH (hours for the full list, the first time)"
+  "${BAKE[@]}"
   for t in $TARGETS; do
     img="$IMAGE_NAME:$VERSION$(suffix "$t")"
-    echo "==> building $t for CUDA_ARCH=$CUDA_ARCH (hours for the full list, the first time)"
-    "${BUILD[@]}" --target "$t" -t "$img" --load "$WORK/src"
     echo "==> $img built after $(( ($(date +%s)-t0)/60 )) min: $(size_of "$img")"
     scan_image "$img"
   done
@@ -216,12 +244,12 @@ fi
 publicly_readable "$PROBE_PUBLIC" || die "the privacy probe cannot read public $PROBE_PUBLIC; is ghcr.io reachable?"
 ! publicly_readable "$STAGING" || die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)"
 declare -A DIGEST
+write_bake push "$STAGING"
+echo "==> building $TARGETS in one bake for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION[-target]"
+"${BAKE[@]}" --metadata-file "$WORK/meta.json"
 for t in $TARGETS; do
   sfx=$(suffix "$t")
-  echo "==> building $t for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION$sfx"
-  "${BUILD[@]}" --target "$t" -t "$STAGING:$VERSION$sfx" --sbom=true --provenance=mode=max \
-    --metadata-file "$WORK/meta-$t.json" --push "$WORK/src"
-  DIGEST[$t]=$(python3 -c "import json;print(json.load(open('$WORK/meta-$t.json'))['containerimage.digest'])")
+  DIGEST[$t]=$(python3 -c "import json;print(json.load(open('$WORK/meta.json'))['osvplat-$t']['containerimage.digest'])")
   echo "==> $t staged after $(( ($(date +%s)-t0)/60 )) min: $STAGING@${DIGEST[$t]}"
   ! publicly_readable "$STAGING" \
     || die "$STAGING is publicly readable after the push: make it private or delete $STAGING:$VERSION$sfx now, it is not scanned"
