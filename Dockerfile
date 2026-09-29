@@ -48,6 +48,17 @@ RUN LFS_MARCH=x86-64-v3 /src/scripts/setup_lichtfeld.sh \
     && find . -name '*.o' -delete
 COPY scripts/setup_gsplat_venv.sh /src/scripts/
 RUN /src/scripts/setup_gsplat_venv.sh && rm -rf /root/.cache/pip /opt/splat/gsplat_src/.git
+# Build leftovers the runtime never loads: static libraries already linked into
+# LichtFeld's .so files and binary, detached debug info, and the checkout's
+# history (setup_lichtfeld.sh reads it only while building). 2.06 GB of the
+# 4.43 GB LichtFeld directory in 0.2.0-rc1: 1.61 GB of .a, 0.31 GB of .dwarf,
+# 0.14 GB of .git. A step of its own, last, so no cached layer above changes;
+# the ldd checks in the train and all stages still catch a library removed
+# that a binary needs.
+RUN cd /opt/splat/LichtFeld-Studio \
+    && rm -rf .git \
+    && find build -name '*.a' -delete \
+    && find build -name '*.dwarf' -delete
 
 ############################################################ runtime base
 # What every target shares, so their layers are shared too.
