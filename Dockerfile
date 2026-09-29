@@ -62,7 +62,12 @@ RUN cd /opt/splat/LichtFeld-Studio \
 
 ############################################################ runtime base
 # What every target shares, so their layers are shared too.
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS base
+# The -base image (cudart and the driver compat libraries), not -runtime: of
+# the system CUDA libraries, LichtFeld links only libcudart and libcurand, and
+# pycolmap libcurand. torch, torchvision and gsplat use the CUDA 13 wheels in
+# venv_gs. -runtime's cuBLAS, cuFFT, cuSOLVER, cuSPARSE, NVRTC, nvJitLink and
+# NPP were 1.51 GB of every image's download (#16).
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu24.04 AS base
 ENV DEBIAN_FRONTEND=noninteractive \
     SPLAT_ROOT=/opt/splat QUEUE_ROOT=/data \
     PYTHONUNBUFFERED=1 \
@@ -71,12 +76,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # The GTK/X11/Wayland libraries LichtFeld links against even when run
 # --headless; pycolmap needs libSM/libICE, and venv_gs's OpenCV the GL ones.
+# libcurand is the version -runtime shipped for CUDA 13.0.2.
 # ffmpeg comes per target: the train image decodes nothing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv ca-certificates curl openssh-server rsync \
       libgtk-3-0t64 libglu1-mesa libegl1 libxinerama1 libxcursor1 libxkbcommon0 \
       libwayland-client0 libwayland-cursor0 libwayland-egl1 libdecor-0-0 libdbus-1-3 \
       libgomp1 libstdc++6 libjpeg-turbo8 libpng16-16t64 libsm6 libice6 \
+      libcurand-13-0=10.4.0.35-1 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/ssh/ssh_host_*
 # openssh-server's install made host keys; one baked-in key pair would be shared
