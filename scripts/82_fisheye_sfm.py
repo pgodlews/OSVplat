@@ -24,7 +24,8 @@ frames) COLMAP's own mapper makes every global pass iterative: a 7-minute clip
 spent about two hours per pass. With the limit lifted the same 1404 frames
 mapped in 4 h 57 min and converged to a slightly lower cost
 (colmap_incremental.py has the measurements). Global bundle adjustment also
-runs less often than COLMAP's default (see the mapper options below).
+runs less often than COLMAP's default, and local bundle adjustment is threaded
+from smaller problems (see the mapper options below and colmap_incremental.py).
 
 usage (venv): 82_fisheye_sfm.py --calib calibration.json --images DIR/images
               --masks DIR/fmasks_colmap --out DIR/sfm_fish_fixed
@@ -43,7 +44,8 @@ from pathlib import Path
 import numpy as np
 import pycolmap
 
-from colmap_incremental import DIRECT_SOLVER_MAX_IMAGES, incremental_mapping
+from colmap_incremental import (DIRECT_SOLVER_MAX_IMAGES, LOCAL_BA_MIN_RESIDUALS_FOR_THREADS,
+                                incremental_mapping)
 from osmo_fisheye import colmap_params, lenses, rig_rotation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -143,13 +145,18 @@ def main():
     # medium-quality one. Clip 0005 (957 rig frames, nosacz-llm, 16 threads):
     # mapping 80.4 -> 40.7 min, global BA 59.9 -> 20.1 min; 957/957 frames and
     # 1.069 px either way, camera centres within 0.014 % of the path length.
-    opts.ba_global_frames_ratio = 1.4
-    opts.ba_global_points_ratio = 1.4
+    # Ratio 2.0 (every 100 % of growth), same clip on nuc3 (Ryzen 7 H 255, 14
+    # threads): mapping 46.5 -> 42.0 min, global BA 21.1 -> 16.9 min in 26 calls
+    # instead of 45; 957/957 frames, 1.0687 px and 832k points either way, camera
+    # centres within 0.0044 % of the path length.
+    opts.ba_global_frames_ratio = 2.0
+    opts.ba_global_points_ratio = 2.0
     opts.ba_global_max_refinements = 2
     ba_local, ba_global = opts.get_local_bundle_adjustment(), opts.get_global_bundle_adjustment()
     logging.info(f"mapper: global BA ratio {opts.ba_global_frames_ratio}/{opts.ba_global_points_ratio} "
                  f"refinements {opts.ba_global_max_refinements}; ceres threads local "
-                 f"{ba_local.ceres.solver_options.num_threads} global "
+                 f"{ba_local.ceres.solver_options.num_threads} (from "
+                 f"{LOCAL_BA_MIN_RESIDUALS_FOR_THREADS} residuals) global "
                  f"{ba_global.ceres.solver_options.num_threads}, gpu {opts.ba_use_gpu}, "
                  f"{pycolmap.COLMAP_build}")
     sparse = out / "sparse"

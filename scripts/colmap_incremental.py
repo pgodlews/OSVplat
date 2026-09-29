@@ -75,6 +75,19 @@ MIRRORED_VERSION = "4.2."
 DIRECT_SOLVER_MAX_IMAGES = 1_000_000
 
 
+# COLMAP runs a bundle adjustment on one thread below 50,000 residuals. A local
+# one on a fisheye rig is 43k-111k (p10-p90), and a fifth of them fell under it.
+# Local only, measured on clip 0005 (957 rig frames, nuc3, 14 threads): local BA
+# 20.2 -> 17.5 min, mapping 46.5 -> 43.2 min, the reconstruction identical.
+LOCAL_BA_MIN_RESIDUALS_FOR_THREADS = 5000
+
+
+def local_bundle_adjustment_options(options: IncrementalPipelineOptions) -> pycolmap.BundleAdjustmentOptions:
+    ba_options = options.get_local_bundle_adjustment()
+    ba_options.ceres.min_num_residuals_for_cpu_multi_threading = LOCAL_BA_MIN_RESIDUALS_FOR_THREADS
+    return ba_options
+
+
 def global_bundle_adjustment_options(options: IncrementalPipelineOptions,
                                      max_images: int) -> pycolmap.BundleAdjustmentOptions:
     ba_options = options.get_global_bundle_adjustment()
@@ -231,7 +244,7 @@ def reconstruct_sub_model(controller: IncrementalPipeline, mapper: IncrementalMa
                 options.ba_local_max_refinements,
                 options.ba_local_max_refinement_change,
                 mapper_options,
-                options.get_local_bundle_adjustment(),
+                local_bundle_adjustment_options(options),
                 options.get_triangulation(),
                 next_image_id,
             )

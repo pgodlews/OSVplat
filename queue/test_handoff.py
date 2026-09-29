@@ -391,7 +391,7 @@ class Refusals(unittest.TestCase):
 
     def test_version_term_mismatch(self):
         with patch.object(handoff, "FISHEYE_SFM", "fisheye-sfm-99"):
-            self.refused(self.name, "FISHEYE_SFM: bundle 'fisheye-sfm-2', here 'fisheye-sfm-99'")
+            self.refused(self.name, "FISHEYE_SFM: bundle 'fisheye-sfm-3', here 'fisheye-sfm-99'")
 
     def test_config_version_mismatch(self):
         def edit(m):
