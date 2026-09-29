@@ -16,7 +16,7 @@ Those are prior measurements, not results from this prototype.
 
 | Arm | Change from shipped 82's default mapping configuration |
 | --- | --- |
-| `baseline` | None: fixed intrinsics, sensor-from-rig refinement, seed 0, ratios 1.4, two global refinements, lifted direct sparse CPU solver limit 1,000,000 images |
+| `baseline` | None: focal + k1-k4 refined as in production (88 passes `--refine-intrinsics`; `--fixed-intrinsics` for 82's standalone default), sensor-from-rig refinement, seed 0, ratios 1.4, two global refinements, lifted direct sparse CPU solver limit 1,000,000 images |
 | `redundant` | `opts.mapper.ba_global_ignore_redundant_points3D = True`; default coverage gain 0.05 |
 | `ratio2` | Both `ba_global_frames_ratio` and `ba_global_points_ratio` set to 2.0 |
 | `redundant_ratio2` | Both preceding changes |
@@ -24,7 +24,7 @@ Those are prior measurements, not results from this prototype.
 
 All other options, including absolute global BA frequency limits, local bundle
 size, color extraction, and multiple-model policy, retain 82's defaults. This
-baseline corresponds to 82 **without** `--refine-intrinsics`. Ratios are triggers,
+baseline corresponds to 82 **with** `--refine-intrinsics`, as 88 runs it in production (`--fixed-intrinsics` gives 82's standalone default). Ratios are triggers,
 not a promise of exactly half as many passes; frequency triggers and the final
 refinement still apply. Options and the imported mapper's SHA-256 are recorded.
 The database snapshot SHA-256 is recorded before mapping, for input consistency.

@@ -18,16 +18,17 @@ def require_version():
         raise RuntimeError(f"Requires pycolmap 4.2.0, got {pycolmap.__version__}; no fallback")
 
 
-def options_for(arm, threads):
-    """82_fisheye_sfm.py's default (fixed intrinsics), including default model policy."""
+def options_for(arm, threads, refine_intrinsics=True):
+    """82_fisheye_sfm.py's mapper options. refine_intrinsics=True matches production:
+    88_fisheye_sfm.py always runs 82 with --refine-intrinsics."""
     require_version()
     opts = pycolmap.IncrementalPipelineOptions(num_threads=threads, random_seed=0)
-    opts.ba_refine_focal_length = False
-    opts.ba_refine_extra_params = False
+    opts.ba_refine_focal_length = refine_intrinsics
+    opts.ba_refine_extra_params = refine_intrinsics
     opts.ba_refine_principal_point = False
     opts.ba_refine_sensor_from_rig = True
-    opts.mapper.abs_pose_refine_focal_length = False
-    opts.mapper.abs_pose_refine_extra_params = False
+    opts.mapper.abs_pose_refine_focal_length = refine_intrinsics
+    opts.mapper.abs_pose_refine_extra_params = refine_intrinsics
     opts.ba_global_frames_ratio = 1.4
     opts.ba_global_points_ratio = 1.4
     opts.ba_global_max_refinements = 2

@@ -12,11 +12,11 @@ from common import (ARMS, mirror, model_stats, new_output, options_for,
 from instrumentation import NativeLog, instrument, timing_summary
 
 
-def run(db, images, out, arm, threads, *, instrumented=True):
+def run(db, images, out, arm, threads, *, instrumented=True, refine_intrinsics=True):
     db, images = Path(db).resolve(), Path(images).resolve()
     if not db.is_file() or not images.is_dir():
         raise ValueError("--db must exist and --images must be a directory")
-    opts = options_for(arm, threads)
+    opts = options_for(arm, threads, refine_intrinsics)
     out = new_output(out)
     # Consistent snapshot, including committed WAL content, without modifying source.
     with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True) as source:
@@ -31,6 +31,7 @@ def run(db, images, out, arm, threads, *, instrumented=True):
         local_opts.ceres.min_num_residuals_for_cpu_multi_threading = 5000
     events = {"global": [], "local": []}
     report = {"arm": arm, "threads": threads, "instrumented": instrumented,
+              "refine_intrinsics": refine_intrinsics,
               "pycolmap_version": pycolmap.__version__, "build": pycolmap.COLMAP_build,
               "database_snapshot_sha256": database_hash.hexdigest(),
               "mapper_sha256": hashlib.sha256(Path(mirror.__file__).read_bytes()).hexdigest(),
@@ -77,8 +78,11 @@ def main():
     ap.add_argument("--out", required=True, help="New directory; existing output is refused")
     ap.add_argument("--arm", required=True, choices=ARMS)
     ap.add_argument("--threads", type=int, default=threads_default())
+    ap.add_argument("--fixed-intrinsics", action="store_true",
+                    help="82's standalone default; production (88) refines focal + k1-k4")
     a = ap.parse_args()
-    report = run(a.db, a.images, a.out, a.arm, a.threads)
+    report = run(a.db, a.images, a.out, a.arm, a.threads,
+                 refine_intrinsics=not a.fixed_intrinsics)
     print(f"STAGE map {report['map_s']:.3f}s; report: {Path(a.out) / 'report.json'}")
 
 
