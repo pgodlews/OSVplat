@@ -17,7 +17,8 @@ refinement call the C++ IncrementalMapper methods instead of the example's
 Python bundle adjustment, every global bundle adjustment gets the lifted limit,
 and snapshots and the progress bar are left out. On a 67-frame clip it
 reproduced the C++ mapper (49,221 vs 49,230 points, 0.8533 vs 0.8535 px) in the
-same time.
+same time. 4.2.1 changed neither the example nor IncrementalPipeline::Run
+(one log line aside), so the mirror stands for it too.
 
 The mirror follows the pycolmap API it was copied from. On any other pycolmap
 version incremental_mapping() falls back to pycolmap.incremental_mapping, cliff

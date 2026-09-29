@@ -47,7 +47,8 @@ from pydantic import ValidationError
 from . import db, outputs, telemetry
 from .config import (CACHE_ROOT, HANDOFF_ROOT, HANDOFF_UPLOAD, HANDOFF_UPLOAD_ERROR,
                      IMAGE_VARIANT, RUNS_ROOT, SPLAT_ROOT, ssl_context)
-from .jobs import (FISHEYE_PIPELINE, FISHEYE_SFM, IMU_SELECT, UPRIGHT, JobConfig)
+from .jobs import (FISHEYE_PIPELINE, FISHEYE_SFM, IMU_SELECT, REDUNDANT_POINTS, UPRIGHT,
+                   JobConfig)
 from .stages import (ORDER, STAGES, Ctx, dir_bytes, is_cached, lock_holder_alive,
                      mark_done, read_done, read_lock, release_lock, reset_stage_dir,
                      take_lock)
@@ -85,7 +86,8 @@ def version_terms() -> dict:
     """What, besides the config, decides this build's cache keys."""
     return {"config_version": JobConfig.model_fields["config_version"].default,
             "FISHEYE_PIPELINE": FISHEYE_PIPELINE, "FISHEYE_SFM": FISHEYE_SFM,
-            "IMU_SELECT": IMU_SELECT, "UPRIGHT": UPRIGHT}
+            "IMU_SELECT": IMU_SELECT, "UPRIGHT": UPRIGHT,
+            "REDUNDANT_POINTS": REDUNDANT_POINTS}
 
 
 def bundle_name(job_id: int) -> str:

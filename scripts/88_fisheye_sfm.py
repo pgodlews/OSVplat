@@ -131,6 +131,8 @@ def main():
                          "stream, and scale it to metres when it carries GPS")
     ap.add_argument("--selection", default="", help="selection.json of the frames, for --upright")
     ap.add_argument("--start", type=float, default=0.0, help="trim start the frames were decoded from")
+    ap.add_argument("--skip-redundant-points", action="store_true",
+                    help="passed to 82_fisheye_sfm.py (sfm.skip_redundant_points)")
     a = ap.parse_args()
     if a.upright and not a.selection:
         ap.error("--upright needs --selection")
@@ -146,7 +148,8 @@ def main():
     build_masks(images, out / "masks", L, radii, person)
     t_sfm = run([PY, HERE / "82_fisheye_sfm.py", "--calib", a.calib, "--images", images,
                  "--masks", out / "masks", "--out", out / "rig", "--refine-intrinsics",
-                 "--overlap", a.overlap], "rig SfM")
+                 "--overlap", a.overlap,
+                 *(["--skip-redundant-points"] if a.skip_redundant_points else [])], "rig SfM")
 
     picked = json.loads(run_capture([PY, HERE / "32_pick_model.py", out / "rig", out / "picked"],
                                     "model pick").strip().splitlines()[-1])

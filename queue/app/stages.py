@@ -1275,6 +1275,8 @@ def fisheye_sfm_argv(ctx: Ctx) -> list[str]:
                  "--selection", str(ctx.dir("select") / "selection.json")]
         if ctx.cfg.input.trim_start:
             argv += ["--start", f"{ctx.cfg.input.trim_start:g}"]
+    if ctx.cfg.sfm.skip_redundant_points:
+        argv += ["--skip-redundant-points"]
     return argv
 
 

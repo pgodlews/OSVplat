@@ -118,6 +118,15 @@ class SfmCfg(Cfg):
     # no stream, so JobConfig refuses it there. The API fills it in for .OSV
     # input when a request leaves it out (main._prepare, UPRIGHT_DEFAULT).
     upright: bool = False
+    # Raw .OSV only, off by default: each global bundle adjustment of the rig
+    # SfM leaves out the 3D points that add no coverage and refines them after
+    # with the poses fixed (COLMAP's ba_global_ignore_redundant_points3D,
+    # 82_fisheye_sfm.py --skip-redundant-points). Clip 0005 on nuc3: mapping
+    # 42.0 -> 34.6 min, the same cameras within 0.016 % of the path, PSNR
+    # +0.03 dB and SSIM -0.002 after training -- but the point count swung
+    # 436k-729k between two near-identical databases (issue #19), so it stays
+    # opt-in until a second clip and repeat trainings say otherwise.
+    skip_redundant_points: bool = False
 
 
 class MaskCfg(Cfg):
@@ -319,7 +328,9 @@ IMU_SELECT = "imu-select-1"
 # cache entries, where a FISHEYE_PIPELINE bump would redo all three. 2: global
 # bundle adjustment every 40 % of growth, 2 refinements (was 10 %, 5). 3: every
 # 100 % of growth; local bundle adjustment threaded from 5,000 residuals.
-FISHEYE_SFM = "fisheye-sfm-3"
+# 4: pycolmap-cuda12 4.2.0 -> 4.2.1 (track-merge colours, rig and two-view
+# fixes that change extraction, matching and mapping).
+FISHEYE_SFM = "fisheye-sfm-4"
 # What the API sets for .OSV input when a request leaves select.imu out.
 IMU_SELECT_DEFAULT = False
 
@@ -327,11 +338,17 @@ IMU_SELECT_DEFAULT = False
 # so a job with it off keeps every key it had before the option existed. Bump
 # it after changing what scripts/upright.py does to a model.
 UPRIGHT = "upright-1"
+
+# Joins the sfm key -- and so train and export -- only while
+# sfm.skip_redundant_points is on, so a job with it off keeps every key it had
+# before the option existed. Bump it after changing what the option does in
+# 82_fisheye_sfm.py.
+REDUNDANT_POINTS = "redundant-points-1"
 # Joins every train key -- and so export -- and nothing upstream of it: a new
 # trainer build retrains from the frames, masks and SfM already cached, where a
 # config_version bump would redo all of them. Moves with LFS_REF in
 # scripts/setup_lichtfeld.sh.
-TRAINER = "lichtfeld-e654717e"
+TRAINER = "lichtfeld-3067e9e0"
 
 # What the API sets for .OSV input when a request leaves sfm.upright out. On:
 # it only moves and scales the model, and falls back on its own when the clip
@@ -385,6 +402,11 @@ class JobConfig(Cfg):
                 f"sfm.upright reads the orientation stream and GPS inside a "
                 f"raw DJI .OSV; {Path(self.input.file).name} is stitched and "
                 f"carries neither. Leave sfm.upright off")
+        if self.sfm.skip_redundant_points and not self.is_fisheye:
+            raise ValueError(
+                f"sfm.skip_redundant_points applies to the fisheye rig "
+                f"reconstruction of a raw DJI .OSV; {Path(self.input.file).name} "
+                f"is stitched. Leave sfm.skip_redundant_points off")
         if self.select.imu and not self.is_fisheye:
             raise ValueError(
                 f"select.imu reads the orientation stream inside a raw DJI "
@@ -456,12 +478,15 @@ class JobConfig(Cfg):
         return "no-sfm-mask"
 
     def k_sfm(self) -> str:
-        # sfm.upright is a term, and only while on (UPRIGHT), so every entry
-        # cached before the option keeps its key.
-        return key_of("sfm", self.k_select(), self.sfm.model_dump(exclude={"upright"}),
+        # sfm.upright and sfm.skip_redundant_points are terms, and only while
+        # on (UPRIGHT, REDUNDANT_POINTS), so every entry cached before the
+        # options keeps its key.
+        return key_of("sfm", self.k_select(),
+                      self.sfm.model_dump(exclude={"upright", "skip_redundant_points"}),
                       self._sfm_mask_term(),
                       *((FISHEYE_SFM,) if self.is_fisheye else ()),
-                      *((UPRIGHT,) if self.sfm.upright else ()))
+                      *((UPRIGHT,) if self.sfm.upright else ()),
+                      *((REDUNDANT_POINTS,) if self.sfm.skip_redundant_points else ()))
 
     def k_mask(self) -> str:
         # A disabled mask stage produces nothing, so every disabled config has
