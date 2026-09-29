@@ -49,8 +49,8 @@ def run(db, images, out, arm, threads, *, instrumented=True, refine_intrinsics=T
                     recs = mirror.incremental_mapping(out / "database.db", images,
                                                       out / "sparse", opts)
             else:
-                if arm != "baseline":
-                    raise ValueError("Native parity reference only supports baseline")
+                if arm == "localmt":
+                    raise ValueError("localmt exists only in the instrumented loops; no native run")
                 recs = mirror.incremental_mapping(out / "database.db", images,
                                                   out / "sparse", opts)
             elapsed = perf_counter() - start
@@ -78,10 +78,12 @@ def main():
     ap.add_argument("--out", required=True, help="New directory; existing output is refused")
     ap.add_argument("--arm", required=True, choices=ARMS)
     ap.add_argument("--threads", type=int, default=threads_default())
+    ap.add_argument("--native", action="store_true",
+                    help="no instrumentation: native COLMAP refinement loops, as production runs them")
     ap.add_argument("--fixed-intrinsics", action="store_true",
                     help="82's standalone default; production (88) refines focal + k1-k4")
     a = ap.parse_args()
-    report = run(a.db, a.images, a.out, a.arm, a.threads,
+    report = run(a.db, a.images, a.out, a.arm, a.threads, instrumented=not a.native,
                  refine_intrinsics=not a.fixed_intrinsics)
     print(f"STAGE map {report['map_s']:.3f}s; report: {Path(a.out) / 'report.json'}")
 
