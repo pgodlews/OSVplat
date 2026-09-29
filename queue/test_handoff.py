@@ -30,9 +30,11 @@ os.environ["SPLAT_ROOT"] = TMP
 os.environ["QUEUE_ROOT"] = str(Path(TMP) / "q")
 os.environ["QUEUE_GPUS"] = ""
 os.environ["QUEUE_TELEMETRY"] = "1"
+# Most tests import one bundle several times; Cleanup tests the default.
+os.environ["QUEUE_HANDOFF_KEEP"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app import config, db, handoff, telemetry, worker        # noqa: E402
+from app import config, db, handoff, resources, telemetry, worker  # noqa: E402
 from app.jobs import JobConfig                                # noqa: E402
 from app.stages import ORDER, STAGES, is_cached, read_done    # noqa: E402
 
@@ -296,6 +298,44 @@ class RoundTrip(unittest.TestCase):
         with self.assertRaisesRegex(handoff.HandoffError, "sfm .* does not verify"):
             handoff.export(jid)
         self.assertFalse(handoff.bundle_path(jid).exists())
+
+
+class Cleanup(unittest.TestCase):
+    """A verified import deletes its tar: kept, it doubled the train side's
+    input on disk (2026-09-29, 5.45 GB tar next to 5.47 GB unpacked)."""
+
+    def bundle(self, name):
+        cfg = build_cache({**MP4, "name": name})
+        jid = prep_job(cfg)
+        self.assertEqual(handoff.export(jid)["state"], "built")
+        return cfg, to_handoffs(jid)
+
+    def test_deleted_after_a_verified_import(self):
+        cfg, name = self.bundle("clean")
+        wipe(cfg)
+        with patch.object(handoff, "KEEP_BUNDLES", False):
+            out = handoff.import_bundle(handoff.bundle_file(name))
+        self.assertFalse((config.HANDOFF_ROOT / name).exists())
+        self.assertTrue(out["status"]["bundle_removed"])
+        self.assertGreater(out["status"]["bytes"], 0)       # recorded before deleting
+        self.assertTrue(out["installed"])
+        self.assertTrue(all(is_cached(CACHE / st / out["keys"][st]) for st in out["installed"]))
+
+    def test_keep_keeps_it(self):
+        cfg, name = self.bundle("keep")
+        wipe(cfg)
+        with patch.object(handoff, "KEEP_BUNDLES", False):
+            out = handoff.import_bundle(handoff.bundle_file(name), keep=True)
+        self.assertTrue((config.HANDOFF_ROOT / name).is_file())
+        self.assertFalse(out["status"]["bundle_removed"])
+
+    def test_a_refused_import_never_deletes(self):
+        cfg, name = self.bundle("refused")
+        wipe(cfg)
+        with patch.object(handoff, "KEEP_BUNDLES", False):
+            with self.assertRaises(handoff.HandoffError):
+                handoff.import_bundle(handoff.bundle_file(name), sha256="0" * 64)
+        self.assertTrue((config.HANDOFF_ROOT / name).is_file())
 
 
 class Refusals(unittest.TestCase):
@@ -661,6 +701,20 @@ class Api(unittest.TestCase):
                 with self.assertRaisesRegex(HTTPException, "HANDOFF_UPLOAD_URL"):
                     m._refuse_for_image(prep)
                 m._refuse_for_image(JobConfig.model_validate({**MP4, "run_until": "select"}))
+
+    def test_a_cpu_below_the_build_refuses_training(self):
+        from fastapi import HTTPException
+        m = self.main
+        full = JobConfig.model_validate(MP4)
+        prep = JobConfig.model_validate({**MP4, "run_until": "sfm"})
+        with patch.object(resources, "CPU_ERROR", "Xeon E5-2697 v2 lacks avx2, fma"), \
+                patch.object(m, "IMAGE_VARIANT", "all"):
+            with self.assertRaisesRegex(HTTPException, "cannot train"):
+                m._refuse_for_image(full)
+            m._refuse_for_image(prep)                        # prep still runs here
+            with self.assertRaisesRegex(HTTPException, "cannot train"):
+                m.api_handoff_import(m.HandoffImportReq(bundle="x.tar"))
+            self.assertIn("E5-2697", m.api_status()["cpu_error"])
 
     def test_stage_rows_skip_past_run_until(self):
         cfg = JobConfig.model_validate({**MP4, "name": "rows", "run_until": "mask"})

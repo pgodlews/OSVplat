@@ -69,7 +69,8 @@ the failure mode is a full disk 80 minutes into a 95-minute run.
 
 | Knob | Default | Effect |
 |---|---|---|
-| `QUEUE_MIN_FREE_GB` | 20 | A stage refuses to start below this. It first evicts and prunes to try to get there. |
+| `QUEUE_MIN_FREE_GB` | 20 | A stage whose size nothing predicts (frames, select, mask, sfm) refuses to start below this. It first evicts and prunes to try to get there. Set by hand, it applies to train and export too. |
+| `QUEUE_ESTIMATED_SLACK_GB` | 2 | The minimum for train and export, which are sized from the job instead (below). |
 | `QUEUE_CACHE_BUDGET_GB` | 0 (none) | Ceiling the cache is evicted down to. |
 | `QUEUE_LOG_KEEP_DAYS` | 30 | Stage logs older than this are pruned at startup. |
 | `QUEUE_RENDER_KEEP_DAYS` | 30 | Comparison sheets older than this are pruned at startup. |
@@ -82,6 +83,18 @@ failure the check exists to prevent. Each stage now asks for `QUEUE_NEED_SAFETY`
 times the largest entry it has ever produced, whichever is greater, measured
 from the cache table rather than guessed from a formula. A stage with no history
 yet has nothing to say and the floor stands on its own.
+
+The floor was also too much for the stages that come last. A train-only box
+(the split pipeline, 2026-09-29) was refused training with 15.9 GB free and,
+on a second try, export with 20.0 GB free after 114 minutes of training, for
+a job whose train and export added 1.3 GB together. So train and export are
+sized from the job (`stages.space_estimate`): train from `max_cap` and the SH
+degree (the PLY is 4 × (14 + 3 × (sh+1)²) bytes per splat, and LichtFeld
+writes about 4.5 times that with `project.licht`, SOG and SPZ, measured at
+3M splats, SH 1), export from the size of the exports its result tar packs,
+each with a 1.25 margin. They want the largest of that estimate, their
+history, and `QUEUE_ESTIMATED_SLACK_GB`. A `QUEUE_MIN_FREE_GB` set by hand
+still holds for every stage.
 
 Eviction is least-recently-used and conservative: it skips any entry an
 unfinished job depends on --- queued, running, **or parked in

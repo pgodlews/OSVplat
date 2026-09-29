@@ -1371,6 +1371,38 @@ def _by_input(stitched, fisheye):
     return pick
 
 
+# ------------------------------------------------------------ space estimate
+# What train and export will write, for retention.ensure_space. Measured
+# 2026-09-29 (0005, 1914 fisheye images, 3M splats, sh_degree 1): the train
+# directory grew 1.33 GB, as splat_30000.ply 312 MB (26 floats = 104 B per
+# splat), project.licht 936 MB (3x the PLY: parameters plus Adam's two
+# moments), sog 38 MB + spz 54 MB (0.3x), and 77 MB of combined masks.
+# PLY floats per splat: xyz 3, normal 3, opacity 1, scale 3, rotation 4, and
+# 3 colours x (sh_degree+1)^2 SH coefficients.
+TRAIN_GROWTH_PER_PLY = 4.5           # ply 1 + licht 3 + sog/spz 0.3, rounded up
+TRAIN_FIXED_BYTES = 1_000_000_000    # masks, metrics, logs; 77 MB measured
+ESTIMATE_MARGIN = 1.25
+
+
+def space_estimate(ctx: Ctx, stage: str) -> Optional[float]:
+    """Bytes this stage is expected to write, or None to leave it to the floor.
+
+    train: max_cap splats at the job's SH degree, times what LichtFeld writes
+    per PLY byte. export: links to the training exports, then the result tar
+    that packs them, so the size of those exports.
+    """
+    if stage == "train":
+        t = ctx.cfg.train
+        ply = t.max_cap * 4 * (14 + 3 * (t.sh_degree + 1) ** 2)
+        return ESTIMATE_MARGIN * (ply * TRAIN_GROWTH_PER_PLY + TRAIN_FIXED_BYTES)
+    if stage == "export":
+        src = ctx.dir("train")
+        size = sum(p.stat().st_size for pat in ("*.ply", "*.sog", "*.spz", "*.html")
+                   for p in src.glob(pat) if p.is_file())
+        return ESTIMATE_MARGIN * size if size else None
+    return None
+
+
 STAGES = {
     "frames": {"argv": _by_input(frames_argv, fisheye_frames_argv),
                "finalize": _by_input(frames_finalize, fisheye_frames_finalize),

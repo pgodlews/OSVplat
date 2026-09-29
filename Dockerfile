@@ -129,8 +129,10 @@ RUN chmod +x /usr/local/bin/entrypoint.sh && chmod -R a+rX /opt/splat
 ARG VERSION=dev
 ARG REVISION=unknown
 ARG CUDA_ARCH
+# OSVPLAT_LFS_MARCH: the CPU level LichtFeld was built for above (LFS_MARCH);
+# the service refuses to train on a CPU below it rather than die with SIGILL.
 ENV OSVPLAT_VERSION=${VERSION} OSVPLAT_REVISION=${REVISION} OSVPLAT_CUDA_ARCH=${CUDA_ARCH} \
-    OSVPLAT_VARIANT=train
+    OSVPLAT_VARIANT=train OSVPLAT_LFS_MARCH=x86-64-v3
 LABEL org.opencontainers.image.title="OSVplat (train)" \
       org.opencontainers.image.description="OSVplat training from a handoff bundle made by the prep image." \
       org.opencontainers.image.source="https://github.com/pgodlews/OSVplat" \
@@ -183,6 +185,9 @@ ENV OSVPLAT_VERSION=${VERSION} OSVPLAT_REVISION=${REVISION}
 # on a card none of them covers, instead of a job dying in gsplat or LichtFeld.
 ARG CUDA_ARCH
 ENV OSVPLAT_CUDA_ARCH=${CUDA_ARCH}
+# The CPU level LichtFeld was built for (LFS_MARCH in the build stage): the
+# service refuses to train on a CPU below it rather than die with SIGILL.
+ENV OSVPLAT_LFS_MARCH=x86-64-v3
 LABEL org.opencontainers.image.title="OSVplat" \
       org.opencontainers.image.description="Raw DJI .OSV dual-fisheye to Gaussian splat. No stitch." \
       org.opencontainers.image.source="https://github.com/pgodlews/OSVplat" \

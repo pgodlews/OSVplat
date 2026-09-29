@@ -131,6 +131,26 @@ class Gpus(unittest.TestCase):
         self.assertIsNone(resources.unsupported_reason("12.0", ""))        # native: floor only
         self.assertIn("< 7.5", resources.unsupported_reason("6.1", full))
 
+    def test_cpu_level(self):
+        v3 = ("processor\t: 0\nmodel name\t: AMD Ryzen Threadripper 3960X 24-Core Processor\n"
+              "flags\t\t: fpu sse sse2 ssse3 cx16 sse4_1 sse4_2 popcnt lahf_lm movbe xsave avx "
+              "f16c fma abm bmi1 avx2 bmi2\n")
+        # Xeon E5-2697 v2 (Ivy Bridge), 2026-09-29: AVX but none of v3's additions.
+        ivy = ("processor\t: 0\nmodel name\t: Intel(R) Xeon(R) CPU E5-2697 v2 @ 2.70GHz\n"
+               "flags\t\t: fpu sse sse2 ssse3 cx16 sse4_1 sse4_2 popcnt lahf_lm xsave avx f16c\n")
+        self.assertIsNone(resources.cpu_unsupported_reason("x86-64-v3", v3))
+        why = resources.cpu_unsupported_reason("x86-64-v3", ivy)
+        self.assertIn("E5-2697 v2", why)
+        for f in ("avx2", "fma", "bmi2", "movbe"):
+            self.assertIn(f, why)
+        self.assertIn("SIGILL", why)
+        self.assertIsNone(resources.cpu_unsupported_reason("x86-64-v2", ivy))
+        # A native build, an unknown level, or no x86 flags line: nothing to say.
+        self.assertIsNone(resources.cpu_unsupported_reason("", ivy))
+        self.assertIsNone(resources.cpu_unsupported_reason("native", ivy))
+        self.assertIsNone(resources.cpu_unsupported_reason("x86-64-v3",
+                                                           "processor\t: 0\nFeatures\t: fp asimd\n"))
+
     def test_no_capable_gpu_refuses_jobs(self):
         from fastapi import HTTPException
         from app import main

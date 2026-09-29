@@ -93,6 +93,7 @@ sha256, then destroy the instance.
 | `DEBUG_UPLOAD_URL` | presigned PUT URL, or a JSON target | upload the bundle when a job fails |
 | `QUEUE_CPUS` | discovered | override the CPU count stages are sized to |
 | `QUEUE_MIN_COMPUTE_CAP` | 7.5 | GPUs below this are listed but not scheduled |
+| `QUEUE_HANDOFF_KEEP` | 0 | `1` keeps a handoff bundle's tar after it has been imported |
 | `QUEUE_TLS_INSECURE` | 0 | `1` accepts self-signed certificates for `INPUT_URL`, `HANDOFF_URL`, the upload URLs, telemetry and the webhook |
 
 SSH needs the container to run as root, which is what both providers do; with
@@ -308,7 +309,9 @@ that starts at train. Its upstream stages show as `imported`, it never looks
 for the clip, and it delivers through `OUTPUT_UPLOAD_URL` like any job.
 `train` and `export` in the request replace those sections of the bundle's
 config: a different budget trains from the same SfM. `name` and `priority`
-are optional.
+are optional. Once every file has been verified and installed, the tar is
+deleted: kept, it doubles the train side's input on disk. `"keep": true` in
+the request, or `QUEUE_HANDOFF_KEEP=1`, keeps it to import again.
 
 **Batches.** Copy more bundles into `QUEUE_ROOT/handoffs/` (`scp`, `rsync`)
 and import each; the jobs run back to back. `HANDOFF_URL` fetches one.
@@ -346,10 +349,24 @@ An imported stage whose cache entry is gone by the time its job runs (the
 cache evicted it, or it was deleted) fails the job with the bundle's name to
 import again; it is never rebuilt, because this machine has no clip.
 
-**Not measured yet:** the bundle's size for 0141 (about 2 GB, estimated from
-the disk figures above, not confirmed), the size of each image, and their
-pull times on a rented host. `scripts/publish_image.sh` prints the image
-sizes; this section gets the numbers from the first split run.
+**Measured, first split run** (2026-09-29, 0.2.0-rc1, clip 0005: Osmo 360,
+trimmed to 286.9 s, 957 panoramas). Prep on an RTX 3090 with a Ryzen 7 H 255:
+frames 12.7 min, select 0.2, mask 8.5, SfM 57.5; SfM registered 957/957 at
+1.07 px with 832k points, as the all-in-one run did. The bundle is 5.45 GB in
+8,622 files, 4.84 GB of it the 1,914 selected images (about 2.5 MB each), so
+it grows with the frame count rather than the clip's size. On a rented RTX
+3090: download 242-390 s from R2 (14-23 MB/s), import 40.6 s, training
+113.8 min, PSNR 21.92 / SSIM 0.673 against 21.9 for the all-in-one run of
+the same clip. The train side's disk peaked at 6.8 GB with the tar deleted
+(5.5 GB of imported cache, 1.3 GB written by training), RAM at 10.2 GiB.
+Image downloads (compressed) and sizes on disk: all-in-one 6.86 / 21.5 GB,
+prep 5.46 / 15.7 GB, train 3.45 / 11.6 GB.
+
+**The train host needs an x86-64-v3 CPU** (AVX2 and FMA: Intel Haswell, AMD
+Zen 1 or newer). LichtFeld is built for that level, and an older CPU dies
+with SIGILL when training starts ([troubleshooting #35](troubleshooting.md)).
+The service checks at startup and refuses imports and training jobs on such
+a host; `GET /api/status` shows the reason as `cpu_error`.
 
 ## When the instance dies mid-job
 

@@ -190,6 +190,48 @@ def probe_cuda(timeout: float = 60) -> Optional[str]:
     return CUDA_ERROR
 
 
+# The x86-64 level LichtFeld was compiled for. The image builds it for
+# x86-64-v3 so it runs on any host of that level rather than only on the build
+# machine (setup_lichtfeld.sh, LFS_MARCH); the Dockerfile records it here. A CPU
+# below it dies with SIGILL the moment training starts: a Vast RTX 3090 with a
+# Xeon E5-2697 v2 (Ivy Bridge: AVX but no AVX2/FMA) did that on 2026-09-29,
+# after the bundle download and import, as training exit -4. Unset on a native
+# build (-march=native: the build machine is the host), so nothing is checked.
+LFS_MARCH = os.environ.get("OSVPLAT_LFS_MARCH", "").strip()
+# /proc/cpuinfo names for each level's instructions ("abm" is LZCNT).
+_V2 = {"cx16", "lahf_lm", "popcnt", "sse4_1", "sse4_2", "ssse3"}
+_LEVEL_FLAGS = {"x86-64-v2": _V2,
+                "x86-64-v3": _V2 | {"avx", "avx2", "bmi1", "bmi2", "f16c", "fma",
+                                    "abm", "movbe", "xsave"}}
+CPU_ERROR: Optional[str] = None      # set once by probe_cpu() at startup
+
+
+def cpu_unsupported_reason(march: str = None, cpuinfo: str = None) -> Optional[str]:
+    """Why this CPU cannot run the LichtFeld build, or None if it can (or is unknown)."""
+    march = LFS_MARCH if march is None else march
+    need = _LEVEL_FLAGS.get(march)
+    if not need:
+        return None                  # native, unset, or a level we don't model
+    text = cpuinfo if cpuinfo is not None else _read(Path("/proc/cpuinfo"))
+    flags = next((set(l.split(":", 1)[1].split()) for l in (text or "").splitlines()
+                  if l.startswith("flags")), None)
+    if flags is None:
+        return None                  # not Linux x86, or unreadable: don't guess
+    missing = sorted(need - flags)
+    if not missing:
+        return None
+    model = next((l.split(":", 1)[1].strip() for l in text.splitlines()
+                  if l.startswith("model name")), "this CPU")
+    return (f"{model} lacks {', '.join(missing)}: training is built for {march} "
+            f"and would die with SIGILL (exit -4)")
+
+
+def probe_cpu() -> Optional[str]:
+    global CPU_ERROR
+    CPU_ERROR = cpu_unsupported_reason()
+    return CPU_ERROR
+
+
 def summary(gpus: Optional[list[dict]], concurrent: int) -> str:
     """One startup log line, e.g.
     'resources: 23 CPUs (cgroup quota 23.8 of 112 visible), 54 GB RAM,
