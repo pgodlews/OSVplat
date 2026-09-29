@@ -12,7 +12,7 @@
 # Moving LFS_REF means moving TRAINER in queue/app/jobs.py with it.
 set -x
 set -euo pipefail
-LFS_REF=${LFS_REF:-e654717edd0e4bf942a9dc28891e3d33fa1edcc5}
+LFS_REF=${LFS_REF:-3067e9e096880e02900a3614117443a82f587f1c}
 VCPKG_REF=${VCPKG_REF:-04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4}    # 2026.07.29-440
 SPLAT_ROOT=${SPLAT_ROOT:-$HOME/splat}
 # Compute capability of GPU 0 (8.6 for an RTX 3090, 8.9 for a 4090), or a list

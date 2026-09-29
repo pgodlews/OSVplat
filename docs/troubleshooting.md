@@ -81,7 +81,7 @@ Code comments refer to these by number (`docs/troubleshooting.md #18`).
   `sudo prime-select on-demand` and reboot. Found on a NUC with an RTX 3090
   over OcuLink.
 
-## LichtFeld options (pinned commit e654717e)
+## LichtFeld options (pinned commit 3067e9e0)
 
 The queue refuses the two exclusions below at submit, so they only bite through
 `extra_args`. Measurements are in [how-it-works.md](how-it-works.md#trainer-options-measured).
@@ -97,7 +97,9 @@ The queue refuses the two exclusions below at submit, so they only bite through
 - Trained and exported on a fisheye rig at `e654717e`: `mrnf`, SH degree 1 and
   3, a 4.5M cap, `--background-improvements`, `--exposure-correction`,
   `--ppisp`. `mcmc`, `--enable-mip` and the bilateral grid were last checked
-  at `04e4607`.
+  at `04e4607`. `3067e9e0` adds only upstream fixes (3DGUT SH addressing
+  while the degree ramps up, SSIM gradient on thin images, tensor views) and
+  has not been re-checked against this list.
 - Fixed since `04e4607`: `--background-improvements` crashed mid-training and
   exported nothing (upstream #2074); `max_screen_share` did nothing on GUT,
   so on every 360 job here (#2194); exposure correction on GUT could paint

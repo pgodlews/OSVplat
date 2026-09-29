@@ -121,6 +121,7 @@ What the stitched path gives up, compared with the raw `.OSV`:
 | Gyro blur veto (`select.imu`) | yes | refused: no orientation stream |
 | Distance-based selection (Avata 360) | yes | no: needs the flight telemetry |
 | Upright splat, in metres with GPS (`sfm.upright`) | yes | refused: no orientation stream or GPS |
+| Skip redundant points in global BA (`sfm.skip_redundant_points`, off by default) | yes | refused: stitched SfM does not use it |
 | Person masking, review gate, presets, sweeps | yes | yes |
 | Training resolution | full 3840² per lens | LichtFeld's `--max-width` (default 3840, i.e. 3840×1920 per panorama) |
 
@@ -317,7 +318,7 @@ rebuild months later does not silently produce a different trainer:
 
 | Component | Pin | Override |
 |---|---|---|
-| LichtFeld Studio | `e654717e` | `LFS_REF` |
+| LichtFeld Studio | `3067e9e0` | `LFS_REF` |
 | vcpkg | `04a9d8e5` (2026.07.29) | `VCPKG_REF` |
 | gsplat (renders and evaluation only) | `28e794ca` (1.6.0), torch 2.9.1+cu130 | `GSPLAT_REF` |
-| pycolmap-cuda12 | 4.2.0 | edit `setup_sfm_venv.sh` |
+| pycolmap-cuda12 | 4.2.1 | edit `setup_sfm_venv.sh` |

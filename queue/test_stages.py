@@ -985,6 +985,24 @@ except Exception as _e:                                          # noqa: BLE001
 check("sfm.upright is refused for stitched input", _up_refused)
 check("the API turns sfm.upright on for .OSV by default", UPRIGHT_DEFAULT is True)
 
+# sfm.skip_redundant_points (issue #19): the same shape as sfm.upright, off by
+# default, and the sfm stage passes 88 a single flag.
+from app.jobs import REDUNDANT_POINTS                          # noqa: E402
+
+_rp = _cfg("samples/x.OSV", sfm={"skip_redundant_points": True})
+check("sfm.skip_redundant_points is off by default and on forks sfm, train and export only",
+      _osv.sfm.skip_redundant_points is False
+      and _rp.k_sfm() == key_of("sfm", _osv.k_select(), _sfm_dump, _osv._sfm_mask_term(),
+                                FISHEYE_SFM, REDUNDANT_POINTS)
+      and all(_rp.keys()[k] == _osv.keys()[k] for k in ("frames", "select", "mask"))
+      and all(_rp.keys()[k] != _osv.keys()[k] for k in ("sfm", "train", "export")))
+try:
+    _cfg("samples/x.mp4", sfm={"skip_redundant_points": True})
+    _rp_refused = False
+except Exception as _e:                                          # noqa: BLE001
+    _rp_refused = "sfm.skip_redundant_points" in str(_e)
+check("sfm.skip_redundant_points is refused for stitched input", _rp_refused)
+
 with tempfile.TemporaryDirectory() as _d:
     _root = Path(_d)
 
@@ -1003,6 +1021,9 @@ with tempfile.TemporaryDirectory() as _d:
           and _a[_a.index("--start") + 1] == "4")
     check("and without it passes none of them",
           not {"--upright", "--selection", "--start"} & set(_stages.STAGES["sfm"]["argv"](_sfm_ctx(_osv))))
+    check("fisheye sfm passes --skip-redundant-points only when asked",
+          "--skip-redundant-points" in _stages.STAGES["sfm"]["argv"](_sfm_ctx(_rp))
+          and "--skip-redundant-points" not in _stages.STAGES["sfm"]["argv"](_sfm_ctx(_osv)))
 
     _ds = _root / "sfm" / "dataset"
     (_ds / "sparse" / "0").mkdir(parents=True)

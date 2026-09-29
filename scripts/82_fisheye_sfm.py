@@ -77,6 +77,9 @@ def main():
     ap.add_argument("--direct-solver-max-images", type=int, default=DIRECT_SOLVER_MAX_IMAGES,
                     help="global BA uses the direct sparse solver up to this many images "
                          "(COLMAP's own default is 1000)")
+    ap.add_argument("--skip-redundant-points", action="store_true",
+                    help="global BA leaves out 3D points that add no coverage, then refines "
+                         "them with the poses fixed (issue #19; sfm.skip_redundant_points)")
     a = ap.parse_args()
 
     L = lenses(a.calib)
@@ -152,9 +155,13 @@ def main():
     opts.ba_global_frames_ratio = 2.0
     opts.ba_global_points_ratio = 2.0
     opts.ba_global_max_refinements = 2
+    # Opt-in (issue #19): on 0005 it cut mapping 42.0 -> 34.6 min with the same
+    # cameras, but the point count is sensitive to tiny database differences.
+    opts.mapper.ba_global_ignore_redundant_points3D = a.skip_redundant_points
     ba_local, ba_global = opts.get_local_bundle_adjustment(), opts.get_global_bundle_adjustment()
     logging.info(f"mapper: global BA ratio {opts.ba_global_frames_ratio}/{opts.ba_global_points_ratio} "
-                 f"refinements {opts.ba_global_max_refinements}; ceres threads local "
+                 f"refinements {opts.ba_global_max_refinements}, skip redundant points "
+                 f"{opts.mapper.ba_global_ignore_redundant_points3D}; ceres threads local "
                  f"{ba_local.ceres.solver_options.num_threads} (from "
                  f"{LOCAL_BA_MIN_RESIDUALS_FOR_THREADS} residuals) global "
                  f"{ba_global.ceres.solver_options.num_threads}, gpu {opts.ba_use_gpu}, "
