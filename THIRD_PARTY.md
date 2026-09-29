@@ -35,7 +35,7 @@ redistribution terms.
 
 | Component | Licence |
 |---|---|
-| [NVIDIA CUDA runtime image](https://hub.docker.com/r/nvidia/cuda) `13.0.2-runtime-ubuntu24.04` | NVIDIA Deep Learning Container License, at `/NGC-DL-CONTAINER-LICENSE` in the image |
+| [NVIDIA CUDA base image](https://hub.docker.com/r/nvidia/cuda) `13.0.2-base-ubuntu24.04`, plus `libcurand-13-0` | NVIDIA Deep Learning Container License, at `/NGC-DL-CONTAINER-LICENSE` in the image |
 | Ubuntu 24.04 packages, including FFmpeg 6.1.1 | various (LGPL/GPL for FFmpeg); each package's terms are in `/usr/share/doc/<package>/copyright`, source from Ubuntu |
 
 ## Not included

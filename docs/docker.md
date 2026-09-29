@@ -28,8 +28,8 @@ job data and optional model weights stay in folders on the workstation.
   `lspci`, check `prime-select query`. `intel` (integrated only) blacklists the
   NVIDIA driver; switch with `sudo prime-select on-demand` and reboot. The
   integrated GPU keeps driving the display.
-- About 19 GB of disk for the image (CUDA runtime, two PyTorch-based
-  environments, LichtFeld), plus ~20 GB per clip for job data: a 2-minute
+- About 18 GB of disk for the image (two PyTorch-based environments,
+  LichtFeld, a slim CUDA base; [sizes](#three-images)), plus ~20 GB per clip for job data: a 2-minute
   Standard run used 10.8 GB of decoded frames, 3.4 GB of masks, 1 GB of SfM
   and 4.5 GB of training output. The cache keeps them so later jobs on the
   same clip reuse the work; `Reclaim space` in the UI evicts the oldest.
@@ -180,7 +180,31 @@ docker build --target train -t osvplat:dev-train .
 docker build -t osvplat:dev .                        # all
 ```
 
-The image sizes are not measured yet; `scripts/publish_image.sh` prints them.
+Sizes, compressed download / on disk (`scripts/publish_image.sh` prints
+them for each build). Measured on 0.2.0-rc2's contents, repacked onto the
+CUDA `-base` image the Dockerfile now uses instead of `-runtime` (#16):
+
+| Image | `-runtime` base (0.2.0-rc2) | `-base` + libcurand |
+|---|---|---|
+| all | 6.92 / 21.8 GB | 5.48 / 18.3 GB |
+| prep | 5.46 / 15.7 GB | 4.01 / 12.2 GB |
+| train | 3.51 / 11.9 GB | 2.06 / 8.4 GB |
+
+Both columns still hold the 2.07 GB of LichtFeld build leftovers that later
+builds delete (#15), so from 0.2.0-rc3 all and train are smaller again on
+disk. The runtime image's cuBLAS, cuFFT, cuSOLVER, cuSPARSE, NVRTC,
+nvJitLink and NPP were unused: LichtFeld links only libcudart and libcurand,
+and torch loads the CUDA 13 libraries from its own wheels in `venv_gs`
+(it did so on `-runtime` too). Checked on an RTX 3090, each `-runtime`
+image against its `-base` repack:
+
+- train, 0005 handoff bundle, 2,000 steps: PSNR 18.9935 / SSIM 0.6057 /
+  LPIPS 0.2697 against 18.9932 / 0.6059 / 0.2700;
+- prep, clip 0198 to masks: frames (ffmpeg `-hwaccel cuda`) and all 304 mask
+  files byte-identical; Mask R-CNN on 20 bundle images: identical scores,
+  boxes and mask probabilities;
+- host benchmark: fp32/fp16 matmul 17.05/48.98 against 17.14/49.47 TFLOPS,
+  gsplat 62.1 against 62.3 it/s.
 
 ## Verifying the image
 
