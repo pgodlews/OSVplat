@@ -284,6 +284,31 @@ Deliberate choices in the key chain:
   disabled form rather than a fresh sentinel, so already-cached unmasked runs
   keep the keys they are stored under.
 
+## Job states
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued: POST /api/jobs, /api/jobs/sweep<br/>or /api/handoff/import
+  queued --> running: dispatcher claims a free GPU<br/>(conditional on still queued)
+  queued --> cancelled: DELETE
+  running --> awaiting_review: mask.review and not yet approved<br/>GPU released
+  awaiting_review --> queued: review approved, stages up to mask are cache hits
+  awaiting_review --> cancelled: review rejected, or DELETE
+  running --> done: every stage up to run_until<br/>(handoff bundle written for run_until sfm)
+  running --> cancelled: DELETE, process group killed
+  running --> failed: a stage, its finalizer or the handoff bundle failed<br/>or the service restarted mid-job
+```
+
+The job state is in `jobs.state` and moves only through the transitions
+above (`worker.py`, `main.py`). `done`, `failed` and `cancelled` are final;
+there is no retry. Queuing the same config again resumes from the cache,
+so only the stage that was in flight runs again. `awaiting_review` holds no
+GPU but counts as live: retention never evicts the cache entries of a job
+in it (`retention.LIVE_STATES`). Each stage has its own row in `stages`,
+with its own state: `pending`, `running`, `waiting` (on another job's lock
+for the same cache key), `done`, `cached`, `skipped`, `imported`, `failed`
+or `cancelled`.
+
 ## Review gate
 
 `"mask": {"review": true}` holds the job after masking, before anything

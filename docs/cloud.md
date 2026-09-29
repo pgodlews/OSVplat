@@ -260,6 +260,22 @@ Two images of the same release do it ([docker.md, "Three
 images"](docker.md#three-images)): `osvplat:<ver>-prep` and
 `osvplat:<ver>-train`. The all-in-one `osvplat:<ver>` does either half too.
 
+```mermaid
+sequenceDiagram
+  participant P as Prep host, your GPU
+  participant B as Bucket, presigned URLs
+  participant T as Rented GPU, train image
+  P->>P: job with run_until sfm: frames, select, mask, sfm
+  P->>P: writes runs/job00012/job00012-handoff.tar, job ends done
+  P->>B: PUT to HANDOFF_UPLOAD_URL (or scp the tar yourself)
+  T->>B: entrypoint GETs HANDOFF_URL, checks HANDOFF_SHA256
+  Note over T: bundle waits in QUEUE_ROOT/handoffs/
+  T->>T: POST /api/handoff/import: verify, install in cache, queue job
+  T->>T: train, export (upstream stages show imported)
+  T->>B: PUT result to OUTPUT_UPLOAD_URL
+  Note over T: destroy the instance once upload.state is done
+```
+
 **1. Prep, at home.** Start the prep image like the all-in-one one (Compose
 with `IMAGE=ghcr.io/pgodlews/osvplat:<ver>-prep`, or `docker run`), and queue
 the clip with `run_until`:

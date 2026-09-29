@@ -74,6 +74,10 @@ to keep the layout rule above honest.
   A new field goes in `docs/job-telemetry.md`, and anything that could name a
   person, place or machine stays out. Writing is on by default; sending is
   only ever opt-in (`QUEUE_TELEMETRY_UPLOAD`).
+- **Diagrams are Mermaid**, inline in the doc they explain: no image exports,
+  no separate diagram files. Labels use real identifiers (stage names, env
+  vars, API paths) so a grep finds them, and structure only, never numbers.
+  Update a diagram in the same commit as the code it describes.
 - The UI is one static HTML file with inline JS/CSS; keep it dependency-free.
 - New mask models (a future SAM, etc.) start in `queue/app/mask_backends.py`;
   its docstring lists the other three places to touch. Never ship gated weights.

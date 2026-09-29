@@ -11,14 +11,41 @@ frame selection, person masks, COLMAP SfM on the GPU and LichtFeld Studio
 training, driven by a queue service with a web UI. The finished `.sog` can be
 hosted on any static web server with a splat viewer; no server code.
 
+```mermaid
+flowchart LR
+  UI["Web UI<br/>queue/app/static/index.html"] --> API["FastAPI service<br/>queue/app/main.py"]
+  API --> DB[("SQLite: jobs, stages<br/>db.py")]
+  API --> W["dispatcher + worker<br/>worker.py"]
+  W --> DB
+  W -->|"one subprocess per stage<br/>argv + finalizer from stages.py"| P
+  subgraph P["Stage processes"]
+    direction TB
+    FF["ffmpeg, NVDEC"]
+    V["venv: pycolmap, OpenCV<br/>select, SfM, .OSV readers"]
+    G["venv_gs: torch, gsplat<br/>masks, renders"]
+    L["LichtFeld Studio<br/>train"]
+  end
+  P --> C[("QUEUE_ROOT/cache<br/>one dir per cache key")]
+```
+
+The service itself has no numpy, OpenCV or torch: anything heavy is a
+script in one of the two venvs, started and killed by process group.
+
 ## Two input paths
 
-```
-Raw DJI .OSV (Osmo 360, Avata 360)                      ← recommended
-  frames ─► select ─► [mask] ─► fisheye rig SfM ─► LichtFeld (--gut, fisheye) ─► PLY / SOG / SPZ
-
-Stitched equirectangular video (a graded DJI Studio export, or any 2:1 360° video)
-  frames ─► select ─► [mask] ─► spherical SfM ─► LichtFeld (--gut, equirect) ─► PLY / SOG / SPZ
+```mermaid
+flowchart LR
+  IN{"input file"} -->|".OSV: Osmo 360, Avata 360<br/>recommended"| RF
+  IN -->|"anything else: stitched 2:1 equirect<br/>e.g. a graded DJI Studio export"| EF
+  subgraph rig["Fisheye rig"]
+    RF["frames<br/>both lenses + calibration.json"] --> RS[select] --> RM["mask<br/>optional"] --> RSFM["sfm<br/>two-camera OPENCV_FISHEYE rig"]
+  end
+  subgraph eq["Equirect"]
+    EF[frames] --> ES[select] --> EM["mask<br/>optional"] --> ESFM["sfm<br/>spherical"]
+  end
+  RSFM --> T["train<br/>LichtFeld --gut"]
+  ESFM --> T
+  T --> X["export<br/>PLY / SOG / SPZ"]
 ```
 
 The queue picks the path from the file extension. The six stage names, the
