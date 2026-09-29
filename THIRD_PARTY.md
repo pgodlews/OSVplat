@@ -10,7 +10,7 @@ this repository except where noted.
 
 | Component | Version | Licence | Source |
 |---|---|---|---|
-| [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio) | commit `04e4607b` | GPL-3.0 | The complete source tree and `LICENSE` are in the image at `/opt/splat/LichtFeld-Studio` |
+| [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio) | commit `e654717e` | GPL-3.0 | The complete source tree and `LICENSE` are in the image at `/opt/splat/LichtFeld-Studio` |
 | Libraries LichtFeld links (via [vcpkg](https://github.com/microsoft/vcpkg) `04a9d8e5`) | pinned by LichtFeld's manifest | various permissive (one `copyright` file each) | `/opt/splat/LichtFeld-Studio/build/vcpkg_installed/x64-linux/share/*/copyright` |
 | [gsplat](https://github.com/nerfstudio-project/gsplat) | 1.6.0, commit `28e794ca` | Apache-2.0 | GitHub |
 

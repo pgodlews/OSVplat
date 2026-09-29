@@ -215,7 +215,7 @@ summary{cursor:pointer;font-size:12px;color:var(--muted);
       </div>
 
       <div class="row">
-        <div><label>SH degree<span class="i" data-tip="sh">i</span></label><input id="shDegree" type="number" min="0" max="3" value="1"></div>
+        <div><label>SH degree<span class="i" data-tip="sh">i</span></label><input id="shDegree" type="number" min="0" max="3" value="3"></div>
         <div><label>Strategy<span class="i" data-tip="strategy">i</span></label>
           <select id="strategy"><option>mrnf</option><option>mcmc</option></select></div>
       </div>
@@ -238,9 +238,10 @@ summary{cursor:pointer;font-size:12px;color:var(--muted);
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="imuOn" style="width:auto" disabled> <span>Gyro blur veto (raw .OSV only)<span class="i" data-tip="imu">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="uprightOn" style="width:auto" disabled> <span>Upright, in metres with GPS (raw .OSV only)<span class="i" data-tip="upright">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="mip" style="width:auto"> <span>--enable-mip<span class="i" data-tip="mip">i</span></span></label>
-          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bgimp" style="width:auto" disabled> <span class="muted">--background-improvements (crashes on the pinned LichtFeld)<span class="i" data-tip="bgimp">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bgimp" style="width:auto"> <span>--background-improvements<span class="i" data-tip="bgimp">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="expcorr" style="width:auto"> <span>--exposure-correction<span class="i" data-tip="expcorr">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bilat" style="width:auto"> <span>--bilateral-grid<span class="i" data-tip="bilat">i</span></span></label>
+          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="ppisp" style="width:auto"> <span>--ppisp<span class="i" data-tip="ppisp">i</span></span></label>
         </div>
         <label>Extra args (verbatim)<span class="i" data-tip="extra">i</span></label>
         <textarea id="extra" placeholder="--far-seed-dose 4000"></textarea>
@@ -332,7 +333,8 @@ const PRESETS = {
   // neither a handheld rig nor a stitched drone clip could be reconstructed.
   'Smoke test': {budget:0.1, maxCap:300000, maxWidth:1920, fps:10, window:3, shDegree:1, trim:30},
   'Draft':      {budget:0.5, maxCap:1000000, maxWidth:1920, fps:10, window:5, shDegree:1},
-  'Standard':   {budget:1, maxCap:3000000, maxWidth:3840, fps:10, window:5, shDegree:1},
+  'Standard':   {budget:1, maxCap:3000000, maxWidth:3840, fps:10, window:5, shDegree:3},
+  'High':       {budget:1, maxCap:4500000, maxWidth:3840, fps:10, window:5, shDegree:3},
   'Max':        {budget:1, maxCap:3000000, maxWidth:7680, fps:10, window:5, shDegree:3},
 };
 let inputs = [], selectedJobs = new Set(), curLog = null, presetTrimEnd = null;
@@ -381,6 +383,7 @@ function buildConfig() {
       background_improvements: $('#bgimp').checked,
       exposure_correction: $('#expcorr').checked,
       bilateral_grid: $('#bilat').checked,
+      ppisp: $('#ppisp').checked,
       extra_args: $('#extra').value.trim(),
     },
     // All three, matching the backend default: PLY is the lossless
@@ -597,6 +600,7 @@ function metricsText(j) {
   return [
     m.psnr != null ? `PSNR ${(+m.psnr).toFixed(2)}` : null,
     m.ssim != null ? `SSIM ${(+m.ssim).toFixed(3)}` : null,
+    m.lpips != null ? `LPIPS ${(+m.lpips).toFixed(3)}` : null,
     m.splats != null ? `${(+m.splats/1e6).toFixed(2)}M` : null,
     m.mean_reproj != null ? `${(+m.mean_reproj).toFixed(2)}px` : null,
     m.train_seconds != null ? fmtT(+m.train_seconds) : null,
@@ -729,7 +733,11 @@ const TIPS = {
     <b>Smoke test</b> is for proving the pipeline runs end to end; it is not
     meant to be looked at. It uses only 30 s of the clip (from Trim start) and
     trains briefly, but keeps the normal frame spacing, because frames too far
-    apart cannot be reconstructed at all.`,
+    apart cannot be reconstructed at all.
+    <b>High</b> (4.5M splats, SH 3) scored +0.32 dB over Standard on a
+    957-frame Osmo walk, for about 25 % more training time. The card showed
+    16.2 GB in use at peak (Standard: 12.8 GB, same measurement), so it needs
+    a 20 GB or larger card.`,
   fps: `How many frames per second are pulled out of the clip as <em>candidates</em>,
     before sharpness picking. More candidates give the sharpness pass more to
     choose from, and a longer frame dump. Every run in the project notes used 10.`,
@@ -762,9 +770,11 @@ const TIPS = {
     <b>Measured:</b> 7680 was visually indistinguishable from 3840 at 21 px per
     degree, for 2.75× the time and 2.5× the VRAM (14.1 GB vs 5.7 GB) — and its
     PSNR cannot be compared, since it is scored against a harder 7680-wide target.`,
-  sh: `Spherical-harmonic bands for view-dependent colour. <b>Measured:</b> degree 3
-    was the only flag that beat the control, by 0.21 dB and 0.0045 SSIM — at 2.9×
-    the training time and 2.4× the PLY size (744 MB vs 312 MB). Marginal.`,
+  sh: `Spherical-harmonic bands for view-dependent colour. <b>3 is the default.</b>
+    On a 957-frame Osmo walk it scored +0.12 dB over degree 1 for about 6 % more
+    training time; the .sog barely grew (39 MB vs 38 MB) and the PLY is 2.4×
+    (744 MB vs 312 MB). An earlier run on the old pin measured 2.9× the training
+    time, which this one did not reproduce.`,
   strategy: `Densification strategy. <b>mrnf</b> is the default and what every run in
     the project notes used. <b>mcmc collapses on rig datasets</b> where most Gaussians are
     unseen in most iterations: its per-step opacity and scale regularisers plus
@@ -776,16 +786,24 @@ const TIPS = {
     comes from, and where the ETA gets the iteration rate it fits per config.`,
   mip: `Mip-splatting anti-aliasing. <b>Measured:</b> did nothing on the reference
     clip — 0.12 dB below the control, at identical cost and identical VRAM.`,
-  bgimp: `<b>Crashes on build 04e4607.</b> At iteration 10,000 the Adam optimiser is
-    handed host memory where device memory is required
-    (<code>adam_api.cu:173</code>), then segfaults in cleanup. No PLY is written,
-    and it ran 2.3× slower until it died. Reproduced on fisheye rigs too, at the
-    first refinement after iteration 2,000 of a smoke run. Disabled until the
-    LichtFeld pin moves past the bug.`,
+  bgimp: `Treats the far field (sky, distant trees) separately so it does not
+    turn into grey haze. On a 957-frame Osmo walk it visibly cleared the haze
+    over distant trees, scored 0.06 dB <em>lower</em> on held-out views (PSNR
+    barely sees haze) and trained about 35 % longer. Try it for outdoor clips
+    with a lot of far field. It crashed on the old LichtFeld pin (04e4607).`,
   expcorr: `Per-photo exposure model, for clips whose lighting changes across the
     flight. It scored 0.55 dB below the control on the backyard reference clip —
     but that clip cannot answer the question, since the flag is aimed at the aerial
-    runs, where most of the scene sits near infinity.`,
+    runs, where most of the scene sits near infinity. On a 957-frame Osmo walk
+    (LichtFeld e654717e) it scored 0.14 dB lower, with the same SSIM and LPIPS,
+    and halved the renders' colour bias against the photos. The old pin
+    (04e4607) could paint bright red or yellow pixels with it.`,
+  ppisp: `Learns a per-lens camera response: exposure, white balance and
+    vignetting. The exported splat carries none of it, so a viewer shows the
+    scene as if taken by an even, vignette-free camera. On a 957-frame Osmo
+    walk it learned clear vignetting for both lenses, scored 0.12 dB lower with
+    the same SSIM and LPIPS, cleared some far-field haze, and trained about 7 %
+    longer. Not combinable with --exposure-correction.`,
   bilat: `Per-image bilateral grid, for colour and white-balance drift between
     frames. Not yet tested in this project — there is no measured result either way.`,
   extra: `Passed to the trainer verbatim, split with <code>shlex</code>, so
@@ -1079,8 +1097,7 @@ async function showCompare() {
   const ids = [...selectedJobs].join(',');
   const c = await api('/api/compare?ids=' + ids);
   $('#compareCard').hidden = false;
-  // LichtFeld's eval reports PSNR and SSIM only -- there is no LPIPS.
-  const keys = ['psnr','ssim','splats','final_step','train_seconds',
+  const keys = ['psnr','ssim','lpips','splats','final_step','train_seconds',
                 'peak_vram_mib','ply_bytes','sog_bytes','mean_reproj',
                 'num_reg_frames','registration_pct','baseline_over_depth',
                 'panos','window'];
@@ -1302,7 +1319,8 @@ $('#maskOn').onchange = () => { doEstimate(); };
 $('#maskBackend').onchange = () => { showMaskBackend(); doEstimate(); };
 // LichtFeld refuses exposure correction together with the bilateral grid (the
 // first replaces the second), so ticking one clears the other.
-$('#expcorr').addEventListener('change', () => { if ($('#expcorr').checked) $('#bilat').checked = false; });
+$('#expcorr').addEventListener('change', () => { if ($('#expcorr').checked) { $('#bilat').checked = false; $('#ppisp').checked = false; } });
+$('#ppisp').addEventListener('change', () => { if ($('#ppisp').checked) $('#expcorr').checked = false; });
 $('#bilat').addEventListener('change', () => { if ($('#bilat').checked) $('#expcorr').checked = false; });
 $('#estBtn').onclick = doEstimate;
 $('#createBtn').onclick = create;

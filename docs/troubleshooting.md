@@ -77,19 +77,24 @@ Code comments refer to these by number (`docs/troubleshooting.md #18`).
   `sudo prime-select on-demand` and reboot. Found on a NUC with an RTX 3090
   over OcuLink.
 
-## LichtFeld options (pinned commit 04e4607)
+## LichtFeld options (pinned commit e654717e)
 
-Found by running every training option the UI offers. The queue refuses the
-first three at submit, so they only bite through `extra_args` or a changed pin.
+The queue refuses the two exclusions below at submit, so they only bite through
+`extra_args`. Measurements are in [how-it-works.md](how-it-works.md#trainer-options-measured).
 
-- **`--background-improvements` crashes** mid-training: the Adam optimiser is
-  handed host memory where device memory is required (`mean_step_far_mask`),
-  it saves an emergency project and segfaults, and no model is exported.
-  Reproduced on stitched and fisheye datasets.
 - **`--exposure-correction` and `--bilateral-grid` are exclusive**: exposure
   correction replaces the bilateral grid. Either one alone works.
 - **`--strategy igs+` cannot train through GUT**, and every 360 camera model
   here needs GUT. It is only usable on a stitched clip with a pinhole
   `sfm.render` (`perspective_*`).
-- `mrnf` (default) and `mcmc`, SH degree 1 and 3, `--enable-mip` and the
-  bilateral grid all train and export normally.
+- **The trainer exits 0 when an export fails** (seen on a 600-step run whose
+  model had collapsed: "No visible splats to write"). The queue's train
+  finalizer refuses a run that is missing any requested format.
+- Trained and exported on a fisheye rig at `e654717e`: `mrnf`, SH degree 1 and
+  3, a 4.5M cap, `--background-improvements`, `--exposure-correction`,
+  `--ppisp`. `mcmc`, `--enable-mip` and the bilateral grid were last checked
+  at `04e4607`.
+- Fixed since `04e4607`: `--background-improvements` crashed mid-training and
+  exported nothing (upstream #2074); `max_screen_share` did nothing on GUT,
+  so on every 360 job here (#2194); exposure correction on GUT could paint
+  bright red or yellow pixels (#2146).

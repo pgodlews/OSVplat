@@ -767,7 +767,7 @@ def _record_metrics(job_id: int, stage: str, info: dict) -> None:
         "sfm": ["num_reg_frames", "num_points3D", "mean_reproj",
                 "registration_pct", "baseline_over_depth", "median_depth",
                 "path_length", "angular_median_deg"],
-        "train": ["psnr", "ssim", "splats", "final_step", "peak_vram_mib",
+        "train": ["psnr", "ssim", "lpips", "splats", "final_step", "peak_vram_mib",
                   "eval_s_per_image"],
         "export": [],
     }.get(stage, [])

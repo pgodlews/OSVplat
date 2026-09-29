@@ -771,6 +771,13 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
         # still land in metrics.csv, and the splat is the same run to run
         # (21.920 saving, 21.916 not; same-GPU noise ~0.005 dB). Not a key term.
         argv += ["--eval", "--no-save-eval-images"]
+        # Final evaluation only: the 7,000-step eval only reported progress, and
+        # with LPIPS (LichtFeld #1977) each eval of 240 views costs about 2 min
+        # more. LichtFeld scales eval steps with --steps-scaler and always
+        # evaluates the last iteration (#2422), so this is the finish line at
+        # any budget. An --eval-steps in extra_args (a learning-curve sweep) wins.
+        if "--eval-steps" not in {a.split("=", 1)[0] for a in shlex.split(t.extra_args)}:
+            argv.append(f"--eval-steps={LFS_DEFAULT_ITER}")
     if t.enable_mip:
         argv.append("--enable-mip")
     if t.background_improvements:
@@ -779,6 +786,8 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
         argv.append("--exposure-correction")
     if t.bilateral_grid:
         argv.append("--bilateral-grid")
+    if t.ppisp:
+        argv.append("--ppisp")
     if t.min_opacity is not None:
         argv += ["--min-opacity", f"{t.min_opacity:g}"]
     if t.max_screen_share is not None:
@@ -832,9 +841,9 @@ def train_argv(ctx: Ctx) -> list[str]:
 
 TRAIN_PROGRESS = re.compile(
     r"(\d+)/(\d+)\s*\|\s*Loss:\s*([\d.]+)\s*\|\s*Splats:\s*(\d+)")
-# LichtFeld reports PSNR and SSIM only -- there is no LPIPS in its eval output
-# (the LPIPS numbers in the project notes came from gsplat). Matching SSIM is optional
-# so a format change cannot silently drop PSNR too.
+# The log line carries PSNR and SSIM (LPIPS too since LichtFeld #1977, but
+# metrics.csv is where it is read from). Matching SSIM is optional so a format
+# change cannot silently drop PSNR too.
 TRAIN_EVAL = re.compile(
     r"PSNR:\s*([\d.]+)(?:.*?SSIM:\s*([\d.]+))?", re.IGNORECASE)
 TRAIN_DONE = re.compile(r"completed in\s+([\d.]+)\s*(\w+)", re.IGNORECASE)
@@ -889,7 +898,9 @@ def read_metrics_csv(train_dir: Path) -> dict:
         return {}
     last = rows[-1]
     out = {}
-    for src, dst in (("psnr", "psnr"), ("ssim", "ssim"),
+    # lpips: a column since LichtFeld #1977, empty when its weights could not
+    # be fetched -- then left out, never reported as 0.
+    for src, dst in (("psnr", "psnr"), ("ssim", "ssim"), ("lpips", "lpips"),
                      ("num_gaussians", "splats"), ("iteration", "final_step"),
                      ("time_per_image", "eval_s_per_image")):
         v = (last.get(src) or "").strip()

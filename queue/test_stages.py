@@ -225,6 +225,18 @@ c = JobConfig.model_validate({**base, "frames": {"fps": 5},
                               "train": {"sh_degree": 1}}).keys()
 check("fps change alters every downstream key",
       c["select"] != a["select"] and c["sfm"] != a["sfm"] and c["train"] != a["train"])
+# A trainer upgrade (TRAINER) retrains from the cached frames, masks and SfM.
+from app import jobs as _jobs                                    # noqa: E402
+_trainer = _jobs.TRAINER
+try:
+    _jobs.TRAINER = _trainer + "-other"
+    t = JobConfig.model_validate({**base, "train": {"sh_degree": 1}}).keys()
+finally:
+    _jobs.TRAINER = _trainer
+check("a TRAINER change alters only the train and export keys",
+      {k: t[k] == a[k] for k in a}
+      == {"frames": True, "select": True, "mask": True, "sfm": True,
+          "train": False, "export": False})
 
 # 7b. Masking now feeds BOTH the reconstruction and the training, so enabling
 # it has to invalidate the sfm key -- otherwise a masked job would be served the
@@ -694,9 +706,25 @@ with tempfile.TemporaryDirectory() as _d:
     _nl = _stages.STAGES["train"]["argv"](_ne)
     check("and neither flag without train.eval",
           "--eval" not in _nl and "--no-save-eval-images" not in _nl)
+    check("eval runs once, at the end, on both pipelines",
+          "--eval-steps=30000" in _sl and "--eval-steps=30000" in _lfs
+          and not any(a.startswith("--eval-steps") for a in _nl))
+    _cv = _ctx_for(_cfg("samples/x.mp4", train={
+        "extra_args": "--eval-steps=5000 --eval-steps=10000"}))
+    _cv.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"), needs_gut=True)
+    _cl = _stages.STAGES["train"]["argv"](_cv)
+    check("Standard trains SH degree 3 unless told otherwise",
+          _sl[_sl.index("--sh-degree") + 1] == "3" and "--ppisp" not in _sl)
+    _pp = _ctx_for(_cfg("samples/x.osv", train={"ppisp": True}))
+    _pp.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"), needs_gut=True)
+    check("train.ppisp reaches LichtFeld as --ppisp",
+          "--ppisp" in _stages.STAGES["train"]["argv"](_pp))
+    check("a learning-curve sweep's own --eval-steps replaces the final-only one",
+          [a for a in _cl if a.startswith("--eval-steps")]
+          == ["--eval-steps=5000", "--eval-steps=10000"])
     check("the eval-image switch is not a cache-key term",
-          _mp4.k_train() == key_of("train", _mp4.k_sfm(), _mp4.k_mask(),
-                                   _mp4.train.model_dump()))
+          _mp4.k_train() == key_of("train", _jobs.TRAINER, _mp4.k_sfm(),
+                                   _mp4.k_mask(), _mp4.train.model_dump()))
 
     # A bare iter != 30000 has to reach LichtFeld as --steps-scaler, not
     # --iter: --iter alone leaves LichtFeld's internal eval schedule (and so

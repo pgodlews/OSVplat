@@ -31,7 +31,7 @@ input. Per-stage detail is in [queue/README.md](../queue/README.md).
 | `select` | Keep the sharpest frame of every `select.window` (Laplacian variance; for a rig, scored on the blurrier lens). Optional gyro veto, below. |
 | `mask` | Optional person masks, below. |
 | `sfm` | COLMAP 4.2 via pycolmap-cuda: GPU SIFT, sequential matching, incremental mapping. Picks the largest model, drops stray cameras, and gates on registration rate and reprojection error. For `.OSV`: levels the model, and puts it in metres when the clip has GPS (below). |
-| `train` | LichtFeld Studio headless, MRNF strategy, 3M splat cap, SH degree 1, 30k iterations, 3DGUT rasterizer (`--gut`), which is the only way it trains fisheye and equirect cameras. |
+| `train` | LichtFeld Studio headless, MRNF strategy, 3M splat cap, SH degree 3, 30k iterations, 3DGUT rasterizer (`--gut`), which is the only way it trains fisheye and equirect cameras. |
 | `export` | Collects `.ply`, `.sog` and `.spz`. |
 
 Every stage is cached by a hash of the options that affect it. Changing a
@@ -226,7 +226,54 @@ was within a minute of it on the Draft run):
 Training dominates, and it is the one stage a preset changes most: Smoke and
 Draft cut iterations and the splat cap, not frame density. Masking adds about
 1 s per frame and only runs when people are in shot. The Standard run peaked
-at **10.1 GB of VRAM** (3M splats, 3840 px training width).
+at **10.1 GB of VRAM** (3M splats, 3840 px training width). These runs used SH
+degree 1 on the previous LichtFeld pin; Standard now trains SH 3, about 6 %
+longer (below).
+
+## Trainer options, measured
+
+Clip 0005 (Osmo 360 walk, 957 rig frames, person masks), the same cached SfM
+for every run, scored by LichtFeld on the same 240 held-out fisheye views.
+RTX 3090s capped at 250 W; times are from one card, except where marked
+(\*: a second 3090 at similar clocks, so approximate).
+
+| Run | PSNR | SSIM | LPIPS | Time |
+|---|---|---|---|---|
+| LichtFeld `04e4607b` (previous pin), Standard | 21.910 | 0.6732 | – | 7,603 s |
+| LichtFeld `e654717e`, Standard | 21.905 | 0.6728 | 0.2178 | 7,704 s |
+| … SH degree 3 | 22.017 | 0.6773 | 0.2158 | ~+7 %\* |
+| … 4.5M splats | 22.122 | 0.6815 | 0.2102 | 9,111 s |
+| … 4.5M splats, SH 3 (the High preset) | 22.224 | 0.6860 | 0.2081 | 9,661 s |
+| … 20k iterations (`steps_scaler` 0.667) | 21.717 | 0.6672 | 0.2226 | ~−31 %\* |
+| … `background_improvements` | 21.849 | 0.6680 | 0.2218 | ~+36 %\* |
+| … `exposure_correction` | 21.758 | 0.6733 | 0.2174 | – |
+| … `--ppisp` | 21.781 | 0.6730 | 0.2178 | ~+7 %\* |
+
+- The two builds are the same to within run-to-run noise: the same settings on
+  two cards differed by 0.006–0.008 dB. Training time is identical; the
+  newer build's extra 100 s is LPIPS in its evaluations, which is why the
+  queue now evaluates once, at the end.
+- Splat count and SH degree add up. SH 3 barely changes the `.sog` (39 MB
+  against 38 MB); the `.ply` grows 2.4×. High used 16.2 GB of GPU memory
+  against 12.8 GB for Standard, as `nvidia-smi` reports it.
+- `background_improvements` is the only option that visibly cleared the
+  grey haze over distant trees, which held-out PSNR does not reward. Exposure
+  correction and PPISP cleared some of it; exposure correction also halved
+  the renders' colour bias against the photos. Both change the colours the
+  evaluator compares, so their PSNR is not like-for-like with the others.
+- One clip: treat these as a first measurement, not a law.
+
+### When to turn the appearance options on
+
+All three are off by default and exposed in the UI and as `train.*` fields.
+None of them is free, and none of them improves held-out PSNR, so pick them for
+what they do to the picture.
+
+| Option | What it does | Try it for | Cost (0005) | Watch out |
+|---|---|---|---|---|
+| `background_improvements` | Trains the far field (sky, distant trees) separately so it does not turn into grey haze | Outdoor clips where the distance matters: aerial passes, open views | ~+36 % training time, −0.06 dB | The clearest visual gain of the three; measured on one handheld clip only |
+| `exposure_correction` | Per-photo exposure, white balance and vignetting, held to a zero mean so no colour cast slides into the splat | Clips whose lighting changes: sun and shade, turning towards the sun | −0.14 dB; colour bias against the photos halved | Replaces `bilateral_grid` and `ppisp`; the queue refuses the combinations |
+| `ppisp` | Learns each lens's response (exposure, white balance, vignetting); the exported splat carries none of it | Rigs with visible lens vignetting or a colour difference between the lenses | ~+7 % training time, −0.12 dB | Not seeded with the `.OSV`'s per-frame exposure yet; the evaluator applies its correction, so PSNR is not like-for-like |
 
 ## Output formats
 
@@ -243,7 +290,7 @@ rebuild months later does not silently produce a different trainer:
 
 | Component | Pin | Override |
 |---|---|---|
-| LichtFeld Studio | `04e4607b` | `LFS_REF` |
+| LichtFeld Studio | `e654717e` | `LFS_REF` |
 | vcpkg | `04a9d8e5` (2026.07.29) | `VCPKG_REF` |
 | gsplat (renders and evaluation only) | `28e794ca` (1.6.0), torch 2.9.1+cu130 | `GSPLAT_REF` |
 | pycolmap-cuda12 | 4.2.0 | edit `setup_sfm_venv.sh` |
