@@ -38,6 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY scripts/setup_sfm_venv.sh /src/scripts/
 RUN /src/scripts/setup_sfm_venv.sh && rm -rf /root/.cache/pip
 COPY scripts/setup_lichtfeld.sh /src/scripts/
+# Empty = the script's pinned commit. Set only for an A/B image against another
+# trainer build (--build-arg LFS_REF=<sha>); TRAINER in queue/app/jobs.py does
+# not follow it, so keep such an image's queue root to itself.
+ARG LFS_REF=
 RUN LFS_MARCH=x86-64-v3 /src/scripts/setup_lichtfeld.sh \
     && cd /opt/splat/LichtFeld-Studio/build \
     && rm -rf CMakeFiles _deps/*-build _deps/*-subbuild vcpkg_installed/*/debug \

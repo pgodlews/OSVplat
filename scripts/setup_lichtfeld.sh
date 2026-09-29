@@ -7,10 +7,12 @@
 # --depth 1 on a moving head made the build unreproducible in the worst way:
 # it succeeds, produces a different trainer, and every PSNR in the project notes
 # quietly stops being comparable. Override to move deliberately:
-#   LFS_REF=main VCPKG_REF=master ./setup_lichtfeld.sh
+#   LFS_REF=origin/master VCPKG_REF=origin/master ./setup_lichtfeld.sh
+# (LichtFeld has no main branch; a bare "master" would check out a stale local one.)
+# Moving LFS_REF means moving TRAINER in queue/app/jobs.py with it.
 set -x
 set -euo pipefail
-LFS_REF=${LFS_REF:-04e4607bf336676cf73a5d860fccacdd26766d83}
+LFS_REF=${LFS_REF:-e654717edd0e4bf942a9dc28891e3d33fa1edcc5}
 VCPKG_REF=${VCPKG_REF:-04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4}    # 2026.07.29-440
 SPLAT_ROOT=${SPLAT_ROOT:-$HOME/splat}
 # Compute capability of GPU 0 (8.6 for an RTX 3090, 8.9 for a 4090), or a list

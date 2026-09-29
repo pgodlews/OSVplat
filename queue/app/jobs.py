@@ -190,7 +190,7 @@ MANAGED_TRAIN_FLAGS = {
     "--sh-degree", "--iter", "--steps-scaler", "--max-width", "--gut",
     "--eval", "--no-save-eval-images", "--enable-mip", "--background-improvements",
     "--exposure-correction", "--bilateral-grid", "--min-opacity",
-    "--max-screen-share", "--export", "--mask-mode", "--invert-masks",
+    "--max-screen-share", "--export", "--mask-mode", "--invert-masks", "--ppisp",
 }
 
 
@@ -205,7 +205,9 @@ class TrainCfg(Cfg):
     steps_scaler: float = Field(default=1.0, gt=0, le=10)
 
     max_cap: int = Field(default=3_000_000, ge=10_000)
-    sh_degree: int = Field(default=1, ge=0, le=3)
+    # 3: +0.12 dB over 1 on 0005 for ~6 % more training time; the .sog barely
+    # grows (docs/how-it-works.md, "Trainer options, measured").
+    sh_degree: int = Field(default=3, ge=0, le=3)
     max_width: int = Field(default=3840, ge=0)
     gut: Optional[bool] = None                  # None = auto from camera model
     eval: bool = True
@@ -214,6 +216,7 @@ class TrainCfg(Cfg):
     background_improvements: bool = False
     exposure_correction: bool = False
     bilateral_grid: bool = False
+    ppisp: bool = False
     min_opacity: Optional[float] = None
     max_screen_share: Optional[float] = None
 
@@ -247,21 +250,12 @@ class TrainCfg(Cfg):
                 "set either steps_scaler (scales iterations and all schedules "
                 "together) or a bare iter, not both: LichtFeld applies "
                 "steps_scaler after --iter, so the two multiply")
-        # A LichtFeld bug at the pinned commit (setup_lichtfeld.sh LFS_REF): the
-        # Adam optimiser gets host memory where device memory is required, then
-        # it segfaults and writes no PLY. Reproduced on stitched and fisheye.
-        if self.background_improvements:
-            raise ValueError(
-                "background_improvements crashes the pinned LichtFeld build "
-                "(04e4607) mid-training and writes no model; it is disabled "
-                "until the pin moves past the bug")
         # LichtFeld refuses this pair at startup, after the whole SfM has run:
         # "exposure correction replaces the standalone bilateral grid".
-        if self.exposure_correction and self.bilateral_grid:
+        if self.exposure_correction and (self.bilateral_grid or self.ppisp):
             raise ValueError(
-                "exposure_correction and bilateral_grid cannot be combined: "
-                "LichtFeld's exposure correction replaces the bilateral grid. "
-                "Pick one")
+                "exposure_correction cannot be combined with bilateral_grid or "
+                "ppisp: LichtFeld's exposure correction replaces both. Pick one")
         return self
 
     @property
@@ -332,6 +326,12 @@ IMU_SELECT_DEFAULT = False
 # so a job with it off keeps every key it had before the option existed. Bump
 # it after changing what scripts/upright.py does to a model.
 UPRIGHT = "upright-1"
+# Joins every train key -- and so export -- and nothing upstream of it: a new
+# trainer build retrains from the frames, masks and SfM already cached, where a
+# config_version bump would redo all of them. Moves with LFS_REF in
+# scripts/setup_lichtfeld.sh.
+TRAINER = "lichtfeld-e654717e"
+
 # What the API sets for .OSV input when a request leaves sfm.upright out. On:
 # it only moves and scales the model, and falls back on its own when the clip
 # cannot support it.
@@ -340,10 +340,11 @@ UPRIGHT_DEFAULT = True
 
 class JobConfig(Cfg):
     # Bumping this invalidates every cache entry for jobs submitted afterwards,
-    # which is how a change to a pipeline script or a trainer upgrade is made to
-    # take effect. It was previously stored and never hashed, so it did nothing.
-    # Version 2 is the first that participates; it also marks the quick_hash
-    # sampling fix, which changes every input identity anyway.
+    # which is how a change to a pipeline script is made to take effect (a
+    # trainer upgrade moves TRAINER instead). It was previously stored and
+    # never hashed, so it did nothing. Version 2 is the first that
+    # participates; it also marks the quick_hash sampling fix, which changes
+    # every input identity anyway.
     config_version: int = Field(default=2, ge=1)
     name: str
     input: InputCfg
@@ -479,7 +480,7 @@ class JobConfig(Cfg):
         # is how two different configs end up sharing one cache entry. k_mask
         # normalises the disabled case, so every unmasked config still agrees
         # here rather than forking on fields that changed no pixel.
-        return key_of("train", self.k_sfm(), self.k_mask(),
+        return key_of("train", TRAINER, self.k_sfm(), self.k_mask(),
                       self.train.model_dump())
 
     def k_export(self) -> str:

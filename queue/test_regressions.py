@@ -274,9 +274,14 @@ class TrainerFlagConflicts(unittest.TestCase):
                 "exposure_correction": True, "bilateral_grid": True}})
         JobConfig.model_validate({**base, "train": {"exposure_correction": True,
                                   "enable_mip": True}})
-        with self.assertRaises(ValueError):     # crashes the pinned LichtFeld
-            JobConfig.model_validate({**base, "train": {"background_improvements": True}})
+        # Refused while the pin (04e4607) crashed with it; fixed upstream (#2074)
+        # and trained through on 0005 at e654717e.
+        JobConfig.model_validate({**base, "train": {"background_improvements": True}})
         JobConfig.model_validate({**base, "train": {"bilateral_grid": True}})
+        with self.assertRaises(ValueError):     # LichtFeld: replaces PPISP too
+            JobConfig.model_validate({**base, "train": {
+                "exposure_correction": True, "ppisp": True}})
+        JobConfig.model_validate({**base, "train": {"ppisp": True, "bilateral_grid": True}})
 
     def test_igs_plus_needs_a_pinhole_reconstruction(self):
         for inp, sfm in [("clip.OSV", {}), ("clip.mp4", {}),

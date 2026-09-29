@@ -275,7 +275,7 @@ _warned = set()
 
 
 def _pinhole_gt(pano, name):
-    """Reproject a PINHOLE ground-truth image into the comparison camera.
+    """Reproject a PINHOLE or OPENCV_FISHEYE ground-truth image into the comparison camera.
 
     The two share a centre and differ only by VIEW_R and by intrinsics, so this
     is a plain homography and it is exact, not an approximation. cv2 wants the
@@ -283,8 +283,18 @@ def _pinhole_gt(pano, name):
     VIEW_R @ K^-1 u into the source camera -- so the map is the inverse of
     Ks @ VIEW_R @ K^-1.
     """
+    cam = rec.cameras[by_name[name].camera_id]
+    if cam.model.name == "OPENCV_FISHEYE":
+        # A homography ignores the lens: the fisheye rig's photo column came out
+        # misaligned with every render. Exact instead: each comparison pixel's
+        # ray (VIEW_R @ K^-1 u) projected through the Kannala-Brandt lens.
+        fx, fy, cx, cy, k1, k2, k3, k4 = [float(v) for v in cam.params]
+        ks = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64)
+        mx, my = cv2.fisheye.initUndistortRectifyMap(
+            ks, np.array([k1, k2, k3, k4], np.float64), VIEW_R.T.astype(np.float64),
+            K.astype(np.float64), (S, S), cv2.CV_32FC1)
+        return cv2.remap(pano, mx, my, cv2.INTER_CUBIC)
     try:
-        cam = rec.cameras[by_name[name].camera_id]
         ks = np.asarray(cam.calibration_matrix(), np.float32)
         hom = K @ VIEW_R.T @ np.linalg.inv(ks)
     except Exception as exc:                                   # noqa: BLE001

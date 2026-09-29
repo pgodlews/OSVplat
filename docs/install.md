@@ -14,7 +14,7 @@ anywhere else.
 | | Validated on | Minimum (expected) |
 |---|---|---|
 | OS | Ubuntu 24.04 | a recent x86-64 Linux with systemd |
-| GPU | 2× RTX 3090 24 GB | one NVIDIA GPU. A Standard run (3M splats, 3840 px) peaked at 10.1 GB; the Max preset trains at 7680 px and needs more. Less VRAM: lower `train.max_cap` or `train.max_width` |
+| GPU | 2× RTX 3090 24 GB | one NVIDIA GPU. A Standard run (3M splats, 3840 px) peaked at 10.1 GB; High (4.5M splats, SH 3) showed 16.2 GB in `nvidia-smi` against 12.8 GB for Standard, so give it a 20 GB card; the Max preset trains at 7680 px and needs more. Less VRAM: lower `train.max_cap` or `train.max_width` |
 | Driver / CUDA | driver 595, CUDA toolkit 13.2 at `/usr/local/cuda` | a driver new enough for CUDA 13.0 wheels; toolkit 12.8+ |
 | RAM / disk | 62 GB / NVMe | 32 GB; ~20 GB per clip of intermediate frames |
 | Python | 3.12 | 3.10+ |
