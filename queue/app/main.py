@@ -134,6 +134,10 @@ def _startup() -> None:
               f"although nvidia-smi lists the GPU. The host is faulty: no job can "
               f"run here, new jobs are refused. On a rented GPU, destroy it and "
               f"take another.")
+    if resources.probe_cpu():
+        print(f"ERROR: {resources.CPU_ERROR}. Jobs that train and handoff imports "
+              f"are refused; on a rented GPU, destroy it and take a host with a "
+              f"newer CPU")
     outputs.startup_check()
     if worker.enforce_start_paused():
         print("queue forced back to PAUSED on startup "
@@ -404,6 +408,10 @@ def _refuse_for_image(cfg: Optional[JobConfig] = None) -> None:
     if IMAGE_VARIANT == "prep" and not cfg.run_until:
         raise HTTPException(400, "this is the prep image: it has no trainer. Set "
                             "run_until (\"sfm\" writes a handoff bundle to train from)")
+    if not cfg.run_until and resources.CPU_ERROR:
+        raise HTTPException(400, f"this CPU cannot train: {resources.CPU_ERROR}. Set "
+                            f"run_until (\"sfm\" writes a handoff bundle), or use a "
+                            f"host with an x86-64-v3 CPU (Haswell / Zen 1 or newer)")
     if cfg.run_until == "sfm":
         bad = handoff.problems()
         if bad:
@@ -772,6 +780,7 @@ class HandoffImportReq(BaseModel):
     train: Optional[dict] = None          # replaces the bundle's train section
     export: Optional[dict] = None         # replaces its export section
     priority: int = 0
+    keep: Optional[bool] = None           # keep the tar after import (QUEUE_HANDOFF_KEEP)
 
 
 @app.post("/api/handoff/import")
@@ -781,11 +790,14 @@ def api_handoff_import(req: HandoffImportReq) -> dict:
     if IMAGE_VARIANT == "prep":
         raise HTTPException(400, "this is the prep image: it has no trainer to run "
                             "an imported bundle")
+    if resources.CPU_ERROR:
+        raise HTTPException(400, f"this CPU cannot train: {resources.CPU_ERROR}. "
+                            f"Nothing was imported; use a host with an x86-64-v3 CPU")
     _refuse_if_cannot_deliver()
     try:
         out = handoff.import_bundle(handoff.bundle_file(req.bundle), sha256=req.sha256,
                                     name=req.name, train=req.train, export=req.export,
-                                    priority=req.priority)
+                                    priority=req.priority, keep=req.keep)
     except handoff.HandoffError as exc:
         raise HTTPException(400, str(exc))
     # The estimate, for the stages this job will run: upstream is imported.
@@ -1036,6 +1048,8 @@ def api_status() -> dict:
                 paused=st["paused"]),
             "metrics": METRICS_ENABLED,
             "image_variant": IMAGE_VARIANT,
+            "cuda_error": resources.CUDA_ERROR,
+            "cpu_error": resources.CPU_ERROR,
             "splat_root": str(SPLAT_ROOT)}
 
 

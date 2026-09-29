@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from . import db, debugdump, gpu, handoff, outputs, retention, telemetry
+from . import db, debugdump, gpu, handoff, outputs, resources, retention, telemetry
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
                      SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
@@ -27,7 +27,7 @@ from .resources import stage_threads, thread_env
 from .stages import (ORDER, STAGES, Ctx, dir_bytes, done_marker, images_dir,
                      is_cached, lock_holder_alive, mark_done, pid_alive,
                      read_done, read_lock, release_lock, reset_stage_dir,
-                     restamp_lock, take_lock)
+                     restamp_lock, space_estimate, take_lock)
 
 class ReviewRequired(Exception):
     """The mask stage is done and a human has not signed it off yet.
@@ -571,7 +571,11 @@ def _build_stage(ctx: Ctx, job_id: int, stage: str, spec: dict, d: Path,
         # the job. Inside the try: a raise here used to leave the lock
         # held by this (live) service, so every job sharing the stage
         # waited out CACHE_WAIT_TIMEOUT even after space was freed.
-        retention.ensure_space(stage)
+        if stage == "train" and resources.CPU_ERROR:
+            # Refused at submission too; this catches jobs queued before a
+            # restart onto this host (a bundle imported by an older image).
+            raise RuntimeError(f"this CPU cannot train: {resources.CPU_ERROR}")
+        retention.ensure_space(stage, space_estimate(ctx, stage))
         db.upsert_stage(job_id, stage, key, "running", path=str(d),
                         log_path=str(log_path), started=time.time())
         # We hold the lock and there is no valid .done, so whatever is

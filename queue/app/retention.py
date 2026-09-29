@@ -26,6 +26,14 @@ GB = 1_000_000_000
 # frames directory plus a training run's exports, so a job that passes the check
 # can finish rather than dying half way.
 MIN_FREE_BYTES = float(os.environ.get("QUEUE_MIN_FREE_GB", 20)) * GB
+# The floor is for stages whose size nothing predicts (frames, select, mask,
+# sfm). Train and export are sized from the job instead (stages.space_estimate)
+# and keep only this much slack, unless QUEUE_MIN_FREE_GB was set by hand, which
+# then holds for every stage as before. The flat 20 GB refused a train-only box
+# twice on 2026-09-29: train with 15.9 GB free, then export with 20.0 GB free
+# after 114 min of training, for a job whose stages added 1.3 GB in total.
+MIN_FREE_SET = "QUEUE_MIN_FREE_GB" in os.environ
+ESTIMATED_SLACK_BYTES = float(os.environ.get("QUEUE_ESTIMATED_SLACK_GB", 2)) * GB
 # 0 = no ceiling; eviction then only happens to satisfy MIN_FREE_BYTES.
 CACHE_BUDGET_BYTES = float(os.environ.get("QUEUE_CACHE_BUDGET_GB", 0)) * GB
 LOG_KEEP_DAYS = float(os.environ.get("QUEUE_LOG_KEEP_DAYS", 30))
@@ -183,19 +191,34 @@ def stage_need(stage: str) -> float:
     return float((row["n"] if row else 0) or 0) * NEED_SAFETY
 
 
-def ensure_space(stage: str, need: float | None = None) -> None:
+def stage_floor(estimated: bool) -> float:
+    """The minimum free space for a stage: the flat floor, or only the slack
+    when the stage's own need is estimated and the floor was not set by hand."""
+    if estimated and not MIN_FREE_SET:
+        return ESTIMATED_SLACK_BYTES
+    return MIN_FREE_BYTES
+
+
+def ensure_space(stage: str, estimate: float | None = None) -> None:
     """Preflight before a stage writes. Frees what it can, then refuses.
 
-    Raising here costs nothing; discovering it at 80% of a 95-minute training
-    run costs the run, and leaves a truncated export behind for the finalizer
-    to reject.
+    Wants the largest of: the floor (stage_floor), the stage's history
+    (stage_need) and the caller's estimate of what it will write. Raising here
+    costs nothing; discovering it at 80% of a 95-minute training run costs the
+    run, and leaves a truncated export behind for the finalizer to reject.
     """
-    if need is None:
-        need = stage_need(stage)
+    floor = stage_floor(estimate is not None)
+    hist = stage_need(stage)
+    est = estimate or 0.0
+    want = max(floor, hist, est)
+    if want == est and est > floor:
+        basis = f"the estimate for this job's {stage}"
+    elif want == hist and hist > floor:
         basis = f"{NEED_SAFETY:g}x the largest {stage} entry on record"
+    elif estimate is not None and not MIN_FREE_SET:
+        basis = f"the {floor/GB:g} GB slack under an estimated stage"
     else:
-        basis = "the caller's estimate"
-    want = max(MIN_FREE_BYTES, need)
+        basis = f"the {MIN_FREE_BYTES/GB:.0f} GB floor"
     if free_bytes() >= want:
         return
     res = gc_cache(target_free=want)
@@ -206,8 +229,6 @@ def ensure_space(stage: str, need: float | None = None) -> None:
     prune_renders()
     have = free_bytes()
     if have < want:
-        if want <= MIN_FREE_BYTES:
-            basis = f"the {MIN_FREE_BYTES/GB:.0f} GB floor"
         raise RuntimeError(
             f"only {have/GB:.1f} GB free on {QUEUE_ROOT} and {stage} needs at "
             f"least {want/GB:.1f} GB ({basis}); {res['skipped_in_use']} cache "
@@ -219,6 +240,8 @@ def ensure_space(stage: str, need: float | None = None) -> None:
 def status() -> dict:
     return {"free": free_bytes(), "cache_total": cache_total(),
             "min_free": MIN_FREE_BYTES,
+            "min_free_set": MIN_FREE_SET,
+            "estimated_slack": ESTIMATED_SLACK_BYTES,
             "cache_budget": CACHE_BUDGET_BYTES or None,
             "log_keep_days": LOG_KEEP_DAYS,
             "render_keep_days": RENDER_KEEP_DAYS}

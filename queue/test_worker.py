@@ -271,7 +271,7 @@ take_lock(d2, os.getpid())
 _real_space = worker.retention.ensure_space
 
 
-def _no_space(stage):
+def _no_space(stage, *_):
     raise RuntimeError("not enough free disk")
 
 

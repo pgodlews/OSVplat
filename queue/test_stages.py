@@ -411,6 +411,58 @@ check("stage_need reads the largest entry on record",
 check("a stage with no history falls back to the floor",
       retention.stage_need("select") == 0.0)
 
+# 12b. Train and export are sized from the job, not the flat floor. A train-only
+# box (2026-09-29) was refused train with 15.9 GB free and export with 20.0 GB
+# free, for a job whose stages added 1.3 GB.
+from unittest.mock import patch                                # noqa: E402
+from app.stages import ESTIMATE_MARGIN, space_estimate         # noqa: E402
+
+db.conn().execute("DELETE FROM cache WHERE cache_key='bigtrain'")
+with tempfile.TemporaryDirectory() as d:
+    sctx = make_ctx(Path(d), 30000)
+    sctx.cfg.train.max_cap, sctx.cfg.train.sh_degree = 3_000_000, 1
+    est = space_estimate(sctx, "train")
+    # 3M splats at sh 1: a 312 MB PLY (measured 312,000,882 B with its header).
+    check("train estimate at 3M / sh 1 is the measured 1.33 GB with margin",
+          1.33e9 < est < 3.5e9, f"{est/1e9:.2f} GB")
+    sctx.cfg.train.sh_degree = 3
+    check("and grows with SH degree", space_estimate(sctx, "train") > est * 1.5)
+    check("export has nothing to estimate before train wrote anything",
+          space_estimate(sctx, "export") is None)
+    (Path(d) / "splat_30000.ply").write_bytes(b"x" * 1000)
+    (Path(d) / "splat_30000.spz").write_bytes(b"x" * 200)
+    (Path(d) / "project.licht").write_bytes(b"x" * 5000)       # not packed
+    check("export is sized from the exports it packs",
+          space_estimate(sctx, "export") == ESTIMATE_MARGIN * 1200)
+    check("other stages have no estimate", space_estimate(sctx, "sfm") is None)
+
+GB_ = retention.GB
+quiet = {"n_evicted": 0, "freed": 0, "skipped_in_use": 0, "evicted": []}
+with patch.object(retention, "gc_cache", lambda **k: quiet), \
+        patch.object(retention, "prune_logs", lambda: None), \
+        patch.object(retention, "prune_renders", lambda: None), \
+        patch.object(retention, "free_bytes", lambda *a: 5 * GB_), \
+        patch.object(retention, "MIN_FREE_SET", False):
+    def refused(stage, estimate=None):
+        try:
+            retention.ensure_space(stage, estimate)
+            return None
+        except RuntimeError as exc:
+            return str(exc)
+    check("an unestimated stage still needs the 20 GB floor",
+          "20 GB floor" in (refused("frames") or ""), refused("frames"))
+    check("an estimated train stage needs its estimate, not the floor",
+          refused("train", 3.0 * GB_) is None)
+    check("and export likewise", refused("export", 0.5 * GB_) is None)
+    check("an estimate larger than the free space still refuses, naming it",
+          "estimate" in (refused("train", 9.0 * GB_) or ""), refused("train", 9.0 * GB_))
+    check("the slack stands under a tiny estimate",
+          refused("export", 0.1 * GB_) is None
+          and retention.stage_floor(True) == retention.ESTIMATED_SLACK_BYTES)
+    with patch.object(retention, "MIN_FREE_SET", True):
+        check("QUEUE_MIN_FREE_GB set by hand holds for every stage",
+              "floor" in (refused("export", 0.5 * GB_) or ""))
+
 # 13. Two smaller cache-correctness rules, both of which showed the previous
 # run's output as if it were this one's.
 with tempfile.TemporaryDirectory() as d:

@@ -65,6 +65,11 @@ CACHE_TOKEN = "{cache}"
 PRIVATE = {".lock", ".done", ".done.tmp"}
 # Entrypoint record of HANDOFF_URL's download, like input_fetch.json.
 FETCH_RECORD = RUNS_ROOT / "handoff_fetch.json"
+# A bundle in HANDOFF_ROOT is deleted once its import has verified and installed
+# every file: kept, it doubles the train side's input on disk (a 5.45 GB tar
+# next to the 5.47 GB it unpacked to, 2026-09-29). QUEUE_HANDOFF_KEEP=1, or
+# keep=true on the import, keeps it to import again.
+KEEP_BUNDLES = os.environ.get("QUEUE_HANDOFF_KEEP", "0").strip().lower() in ("1", "true", "yes", "on")
 
 _lock = threading.Lock()          # one upload at a time; they share the uplink
 # One build at a time, and never behind an upload: the worker writes the bundle
@@ -687,12 +692,13 @@ def _fetch_record(name: str) -> Optional[dict]:
 
 def import_bundle(path: Path, sha256: Optional[str] = None, name: Optional[str] = None,
                   train: Optional[dict] = None, export: Optional[dict] = None,
-                  priority: int = 0) -> dict:
+                  priority: int = 0, keep: Optional[bool] = None) -> dict:
     """Verify a bundle, install its stages, and queue a job that starts at train.
 
     train/export replace those sections of the bundle's config: a different
     training budget trains from the same SfM. Everything upstream has to stay
-    as the bundle made it, which the key check enforces.
+    as the bundle made it, which the key check enforces. A bundle in
+    HANDOFF_ROOT is deleted afterwards unless keep (default KEEP_BUNDLES).
     """
     t0 = time.time()
     if sha256:
@@ -754,13 +760,23 @@ def import_bundle(path: Path, sha256: Optional[str] = None, name: Optional[str] 
         else:
             db.upsert_stage(jid, st, key, "cached" if is_cached(sd) else "pending",
                             path=str(sd))
+    size = path.stat().st_size
+    removed = False
+    if not (KEEP_BUNDLES if keep is None else keep) and path.parent.resolve() == HANDOFF_ROOT.resolve():
+        try:
+            path.unlink()
+            removed = True
+        except OSError as exc:
+            print(f"job {jid}: could not delete {path.name} after import: {exc}")
     st = _set_status(jid, state="imported", role="train", id=manifest["id"],
-                     file=path.name, bytes=path.stat().st_size, files=len(manifest["files"]),
+                     file=path.name, bytes=size, files=len(manifest["files"]),
                      payload_bytes=nbytes, stages=installed + present,
                      already_cached=present, import_s=round(time.time() - t0, 1),
+                     bundle_removed=removed,
                      source_image=manifest.get("image"), fetch=_fetch_record(path.name))
     print(f"job {jid}: imported handoff {manifest['id'][:12]} from {path.name} "
           f"({', '.join(installed) or 'nothing new'} installed"
-          + (f", {', '.join(present)} already cached" if present else "") + ")")
+          + (f", {', '.join(present)} already cached" if present else "")
+          + ("; bundle deleted" if removed else "") + ")")
     return {"id": jid, "handoff": manifest["id"], "keys": keys,
             "installed": installed, "already_cached": present, "status": st}
