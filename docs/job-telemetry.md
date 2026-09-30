@@ -117,8 +117,10 @@ request carries `X-OSVplat-Signature: sha256=<HMAC-SHA256 of the body>`.
 | `metrics` | the job's metrics table: PSNR, SSIM, LPIPS (VGG, from LichtFeld's eval; absent when its weights could not be fetched), splats, peak VRAM, train seconds… |
 | `host` | OS, whether in a container; CPU model, logical CPUs, physical cores, effective CPUs (affinity and cgroup quota), AVX/AVX2/FMA/AVX-512; RAM, cgroup memory limit, `/dev/shm` size; `disk`: used/free/total under `QUEUE_ROOT` when the record is written, and the job's peak ([Disk space](#disk-space)); per GPU: name, memory, compute capability, driver, max PCIe gen/width, power limit, the card's default and max power limit, max SM and memory clocks |
 | `software` | image version and git revision (`OSVPLAT_VERSION`, `OSVPLAT_REVISION`; the Dockerfile and `deploy.sh` set them), Python version |
-| `transfers` | `input`: the `INPUT_URL` download of this job's clip; `output`: the `OUTPUT_UPLOAD_URL` upload; `handoff`: the handoff bundle's upload or download ([below](#transfers)) |
+| `transfers` | `input`: the `INPUT_URL` download of this job's clip; `output`: the `OUTPUT_UPLOAD_URL` upload; `handoff`: the handoff bundle's upload or download; `resume`: the `RESUME_URL` download of the restore point it resumed from ([below](#transfers)) |
 | `handoff` | for a job split between two machines, `{"id", "role", …}` ([Split pipeline](#split-pipeline)); null otherwise |
+| `checkpoints` | the restore points this job made for spot GPUs ([below](#restore-points)); null when it made none |
+| `resumed` | for a job that resumed training from a restore point, where it resumed from ([below](#restore-points)); null otherwise |
 | `placement` | `QUEUE_TELEMETRY_PLACEMENT`, or null |
 | `timeline` | host boot time, service start time |
 
@@ -247,6 +249,25 @@ Joining the two records by `handoff.id` is left to whoever consumes them: the
 service never looks for the other half. A bundle imported twice gives two
 train records with the same id, and a prep job whose bundle is rebuilt
 (`POST /api/jobs/<id>/handoff`) gets a new id.
+
+## Restore points
+
+For training on spot GPUs ([cloud.md, "Spot GPUs"](cloud.md#spot-gpus-restore-points-and-resume)).
+Counts, steps, sizes and times only: the upload URL, file names and error text
+stay in the job's `checkpoints.json`, which the job API returns.
+
+| Field | Meaning |
+|---|---|
+| `checkpoints.every` | `train.checkpoint_every` (steps; 0 when only a notice asked for a snapshot) |
+| `checkpoints.local` | restore points kept locally only (`QUEUE_RESTORE_POINTS=1`, no upload target) |
+| `checkpoints.restore_points`, `uploaded`, `failed` | how many were made, sent, and failed to be made or sent |
+| `checkpoints.last` | the newest one made: `iteration`, `generation`, `bytes` (the restore point), `source_bytes` (the whole project it came from), `make_s`, `pack_s`, `upload_state`, `transfer_s`, `mb_s`, `attempts` |
+| `checkpoints.notices` | reclaim notices acted on during the run: `kind` (`reclaim` or `rebalance`), `provider` (`aws`, `gcp`), `action`, `received` |
+| `resumed.restore_id` | a random id made with the restore point (also in its `restore.json`), so the interrupted run's record and this one can be joined without naming anything |
+| `resumed.from_step`, `generation`, `effective_iters` | where training resumed, and where it ends |
+| `resumed.source_job` | the job id the restore point came from, on the machine that made it |
+| `resumed.handoff_id` | the handoff bundle the interrupted run was imported from, if it was |
+| `transfers.resume` | the entrypoint's `RESUME_URL` download (`QUEUE_ROOT/runs/resume_fetch.json`) of that restore point: `bytes`, `seconds`, `mb_s`, `first_byte_s`, `ended` |
 
 ## Benchmark
 

@@ -200,7 +200,14 @@ MANAGED_TRAIN_FLAGS = {
     "--eval", "--no-save-eval-images", "--enable-mip", "--background-improvements",
     "--exposure-correction", "--bilateral-grid", "--min-opacity",
     "--max-screen-share", "--export", "--mask-mode", "--invert-masks", "--ppisp",
+    "--save-steps", "--resume",
 }
+
+
+# Fewer training steps than this between snapshots is refused: each one adds a
+# checkpoint (~0.5 GB at 3M splats, SH 1) to the run's project.licht, and the
+# restore point made from it is uploaded whole (docs/cloud.md, "Spot GPUs").
+MIN_CHECKPOINT_EVERY = 500
 
 
 class TrainCfg(Cfg):
@@ -228,6 +235,14 @@ class TrainCfg(Cfg):
     ppisp: bool = False
     min_opacity: Optional[float] = None
     max_screen_share: Optional[float] = None
+
+    # A project snapshot every this many training steps (the job's own steps,
+    # after steps_scaler), for a restore point another machine can resume from
+    # (checkpoints.py, docs/cloud.md "Spot GPUs"). 0: LichtFeld's defaults
+    # (7000 and 30000, scaled). Snapshots do not change what is trained (issue
+    # #10: the same resolved parameters, and a resumed run within run-to-run
+    # noise), so this is not a cache key term; k_train leaves it out.
+    checkpoint_every: int = Field(default=0, ge=0)
 
     extra_args: str = ""
 
@@ -259,6 +274,11 @@ class TrainCfg(Cfg):
                 "set either steps_scaler (scales iterations and all schedules "
                 "together) or a bare iter, not both: LichtFeld applies "
                 "steps_scaler after --iter, so the two multiply")
+        if 0 < self.checkpoint_every < MIN_CHECKPOINT_EVERY:
+            raise ValueError(
+                f"checkpoint_every must be 0 (off) or at least "
+                f"{MIN_CHECKPOINT_EVERY} steps: each snapshot adds a checkpoint "
+                f"of about 0.5 GB to the run's project file")
         # LichtFeld refuses this pair at startup, after the whole SfM has run:
         # "exposure correction replaces the standalone bilateral grid".
         if self.exposure_correction and (self.bilateral_grid or self.ppisp):
@@ -270,6 +290,17 @@ class TrainCfg(Cfg):
     @property
     def effective_iters(self) -> int:
         return round(self.iter * self.steps_scaler)
+
+    def checkpoint_steps(self) -> list[int]:
+        """The training steps a snapshot is taken at, below the final one
+        (which LichtFeld always saves)."""
+        n = self.checkpoint_every
+        return list(range(n, self.effective_iters, n)) if n else []
+
+
+# TrainCfg fields that change nothing the trainer produces, so no cache key
+# hashes them (like mask.review): toggling one must not retrain.
+TRAIN_NON_KEY_FIELDS = {"checkpoint_every"}
 
 
 # Formats LichtFeld can emit via --export=. Anything else is a typo that would
@@ -507,7 +538,7 @@ class JobConfig(Cfg):
         # normalises the disabled case, so every unmasked config still agrees
         # here rather than forking on fields that changed no pixel.
         return key_of("train", TRAINER, self.k_sfm(), self.k_mask(),
-                      self.train.model_dump())
+                      self.train.model_dump(exclude=TRAIN_NON_KEY_FIELDS))
 
     def k_export(self) -> str:
         return key_of("export", self.k_train(), self.export.model_dump())

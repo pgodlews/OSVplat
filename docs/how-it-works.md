@@ -318,7 +318,12 @@ rebuild months later does not silently produce a different trainer:
 
 | Component | Pin | Override |
 |---|---|---|
-| LichtFeld Studio | `3067e9e0` | `LFS_REF` |
+| LichtFeld Studio | `3067e9e0`, plus `scripts/lichtfeld-patches/` | `LFS_REF` |
 | vcpkg | `04a9d8e5` (2026.07.29) | `VCPKG_REF` |
 | gsplat (renders and evaluation only) | `28e794ca` (1.6.0), torch 2.9.1+cu130 | `GSPLAT_REF` |
 | pycolmap-cuda12 | 4.2.1 | edit `setup_sfm_venv.sh` |
+
+The LichtFeld patches only add options (`--save-steps`, and SIGUSR1 for a
+snapshot in headless mode; see each patch's header) and change no default, so
+they do not move `TRAINER`. A patch that no longer applies to a new `LFS_REF`
+stops the build.

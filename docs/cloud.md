@@ -88,6 +88,11 @@ sha256, then destroy the instance.
 | `HANDOFF_URL` | URL of one [handoff bundle](#split-pipeline), fetched into `QUEUE_ROOT/handoffs/` at start | name from the URL path, or `HANDOFF_NAME`; import it with the API |
 | `HANDOFF_SHA256` | checked before the bundle is kept; a mismatch deletes it | recommended |
 | `HANDOFF_UPLOAD_URL` | presigned PUT URL, or a JSON target, like `OUTPUT_UPLOAD_URL` | upload after each job with `run_until: "sfm"` |
+| `CHECKPOINT_UPLOAD_URL` | presigned PUT URL, or a JSON target | a [restore point](#spot-gpus-restore-points-and-resume) after each training snapshot, replacing the last |
+| `RESUME_URL` | URL of one restore point, fetched into `QUEUE_ROOT/resume/` at start | name from the URL path, or `RESUME_NAME`; resume it with the API |
+| `RESUME_SHA256` | checked before the restore point is kept | the object changes after each snapshot, so only when you know which one you fetch |
+| `QUEUE_PREEMPT_WATCH` | `off` | `aws` or `gcp`: poll for a reclaim notice and snapshot every running training |
+| `QUEUE_RESTORE_POINTS` | 0 | `1` makes restore points without `CHECKPOINT_UPLOAD_URL`, kept in the job's run dir |
 | `QUEUE_DEBUG` | `basic` | how much a failed job's [debug bundle](#debug-bundles) holds: `off`, `basic`, `artifacts`, `heavy` |
 | `QUEUE_DEBUG_MAX_GB` | 4.5 | size cap for the bundle; what does not fit is listed in its manifest |
 | `DEBUG_UPLOAD_URL` | presigned PUT URL, or a JSON target | upload the bundle when a job fails |
@@ -389,7 +394,8 @@ a host; `GET /api/status` shows the reason as `cpu_error`.
 Rented GPUs get interrupted: interruptible/spot instances are reclaimed,
 hosts go offline, a pod is terminated by mistake. What that costs:
 
-- **The work so far is lost with the instance's disk.** The stage cache,
+- **The work so far is lost with the instance's disk**, unless training
+  sends [restore points](#spot-gpus-restore-points-and-resume). The stage cache,
   logs and partial training live in `QUEUE_ROOT` (`/data`) on the instance.
   A replacement instance starts from frames again, unless `QUEUE_ROOT` is on
   storage that outlives it: a RunPod network volume, or `/workspace`, which
@@ -406,6 +412,63 @@ hosts go offline, a pod is terminated by mistake. What that costs:
   late or repeated upload cannot overwrite another run's result.
 - Nothing retries the job on another instance. Check the result exists
   (`upload.state: done` and its sha256), not just that the instance is gone.
+
+## Spot GPUs: restore points and resume
+
+Interruptible GPUs cost a third to a half of on-demand. With restore points a
+reclaim costs the steps since the last one plus a restart elsewhere, instead of
+the whole training. Measured for [#10](https://github.com/pgodlews/OSVplat/issues/10)
+on RTX 3090s (clip 0005, 30k steps, 3M splats): runs killed at 15k or 20k and
+resumed, on the same machine or another, finished at PSNR 21.909–21.915,
+against 21.897 and 21.905 uninterrupted.
+
+**Snapshots.** `train.checkpoint_every: 5000` snapshots the training every
+5000 steps (the job's own steps, after `steps_scaler`; at least 500; not part
+of the cache key). Each pauses training for about 0.1 s and adds a checkpoint
+to the run's `project.licht`, about 0.5 GB at 3M splats and SH 1. Off (0), the
+trainer keeps its defaults.
+
+**Restore points.** After each snapshot, `scripts/licht_restore_point.py` keeps
+only the newest checkpoint of the run's project (LichtFeld's own
+`clean_project_file`: 1.56 GB to 467 MB in 1.5 s, measured) and the queue packs
+it as `job<id>-restore.tar` with `restore.json`: the job config and cache keys,
+the trainer and cache-key version terms, the cache root, the step, and the
+checkpoint's sha256. With `CHECKPOINT_UPLOAD_URL` it is uploaded, replacing the
+previous one: S3, R2 and GCS replace an object only once the new upload is
+complete, so a reclaim mid-upload leaves the previous restore point. A URL
+without `{job}` names one object and belongs to the first job that uploads
+there. A restore point that cannot be made or sent is recorded
+(`checkpoints` in `GET /api/jobs/<id>`, and telemetry) and training goes on.
+Upload a bucket in the GPU's own region: 470 MB took 38 s over a home uplink.
+
+**Reclaim notices.** `QUEUE_PREEMPT_WATCH=aws` polls the instance metadata
+every 5 s. On the 2-minute spot interruption notice every running training is
+snapshotted at once (SIGUSR1, a patch in `scripts/lichtfeld-patches/`) and the
+queue is paused; a rebalance recommendation snapshots without pausing. A
+container reaches IMDSv2 only with the instance's metadata hop limit at 2.
+`QUEUE_PREEMPT_WATCH=gcp` watches `instance/preempted`; a GCP Spot VM gets no
+more than about 30 s by default (120 s in Preview), so there the scheduled
+snapshots do most of the work. Vast and RunPod send no reliable notice.
+Measured: 3.4 s from the request to a verified restore point, then the upload.
+`POST /api/snapshot` does the same by hand, e.g. before stopping an instance.
+
+**Resuming.** Start the train image with `HANDOFF_URL` (the prep job's
+bundle) and `RESUME_URL` (the restore point); `GET /api/resume` lists what
+arrived in `QUEUE_ROOT/resume/`. Then import both and resume the queue:
+
+```bash
+curl -sS -X POST -H "x-queue-token: $QUEUE_TOKEN" -H 'content-type: application/json' \
+  localhost:8090/api/resume/import -d '{"restore": "job00003-restore.tar", "bundle": "job00001-handoff.tar"}'
+```
+
+The restore point is refused unless it was made by the same trainer
+(`TRAINER`), the same cache-key version terms and the same `QUEUE_ROOT`: the
+checkpoint's cameras refer to the dataset by absolute path. The queued job
+takes its upstream stages from the bundle (without one, from this machine's
+cache: the machine that trained) and runs LichtFeld with `--resume`, which
+restores the step, the optimiser, the schedules and every training setting.
+The result is cached and delivered like any other. Its telemetry says
+`resumed.from_step`.
 
 ## Debug bundles
 

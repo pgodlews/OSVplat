@@ -22,8 +22,8 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import (benchmark, db, debugdump, estimate, gpu, handoff, metrics, outputs,
-               progress, resources, retention, telemetry, worker)
+from . import (benchmark, checkpoints, db, debugdump, estimate, gpu, handoff, metrics,
+               outputs, preempt, progress, resources, retention, telemetry, worker)
 from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, HANDOFF_ROOT,
                      IMAGE_VARIANT, METRICS_ENABLED, MODELS_ROOT, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
@@ -139,6 +139,7 @@ def _startup() -> None:
               f"are refused; on a rented GPU, destroy it and take a host with a "
               f"newer CPU")
     outputs.startup_check()
+    checkpoints.startup_check()
     if worker.enforce_start_paused():
         print("queue forced back to PAUSED on startup "
               "(QUEUE_START_PAUSED=0 to keep the stored state)")
@@ -157,10 +158,12 @@ def _startup() -> None:
         print("benchmark: started (QUEUE_BENCHMARK=1)" if ok
               else f"benchmark: not started: {why}")
     worker.start()
+    preempt.start()
 
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
+    preempt.stop()
     worker.stop()
 
 
@@ -386,6 +389,10 @@ def _refuse_if_cannot_deliver() -> None:
     if bad:
         raise HTTPException(400, "; ".join(bad) + " -- no job can deliver its "
                             "result; fix OUTPUT_UPLOAD_URL and restart")
+    bad = checkpoints.problems()
+    if bad:
+        raise HTTPException(400, "; ".join(bad) + " -- restore points could not be "
+                            "sent; fix CHECKPOINT_UPLOAD_URL and restart")
     left = outputs.seconds_left()
     if left is not None and left < 3600:
         print(f"WARNING: OUTPUT_UPLOAD_URL expires in {left / 60:.0f} min; "
@@ -619,8 +626,11 @@ def api_job(job_id: int) -> dict:
         raise HTTPException(404, "no such job")
     # upload: OUTPUT_UPLOAD_URL's result for this job (outputs.py), or None.
     # handoff: the bundle this job wrote or was imported from (handoff.py).
+    # checkpoints: its restore points (checkpoints.py); resume: the one it
+    # resumes training from.
     return {**_job_dict(row), "upload": outputs.status(job_id),
-            "handoff": handoff.status(job_id)}
+            "handoff": handoff.status(job_id),
+            "checkpoints": checkpoints.status(job_id), "resume": db.job_resume(row)}
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -771,6 +781,57 @@ def api_handoff_bundles() -> list[dict]:
     """Bundles waiting in QUEUE_ROOT/handoffs/ (HANDOFF_URL puts one there)."""
     return [{"name": p.name, "bytes": p.stat().st_size}
             for p in sorted(HANDOFF_ROOT.glob("*.tar")) if p.is_file()]
+
+
+# ------------------------------------------------------- restore points
+
+@app.post("/api/snapshot")
+def api_snapshot() -> dict:
+    """Ask every running trainer for a project snapshot now, as a reclaim
+    notice does (preempt.py); a restore point follows when they are on."""
+    return {"jobs": worker.request_snapshots(), "restore_points": checkpoints.enabled()}
+
+
+@app.get("/api/jobs/{job_id}/restore/download")
+def api_restore_download(job_id: int):
+    p = checkpoints.local_path(job_id)
+    if not p.is_file():
+        raise HTTPException(404, "no restore point kept for this job")
+    return FileResponse(p, media_type="application/x-tar", filename=p.name)
+
+
+@app.get("/api/resume")
+def api_resume_list() -> list[dict]:
+    """Restore points waiting in QUEUE_ROOT/resume/ (RESUME_URL puts one there)."""
+    return checkpoints.list_restore_points()
+
+
+class ResumeImportReq(BaseModel):
+    restore: str                          # a file name in QUEUE_ROOT/resume/
+    sha256: Optional[str] = None          # checked before anything else
+    bundle: Optional[str] = None          # handoff bundle in QUEUE_ROOT/handoffs/, if the
+                                          # upstream stages are not in this cache
+    bundle_sha256: Optional[str] = None
+    name: Optional[str] = None
+    priority: int = 0
+
+
+@app.post("/api/resume/import")
+def api_resume_import(req: ResumeImportReq) -> dict:
+    """Queue a job that resumes training from a restore point. Refused unless it
+    was made by this trainer and build, for the same cache root and config."""
+    if IMAGE_VARIANT == "prep":
+        raise HTTPException(400, "this is the prep image: it has no trainer")
+    if resources.CPU_ERROR:
+        raise HTTPException(400, f"this CPU cannot train: {resources.CPU_ERROR}")
+    _refuse_if_cannot_deliver()
+    try:
+        out = checkpoints.import_restore(req.restore, sha256=req.sha256, bundle=req.bundle,
+                                         bundle_sha256=req.bundle_sha256,
+                                         job_name=req.name, priority=req.priority)
+    except (checkpoints.ResumeError, handoff.HandoffError) as exc:
+        raise HTTPException(400, str(exc))
+    return {**out, "upload_expires_in_s": outputs.seconds_left()}
 
 
 class HandoffImportReq(BaseModel):

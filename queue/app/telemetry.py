@@ -781,6 +781,64 @@ def _handoff(job_id: int) -> tuple[Optional[dict], Optional[dict]]:
     return rec, xfer
 
 
+RESUME_FETCH = RUNS_ROOT / "resume_fetch.json"   # docker/entrypoint.sh writes it
+
+
+def _checkpoints(job_id: int) -> Optional[dict]:
+    """Restore points this job made (checkpoints.json), or None.
+
+    Counts, steps, sizes and times only: checkpoints.json also names the upload
+    URL, and errors can quote paths.
+    """
+    try:
+        st = json.loads((run_dir(job_id) / "checkpoints.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(st, dict):
+        return None
+    pts = [r for r in st.get("restore_points") or [] if isinstance(r, dict)]
+    states = [((r.get("upload") or {}).get("state") or ("failed" if r.get("error") else "local"))
+              for r in pts]
+    last = next((r for r in reversed(pts) if not r.get("error")), None)
+    out = {"every": _num(st.get("every"), int), "local": bool(st.get("local")),
+           "restore_points": len(pts), "uploaded": states.count("done"),
+           "failed": states.count("failed"), "last": None,
+           "notices": [{k: n.get(k) for k in ("kind", "provider", "action", "received")}
+                       for n in st.get("notices") or [] if isinstance(n, dict)]}
+    if last:
+        up = last.get("upload") or {}
+        nbytes, secs = _num(last.get("bytes"), int), _num(up.get("transfer_s"))
+        out["last"] = {"iteration": _num(last.get("iteration"), int),
+                       "generation": _num(last.get("generation"), int),
+                       "bytes": nbytes, "source_bytes": _num(last.get("source_bytes"), int),
+                       "make_s": _num(last.get("make_s")), "pack_s": _num(last.get("pack_s")),
+                       "upload_state": up.get("state"), "transfer_s": secs,
+                       "mb_s": _rate(nbytes, secs), "attempts": up.get("attempts")}
+    return out
+
+
+def _resumed(row) -> tuple[Optional[dict], Optional[dict]]:
+    """The restore point this job resumed from, and RESUME_URL's download of it."""
+    r = db.job_resume(row)
+    if not r:
+        return None, None
+    rec = {"restore_id": r.get("id"), "from_step": _num(r.get("from_step"), int),
+           "generation": _num(r.get("generation"), int),
+           "effective_iters": _num(r.get("effective_iters"), int),
+           "source_job": _num(r.get("source_job"), int), "handoff_id": r.get("handoff_id")}
+    xfer = None
+    try:
+        f = json.loads(RESUME_FETCH.read_text())
+        if isinstance(f, dict) and f.get("file") == r.get("file"):
+            nbytes, secs = _num(f.get("bytes"), int), _num(f.get("seconds"))
+            xfer = {"direction": "download", "state": "done", "bytes": nbytes,
+                    "seconds": secs, "mb_s": _rate(nbytes, secs),
+                    "first_byte_s": _num(f.get("first_byte_s")), "ended": _num(f.get("ended"))}
+    except (OSError, ValueError):
+        pass
+    return rec, xfer
+
+
 def build(job_id: int) -> Optional[dict]:
     row = db.get_job(job_id)
     if row is None:
@@ -841,6 +899,7 @@ def build(job_id: int) -> Optional[dict]:
     handoff, handoff_xfer = _handoff(job_id)
     if imported and imported.get("id") and (handoff or {}).get("id") != imported["id"]:
         handoff = {"id": imported["id"], "role": "train"}
+    resumed, resume_xfer = _resumed(row)
     return {
         "schema": SCHEMA,
         "written": round(time.time(), 1),
@@ -860,8 +919,10 @@ def build(job_id: int) -> Optional[dict]:
         "host": {**host(), "disk": {**_disk(), **_disk_peak(stages)}},
         "software": _software(),
         "transfers": {"input": _input_transfer(f), "output": _output_transfer(job_id),
-                      "handoff": handoff_xfer},
+                      "handoff": handoff_xfer, "resume": resume_xfer},
         "handoff": handoff,
+        "checkpoints": _checkpoints(job_id),
+        "resumed": resumed,
         "placement": TELEMETRY_PLACEMENT or None,
         "timeline": {"host_boot": _boot_time(),
                      "service_started": round(SERVICE_STARTED, 1)},

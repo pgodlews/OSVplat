@@ -38,6 +38,11 @@ FISHEYE_FRAMES = SCRIPTS / "80_fisheye_frames.py"  # rig-aware sharpness pick
 FISHEYE_MASKS = SCRIPTS / "87_fisheye_masks.py"    # stitch -> person masks -> back to fisheye
 FISHEYE_SFM = SCRIPTS / "88_fisheye_sfm.py"        # rig SfM, refinement, dataset
 FISHEYE_TRAIN = SCRIPTS / "89_fisheye_train_view.py"  # training masks, then exec LichtFeld
+# One-checkpoint restore point from a training project (checkpoints.py). It runs
+# under the system python3 the trainer's `lichtfeld` module was built for, with
+# the module and its libraries found in the trainer's build directory.
+RESTORE_POINT = SCRIPTS / "licht_restore_point.py"
+LFS_PYTHON = os.environ.get("QUEUE_LFS_PYTHON", "python3")
 
 # GPUs the queue is allowed to schedule on. A GPU carrying a foreign compute
 # process is skipped at runtime regardless of this list (see gpu.py).
@@ -192,6 +197,30 @@ try:
 except ValueError as exc:
     HANDOFF_UPLOAD, HANDOFF_UPLOAD_ERROR = {}, f"HANDOFF_UPLOAD_URL: {exc}"
 
+# Spot and other interruptible GPUs (queue/app/checkpoints.py, preempt.py,
+# docs/cloud.md "Spot GPUs"). CHECKPOINT_UPLOAD_URL (the OUTPUT_UPLOAD_URL
+# shape) receives a restore point after each training snapshot: one object per
+# job, replaced each time, which S3 does only once the new upload is complete.
+# RESUME_ROOT is where the entrypoint puts RESUME_URL's download, and where
+# restore points to resume from are looked up by name. QUEUE_PREEMPT_WATCH
+# (off, aws, gcp) polls the cloud's metadata service for a reclaim notice and
+# then asks every running trainer for a snapshot. The two metadata URLs are
+# overridable for tests only.
+RESUME_ROOT = QUEUE_ROOT / "resume"
+CHECKPOINT_UPLOAD_ERROR = None
+try:
+    CHECKPOINT_UPLOAD = _upload_target("CHECKPOINT_UPLOAD_URL")
+except ValueError as exc:
+    CHECKPOINT_UPLOAD, CHECKPOINT_UPLOAD_ERROR = {}, f"CHECKPOINT_UPLOAD_URL: {exc}"
+PREEMPT_WATCH = os.environ.get("QUEUE_PREEMPT_WATCH", "off").strip().lower() or "off"
+if PREEMPT_WATCH not in ("off", "aws", "gcp"):
+    print(f"WARNING: QUEUE_PREEMPT_WATCH={PREEMPT_WATCH!r} is not off, aws or gcp; using off")
+    PREEMPT_WATCH = "off"
+PREEMPT_POLL_S = float(os.environ.get("QUEUE_PREEMPT_POLL_S", "5"))
+AWS_METADATA_URL = os.environ.get("QUEUE_PREEMPT_AWS_URL", "http://169.254.169.254").rstrip("/")
+GCP_METADATA_URL = os.environ.get("QUEUE_PREEMPT_GCP_URL",
+                                  "http://metadata.google.internal").rstrip("/")
+
 # Which image this is (Dockerfile targets): "all" runs everything, "prep" has
 # no trainer and only takes jobs that stop at SfM or earlier, "train" has no
 # ffmpeg or mask models and only runs imported handoff bundles. A native
@@ -244,5 +273,6 @@ WEBHOOK_SECRET = os.environ.get("QUEUE_WEBHOOK_SECRET", "").strip()
 QUEUE_TOKEN = os.environ.get("QUEUE_TOKEN", "").strip()
 TOKEN_COOKIE = "queue_token"
 
-for d in (QUEUE_ROOT, CACHE_ROOT, RUNS_ROOT, LOG_ROOT, RENDER_ROOT, HANDOFF_ROOT):
+for d in (QUEUE_ROOT, CACHE_ROOT, RUNS_ROOT, LOG_ROOT, RENDER_ROOT, HANDOFF_ROOT,
+          RESUME_ROOT):
     d.mkdir(parents=True, exist_ok=True)

@@ -694,13 +694,18 @@ def _fetch_record(name: str) -> Optional[dict]:
 
 def import_bundle(path: Path, sha256: Optional[str] = None, name: Optional[str] = None,
                   train: Optional[dict] = None, export: Optional[dict] = None,
-                  priority: int = 0, keep: Optional[bool] = None) -> dict:
+                  priority: int = 0, keep: Optional[bool] = None,
+                  resume: Optional[dict] = None,
+                  expect_keys: Optional[dict] = None) -> dict:
     """Verify a bundle, install its stages, and queue a job that starts at train.
 
     train/export replace those sections of the bundle's config: a different
     training budget trains from the same SfM. Everything upstream has to stay
     as the bundle made it, which the key check enforces. A bundle in
     HANDOFF_ROOT is deleted afterwards unless keep (default KEEP_BUNDLES).
+    resume: the job resumes training from that restore point
+    (checkpoints.import_restore), whose keys expect_keys are; a bundle for
+    anything else is refused before it is unpacked.
     """
     t0 = time.time()
     if sha256:
@@ -725,6 +730,10 @@ def import_bundle(path: Path, sha256: Optional[str] = None, name: Optional[str] 
     keys = job_cfg.keys()
     if any(keys[st] != manifest["keys"][st] for st in UPSTREAM):
         raise HandoffError("the train/export overrides changed an upstream key")
+    if expect_keys is not None and keys != expect_keys:
+        diff = sorted(st for st in keys if keys[st] != expect_keys.get(st))
+        raise HandoffError(f"this bundle is not for the restore point's job: "
+                           f"{', '.join(diff)} keys differ")
 
     need = sum(f.get("size") or 0 for f in manifest.get("files") or [])
     free = shutil.disk_usage(CACHE_ROOT).free
@@ -745,7 +754,8 @@ def import_bundle(path: Path, sha256: Optional[str] = None, name: Optional[str] 
                    "skipped": bool(manifest["stages"][st].get("skipped")),
                    "info": _localize(manifest["stages"][st].get("info") or {})}
               for st in UPSTREAM}
-    jid = db.create_job(job_cfg.name, job_cfg.model_dump(), priority=priority)
+    jid = db.create_job(job_cfg.name, job_cfg.model_dump(), priority=priority,
+                        resume=resume)
     db.set_handoff(jid, {"id": manifest["id"], "bundle": path.name,
                          "source_job": (manifest.get("job") or {}).get("id"),
                          "image": manifest.get("image"),

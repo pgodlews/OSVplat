@@ -724,6 +724,17 @@ def _resolve_gut(ctx: Ctx, camera_model: str) -> bool:
 def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
                     masked: bool) -> list[str]:
     cfg, t = ctx.cfg, ctx.cfg.train
+    fmts = ",".join(cfg.export.formats)
+    resume = ctx.derived.get("resume")
+    if resume:
+        # A restore point carries every training parameter, the schedules and
+        # the step (issue #10), so nothing else from the config is passed: a
+        # flag given here would override what the interrupted run trained
+        # with. --export is the exception, since LichtFeld does not keep it.
+        # The dataset view is rebuilt by the caller at the same absolute paths,
+        # which the restore point's cameras refer to.
+        return [str(LFS_BIN), "--headless", "--resume", str(resume["licht"]),
+                "-o", str(ctx.dir("train")), f"--export={fmts}"]
     argv = [str(LFS_BIN), "--headless",
             "-d", dataset,
             "--images", images,
@@ -759,6 +770,12 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
         scaler = 1.0
     if scaler != 1.0:
         argv += ["--steps-scaler", f"{scaler:g}"]
+    # --save-steps (scripts/lichtfeld-patches/) takes steps in LichtFeld's own
+    # unscaled units and applies steps_scaler to them, like --eval-steps. It
+    # rounds (lround), so each snapshot lands within a step of the target.
+    save = sorted({round(step / scaler) for step in t.checkpoint_steps()} - {0})
+    if save:
+        argv.append("--save-steps=" + ",".join(str(x) for x in save))
 
     if t.max_width:
         argv += ["--max-width", str(t.max_width)]
@@ -799,7 +816,6 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
     if masked:
         argv += ["--mask-mode", "ignore"]
 
-    fmts = ",".join(cfg.export.formats)
     if fmts:
         argv.append(f"--export={fmts}")
 
@@ -1382,6 +1398,12 @@ def _by_input(stitched, fisheye):
 # PLY floats per splat: xyz 3, normal 3, opacity 1, scale 3, rotation 4, and
 # 3 colours x (sh_degree+1)^2 SH coefficients.
 TRAIN_GROWTH_PER_PLY = 4.5           # ply 1 + licht 3 + sog/spz 0.3, rounded up
+# Each snapshot beyond LichtFeld's default mid-run one appends a checkpoint to
+# project.licht: 547 MB per generation at 3M splats, SH 1, a 312 MB PLY (issue
+# #10). A restore point briefly needs a copy of the whole live file (all its
+# generations) plus the cleaned one-checkpoint result (checkpoints.py), so at the
+# last snapshot the peak is the live file twice over plus one checkpoint.
+CHECKPOINT_PER_PLY = 1.8
 TRAIN_FIXED_BYTES = 1_000_000_000    # masks, metrics, logs; 77 MB measured
 ESTIMATE_MARGIN = 1.25
 
@@ -1396,7 +1418,10 @@ def space_estimate(ctx: Ctx, stage: str) -> Optional[float]:
     if stage == "train":
         t = ctx.cfg.train
         ply = t.max_cap * 4 * (14 + 3 * (t.sh_degree + 1) ** 2)
-        return ESTIMATE_MARGIN * (ply * TRAIN_GROWTH_PER_PLY + TRAIN_FIXED_BYTES)
+        snapshots = len(t.checkpoint_steps())
+        # beyond the default mid-run generation, then the copy and the result
+        extra = (max(0, snapshots - 1) + (snapshots + 1 if snapshots else 0)) * CHECKPOINT_PER_PLY
+        return ESTIMATE_MARGIN * (ply * (TRAIN_GROWTH_PER_PLY + extra) + TRAIN_FIXED_BYTES)
     if stage == "export":
         src = ctx.dir("train")
         size = sum(p.stat().st_size for pat in ("*.ply", "*.sog", "*.spz", "*.html")

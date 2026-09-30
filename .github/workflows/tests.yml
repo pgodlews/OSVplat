@@ -58,6 +58,8 @@ jobs:
         run: python3 queue/test_debugdump.py
       - name: test_handoff.py
         run: python3 queue/test_handoff.py
+      - name: test_checkpoint.py
+        run: python3 queue/test_checkpoint.py
 
   scripts:
     name: Pipeline script tests (CPU)

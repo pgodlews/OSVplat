@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY scripts/setup_sfm_venv.sh /src/scripts/
 RUN /src/scripts/setup_sfm_venv.sh && rm -rf /root/.cache/pip
 COPY scripts/setup_lichtfeld.sh /src/scripts/
+COPY scripts/lichtfeld-patches/ /src/scripts/lichtfeld-patches/
 # Empty = the script's pinned commit. Set only for an A/B image against another
 # trainer build (--build-arg LFS_REF=<sha>); TRAINER in queue/app/jobs.py does
 # not follow it, so keep such an image's queue root to itself.
