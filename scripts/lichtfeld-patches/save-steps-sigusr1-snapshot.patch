@@ -1,0 +1,256 @@
+OSVplat patch for LichtFeld-Studio 3067e9e0 (applied by scripts/setup_lichtfeld.sh).
+Intended for upstream; drop it once LichtFeld has both features.
+
+1. --save-steps: project (.licht) snapshot iterations as a comma list, like
+   --eval-steps (same parser, scaled by --steps-scaler). Until now save_steps
+   (default 7000,30000) could only be set through --config, which replaces the
+   whole optimisation parameter set.
+2. SIGUSR1 in plain headless mode requests a project snapshot without stopping
+   training (Trainer::request_project_save, the path --tcp-connection's
+   save_project uses), for spot-reclaim notices. Wired for the span of train()
+   only; outside it the request is logged and dropped.
+
+Measured for OSVplat #10: the resolved parameters with --save-steps equal those
+with a --config dump carrying save_steps; see the issue for timings.
+
+diff --git a/src/app/application.cpp b/src/app/application.cpp
+index 0d794eca..3bf082c2 100644
+--- a/src/app/application.cpp
++++ b/src/app/application.cpp
+@@ -806,6 +806,20 @@ namespace lfs::app {
+             return exit_code;
+         }
+ 
++        // Train with SIGUSR1 wired to a project snapshot for exactly the span of
++        // train(): a request during load, export or shutdown is logged and dropped.
++        lfs::Status train_with_snapshots(HeadlessRunCoordinator& coordinator,
++                                         training::Trainer& trainer) {
++            coordinator.set_snapshot_handler([&trainer] {
++                static_cast<void>(trainer.request_project_save());
++            });
++            struct Clear {
++                HeadlessRunCoordinator& coordinator;
++                ~Clear() { coordinator.set_snapshot_handler({}); }
++            } clear{coordinator};
++            return trainer.train(coordinator.stop_token());
++        }
++
+         int runHeadless(std::unique_ptr<lfs::core::param::TrainingParameters> params) {
+             if (params->dataset.data_path.empty() &&
+                 !params->resume_checkpoint &&
+@@ -897,9 +911,8 @@ namespace lfs::app {
+ 
+                     core::Tensor::trim_memory_pool();
+                     if (const auto result =
+-                            trainer->train(
+-                                coordinator
+-                                    .stop_token());
++                            train_with_snapshots(
++                                coordinator, *trainer);
+                         !result) {
+                         LOG_ERROR(
+                             "Training error: {}",
+@@ -958,7 +971,7 @@ namespace lfs::app {
+ 
+                     core::Tensor::trim_memory_pool();
+ 
+-                    if (const auto result = trainer->train(coordinator.stop_token()); !result) {
++                    if (const auto result = train_with_snapshots(coordinator, *trainer); !result) {
+                         LOG_ERROR("Training error: {}", lfs::format_for_developer(result.error()));
+                         if (!params->python_scripts.empty()) {
+                             core::teardown_gpu_before_exit();
+@@ -1008,7 +1021,7 @@ namespace lfs::app {
+ 
+                     core::Tensor::trim_memory_pool();
+ 
+-                    if (const auto result = trainer->train(coordinator.stop_token()); !result) {
++                    if (const auto result = train_with_snapshots(coordinator, *trainer); !result) {
+                         LOG_ERROR("Training error: {}", lfs::format_for_developer(result.error()));
+                         if (!params->python_scripts.empty()) {
+                             core::teardown_gpu_before_exit();
+diff --git a/src/app/include/app/headless_run_coordinator.hpp b/src/app/include/app/headless_run_coordinator.hpp
+index 6eb0ebd6..a1c4ba64 100644
+--- a/src/app/include/app/headless_run_coordinator.hpp
++++ b/src/app/include/app/headless_run_coordinator.hpp
+@@ -3,12 +3,17 @@
+ 
+ #pragma once
+ 
++#include "core/logger.hpp"
++
+ #include <atomic>
+ #include <chrono>
+ #include <csignal>
++#include <functional>
++#include <mutex>
+ #include <stdexcept>
+ #include <stop_token>
+ #include <thread>
++#include <utility>
+ 
+ namespace lfs::app {
+ 
+@@ -16,15 +21,21 @@ namespace lfs::app {
+     public:
+         HeadlessRunCoordinator() {
+             pending_signal_ = 0;
++            pending_snapshot_ = 0;
+             previous_sigint_ = std::signal(SIGINT, &HeadlessRunCoordinator::signal_handler);
+             previous_sigterm_ = std::signal(SIGTERM, &HeadlessRunCoordinator::signal_handler);
+-            if (previous_sigint_ == SIG_ERR || previous_sigterm_ == SIG_ERR) {
++            previous_sigusr1_ = std::signal(SIGUSR1, &HeadlessRunCoordinator::signal_handler);
++            if (previous_sigint_ == SIG_ERR || previous_sigterm_ == SIG_ERR ||
++                previous_sigusr1_ == SIG_ERR) {
+                 if (previous_sigint_ != SIG_ERR) {
+                     std::signal(SIGINT, previous_sigint_);
+                 }
+                 if (previous_sigterm_ != SIG_ERR) {
+                     std::signal(SIGTERM, previous_sigterm_);
+                 }
++                if (previous_sigusr1_ != SIG_ERR) {
++                    std::signal(SIGUSR1, previous_sigusr1_);
++                }
+                 throw std::runtime_error("Failed to install headless signal handlers");
+             }
+             monitor_ = std::jthread([this](const std::stop_token token) { monitor_signals(token); });
+@@ -35,6 +46,15 @@ namespace lfs::app {
+         static void install_signal_handlers() {
+             std::signal(SIGINT, &HeadlessRunCoordinator::signal_handler);
+             std::signal(SIGTERM, &HeadlessRunCoordinator::signal_handler);
++            std::signal(SIGUSR1, &HeadlessRunCoordinator::signal_handler);
++        }
++
++        // SIGUSR1 asks for a project snapshot without stopping training (e.g. on a
++        // spot-reclaim notice). The handler runs on the monitor thread; with none
++        // set (before or after train()), the request is logged and dropped.
++        void set_snapshot_handler(std::function<void()> handler) {
++            std::lock_guard lock(snapshot_mutex_);
++            snapshot_handler_ = std::move(handler);
+         }
+ 
+         [[nodiscard]] static void (*signal_handler_for_test())(int) {
+@@ -52,6 +72,9 @@ namespace lfs::app {
+             if (previous_sigterm_ != SIG_ERR) {
+                 std::signal(SIGTERM, previous_sigterm_);
+             }
++            if (previous_sigusr1_ != SIG_ERR) {
++                std::signal(SIGUSR1, previous_sigusr1_);
++            }
+         }
+ 
+         HeadlessRunCoordinator(const HeadlessRunCoordinator&) = delete;
+@@ -80,6 +103,8 @@ namespace lfs::app {
+         static void signal_handler(const int signal) noexcept {
+             if (signal == SIGINT || signal == SIGTERM) {
+                 pending_signal_ = signal;
++            } else if (signal == SIGUSR1) {
++                pending_snapshot_ = 1;
+             }
+         }
+ 
+@@ -91,16 +116,34 @@ namespace lfs::app {
+                     stop_source_.request_stop();
+                     return;
+                 }
++                if (pending_snapshot_ != 0) {
++                    pending_snapshot_ = 0;
++                    std::function<void()> handler;
++                    {
++                        std::lock_guard lock(snapshot_mutex_);
++                        handler = snapshot_handler_;
++                    }
++                    if (handler) {
++                        LOG_INFO("SIGUSR1: project snapshot requested");
++                        handler();
++                    } else {
++                        LOG_WARN("SIGUSR1: no training in progress; snapshot request ignored");
++                    }
++                }
+                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+             }
+         }
+ 
+         inline static volatile std::sig_atomic_t pending_signal_ = 0;
++        inline static volatile std::sig_atomic_t pending_snapshot_ = 0;
+ 
+         SignalHandler previous_sigint_ = SIG_DFL;
+         SignalHandler previous_sigterm_ = SIG_DFL;
++        SignalHandler previous_sigusr1_ = SIG_DFL;
+         std::stop_source stop_source_;
+         std::atomic<int> received_signal_{0};
++        std::mutex snapshot_mutex_;
++        std::function<void()> snapshot_handler_;
+         std::jthread monitor_;
+     };
+ 
+diff --git a/src/core/argument_parser.cpp b/src/core/argument_parser.cpp
+index 540ffaa4..84710040 100644
+--- a/src/core/argument_parser.cpp
++++ b/src/core/argument_parser.cpp
+@@ -185,7 +185,8 @@ namespace {
+ 
+     // Each --eval-steps value may hold several comma-separated iterations; the
+     // result is sorted and free of duplicates.
+-    lfs::Result<std::vector<size_t>> parse_eval_steps(const std::vector<std::string>& values) {
++    lfs::Result<std::vector<size_t>> parse_eval_steps(const std::vector<std::string>& values,
++                                                      const std::string_view flag = "--eval-steps") {
+         std::vector<size_t> steps;
+         for (const auto& value : values) {
+             std::string_view rest = value;
+@@ -203,7 +204,7 @@ namespace {
+                         .code = lfs::ErrorCode::InvalidArgument,
+                         .domain = lfs::ErrorDomain::Core,
+                         .user_message = std::format(
+-                            "Invalid --eval-steps '{}'. Use positive iterations, e.g. 1000,7000,30000", value),
++                            "Invalid {} '{}'. Use positive iterations, e.g. 1000,7000,30000", flag, value),
+                         .detection = LFS_SOURCE_SITE_CURRENT(),
+                     });
+                 steps.push_back(step);
+@@ -749,6 +750,7 @@ namespace {
+             ::args::Flag eval_all(output_group, "eval_all", lfs::core::args::optimization_cli_help("--eval-all"), {"eval-all"});
+             ::args::Flag no_download(output_group, "no_download", "Do not download optional model weights", {"no-download"});
+             ::args::ValueFlagList<std::string> eval_steps(output_group, "eval_steps", "Evaluation iterations as a comma list, e.g. 1000,7000,30000 (replaces the default 7000,30000; the final iteration is always evaluated)", {"eval-steps"});
++            ::args::ValueFlagList<std::string> save_steps(output_group, "save_steps", "Project (.licht) snapshot iterations as a comma list, e.g. 5000,10000 (replaces the default 7000,30000; scaled by --steps-scaler like --eval-steps)", {"save-steps"});
+             ::args::Flag no_save_eval_images(output_group, "no_save_eval_images", "Disable saving of evaluation comparison images (GT vs rendered) during eval (default: enabled)", {"no-save-eval-images"});
+             ::args::ValueFlagList<std::string> timelapse_images(output_group, "timelapse_images", "Image filenames to render timelapse images for", {"timelapse-images"});
+             ::args::ValueFlag<int> timelapse_every(output_group, "timelapse_every", "Render timelapse image every N iterations (default: 50)", {"timelapse-every"});
+@@ -1278,6 +1280,13 @@ namespace {
+                     return std::unexpected(std::string(steps.error().user_message()));
+                 eval_steps_val = std::move(*steps);
+             }
++            std::optional<std::vector<size_t>> save_steps_val;
++            if (cli_option_present({"--save-steps"})) {
++                auto steps = parse_eval_steps(::args::get(save_steps), "--save-steps");
++                if (!steps)
++                    return std::unexpected(std::string(steps.error().user_message()));
++                save_steps_val = std::move(*steps);
++            }
+ 
+             // Create lambda to apply command line overrides after JSON loading
+             auto apply_cmd_overrides = [&params,
+@@ -1388,6 +1397,7 @@ namespace {
+                                         fill_pacing_iter_val = cli_option_present({"--fill-pacing-iter"}) ? std::optional<int>(::args::get(fill_pacing_iter)) : std::optional<int>(),
+                                         far_seed_dose_val = cli_option_present({"--far-seed-dose"}) ? std::optional<int>(::args::get(far_seed_dose)) : std::optional<int>(),
+                                         eval_steps_val = std::move(eval_steps_val),
++                                        save_steps_val = std::move(save_steps_val),
+                                         freeze_lr_scale_val = cli_option_present({"--freeze-lr-scale"}) ? std::optional<float>(::args::get(freeze_lr_scale)) : std::optional<float>(),
+                                         exclude_export_flag = bool(exclude_export),
+                                         save_project_at_iteration_val =
+@@ -1549,6 +1559,9 @@ namespace {
+                 if (eval_steps_val && !eval_steps_val->empty()) {
+                     opt.eval_steps = *eval_steps_val;
+                 }
++                if (save_steps_val && !save_steps_val->empty()) {
++                    opt.save_steps = *save_steps_val;
++                }
+                 setVal(freeze_lr_scale_val, params.freeze_lr_scale);
+                 setFlag(exclude_export_flag, params.exclude_frozen_add_splats_from_export);
+ 
+@@ -1650,6 +1663,7 @@ namespace {
+                 note_opt("fill_pacing_iter", fill_pacing_iter_val.has_value());
+                 note_opt("far_seed_dose", far_seed_dose_val.has_value());
+                 note_opt("eval_steps", eval_steps_val && !eval_steps_val->empty());
++                note_opt("save_steps", save_steps_val && !save_steps_val->empty());
+                 note_opt("mask_mode", mask_mode_val.has_value());
+                 note_opt("invert_masks", invert_masks_flag);
+                 note_opt("use_alpha_as_mask", no_alpha_as_mask_flag);

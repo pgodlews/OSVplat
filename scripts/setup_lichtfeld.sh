@@ -52,8 +52,9 @@ pin() {   # pin <dir> <ref>
 }
 # No --depth 1 on a fresh clone, for the same reason.
 [ -d "$SPLAT_ROOT/LichtFeld-Studio" ] || git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio.git "$SPLAT_ROOT/LichtFeld-Studio"
-# Undo a previous run's edits first, or checking out another ref refuses.
-git -C "$SPLAT_ROOT/LichtFeld-Studio" checkout -- src/core/CMakeLists.txt CMakeLists.txt 2>/dev/null || true
+# Undo a previous run's edits first (the CMake tweaks below and the source
+# patches), or checking out another ref refuses.
+git -C "$SPLAT_ROOT/LichtFeld-Studio" checkout -- . 2>/dev/null || true
 pin "$SPLAT_ROOT/LichtFeld-Studio" "$LFS_REF"
 grep -q -- '-march=native>' "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt" \
   || { echo "src/core/CMakeLists.txt no longer sets -march=native; recheck LFS_MARCH" >&2; exit 1; }
@@ -81,6 +82,15 @@ if(DEFINED OSVPLAT_CUDA_ARCHS)
 endif()""", 1)
 open(path, "w").write(s)
 PY
+# OSVplat's source patches (scripts/lichtfeld-patches/, each written against
+# LFS_REF; see its header). One that no longer applies stops the build here
+# rather than producing a trainer without it. They add options and change no
+# default, so TRAINER does not move with them.
+for patch in "$(cd "$(dirname "$0")" && pwd)"/lichtfeld-patches/*.patch; do
+  git -C "$SPLAT_ROOT/LichtFeld-Studio" apply --check "$patch" \
+    || { echo "$patch no longer applies to LichtFeld $LFS_REF; rebase it" >&2; exit 1; }
+  git -C "$SPLAT_ROOT/LichtFeld-Studio" apply "$patch"
+done
 [ -d "$VCPKG_ROOT" ] || git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"     # NOT --depth 1
 pin "$VCPKG_ROOT" "$VCPKG_REF"
 echo "LichtFeld $(git -C "$SPLAT_ROOT/LichtFeld-Studio" rev-parse --short HEAD), vcpkg $(git -C "$VCPKG_ROOT" describe --tags --always)"
