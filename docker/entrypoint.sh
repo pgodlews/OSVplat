@@ -121,6 +121,11 @@ BIND=${QUEUE_BIND:-$([ "$SSH_WANTED" = 1 ] && echo 127.0.0.1 || echo 0.0.0.0)}
 # $QUEUE_ROOT/handoffs/. Fetching does not queue anything: import it with
 # POST /api/handoff/import, which checks every file against its manifest.
 #
+# RESUME_URL / RESUME_SHA256 / RESUME_NAME: the same for a restore point that a
+# spot GPU's training uploaded (docs/cloud.md, "Spot GPUs"), into
+# $QUEUE_ROOT/resume/. Resume it with POST /api/resume/import, with the handoff
+# bundle when this is not the machine that trained it.
+#
 # fetch_one LABEL URL SHA256 NAME DIR RECORD [RECORDED_PREFIX]
 fetch_one() {
   local label=$1 url=$2 sha=$3 name=$4 dir=$5 record=$6 prefix=${7:-} dest
@@ -174,6 +179,11 @@ if [ -n "${HANDOFF_URL:-}" ]; then
   { fetch_one "handoff bundle" "$HANDOFF_URL" "${HANDOFF_SHA256:-}" "${HANDOFF_NAME:-}" \
       "$QUEUE_ROOT/handoffs" "$QUEUE_ROOT/runs/handoff_fetch.json" \
     || echo "WARNING: no handoff bundle from HANDOFF_URL; copy one into $QUEUE_ROOT/handoffs/" >&2; } &
+fi
+if [ -n "${RESUME_URL:-}" ]; then
+  { fetch_one "restore point" "$RESUME_URL" "${RESUME_SHA256:-}" "${RESUME_NAME:-}" \
+      "$QUEUE_ROOT/resume" "$QUEUE_ROOT/runs/resume_fetch.json" \
+    || echo "WARNING: no restore point from RESUME_URL; copy one into $QUEUE_ROOT/resume/" >&2; } &
 fi
 
 nvidia-smi -L >/dev/null 2>&1 || echo "WARNING: no GPU visible. Is the NVIDIA Container Toolkit installed, and is 'gpus: all' set?" >&2

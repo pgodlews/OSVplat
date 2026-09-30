@@ -103,6 +103,10 @@ def init() -> None:
     # upstream stages it brought. The worker starts such a job at train.
     if "handoff" not in cols:
         c.execute("ALTER TABLE jobs ADD COLUMN handoff TEXT")
+    # A job that resumes training from a restore point (checkpoints.py): which
+    # one, and the checkpoint extracted from it. The train stage runs --resume.
+    if "resume" not in cols:
+        c.execute("ALTER TABLE jobs ADD COLUMN resume TEXT")
 
 
 # ------------------------------------------------------------------ settings
@@ -121,11 +125,14 @@ def set_setting(k: str, v: str) -> None:
 # ---------------------------------------------------------------------- jobs
 
 def create_job(name: str, config: dict, sweep_id: Optional[str] = None,
-               priority: int = 0) -> int:
+               priority: int = 0, resume: Optional[dict] = None) -> int:
+    # resume goes in with the row, not after it: the dispatcher can take a
+    # queued job at any moment, and without it the job would train from scratch.
     cur = conn().execute(
-        "INSERT INTO jobs(name,config,state,priority,sweep_id,created) "
-        "VALUES(?,?,'queued',?,?,?)",
-        (name, json.dumps(config), priority, sweep_id, time.time()))
+        "INSERT INTO jobs(name,config,state,priority,sweep_id,created,resume) "
+        "VALUES(?,?,'queued',?,?,?,?)",
+        (name, json.dumps(config), priority, sweep_id, time.time(),
+         json.dumps(resume) if resume else None))
     return int(cur.lastrowid)
 
 
@@ -172,6 +179,18 @@ def job_handoff(row) -> Optional[dict]:
     """The imported-bundle record of a job row, or None for an ordinary job."""
     try:
         raw = row["handoff"]
+    except (IndexError, KeyError):
+        return None
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def job_resume(row) -> Optional[dict]:
+    """The restore point a job resumes training from, or None."""
+    try:
+        raw = row["resume"]
     except (IndexError, KeyError):
         return None
     try:

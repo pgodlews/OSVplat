@@ -19,7 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from . import db, debugdump, gpu, handoff, outputs, resources, retention, telemetry
+from . import (checkpoints, db, debugdump, gpu, handoff, outputs, resources,
+               retention, telemetry)
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
                      SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
@@ -42,6 +43,8 @@ class ReviewRequired(Exception):
 
 
 _procs: dict[int, subprocess.Popen] = {}      # job_id -> running subprocess
+# job_id -> the training run's Tracker, for request_snapshots (preempt.py)
+_trainers: dict[int, tuple[subprocess.Popen, "checkpoints.Tracker"]] = {}
 _cancel: set[int] = set()
 _held: dict[int, int] = {}                    # job_id -> gpu index
 _reserved: dict[str, int] = {}                # token -> gpu index (renders)
@@ -224,6 +227,26 @@ def _signal_group(pid: int, sig: int) -> None:
             pass
 
 
+def request_snapshots() -> list[int]:
+    """Ask every running trainer for a project snapshot now (SIGUSR1, handled
+    by scripts/lichtfeld-patches/). Only trainers that have said they are up:
+    before that, SIGUSR1 would end the process -- including the Python that
+    builds the fisheye dataset view before exec'ing LichtFeld. Returns the job
+    ids asked."""
+    asked = []
+    with _lock:
+        running = list(_trainers.items())
+    for job_id, (proc, tracker) in running:
+        if not tracker.ready or proc.poll() is not None:
+            continue
+        try:
+            os.kill(proc.pid, signal.SIGUSR1)
+            asked.append(job_id)
+        except OSError:
+            pass
+    return asked
+
+
 def _terminate(pid: int, waiter=None, grace: float = CANCEL_GRACE) -> None:
     """SIGTERM now, SIGKILL later if it is still there.
 
@@ -339,6 +362,12 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
     # Shared with the watchdog thread below.
     state = {"last_progress": None, "started": time.time(),
              "stalled": False, "done_iterating": False}
+    # Training snapshots: which one is at which step, and restore points made
+    # from them (checkpoints.py). None outside the train stage.
+    tracker = checkpoints.Tracker() if stage == "train" else None
+    maker = (checkpoints.Maker(ctx, env)
+             if tracker is not None and checkpoints.enabled() else None)
+    final_step = ctx.cfg.train.effective_iters
 
     with log_path.open("wb") as log:
         log.write(f"$ {' '.join(argv)}\n".encode())
@@ -348,6 +377,8 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
             stderr=subprocess.STDOUT, start_new_session=True)
         with _lock:
             _procs[ctx.job_id] = proc
+            if tracker is not None:
+                _trainers[ctx.job_id] = (proc, tracker)
         # A cancel that arrived while this process was being created found no
         # entry in _procs and signalled nothing, so the stage ran to completion
         # after the job was already marked cancelled. Catch it here, now that
@@ -375,6 +406,13 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
             for line in _iter_lines(proc.stdout):
                 log.write(line.encode("utf-8", "replace") + b"\n")
                 log.flush()
+                if tracker is not None:
+                    snap = tracker.feed(line)
+                    # The final save is the result, and a cancelled run's stop
+                    # save is not wanted: neither makes a restore point.
+                    if (snap and maker is not None and snap[1] < final_step
+                            and ctx.job_id not in _cancel):
+                        maker.request(*snap)
                 if parse:
                     # The accumulated blob is passed back in: a phase counter
                     # only means something relative to the phase before it, and
@@ -396,6 +434,9 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
                             db.stage_progress(ctx.job_id, stage, progress)
             proc.wait()
         finally:
+            if maker is not None:
+                maker.close(completed=proc.poll() == 0 and not state["stalled"]
+                            and ctx.job_id not in _cancel)
             telemetry.finish_sampler(ctx.job_id, stage, resources,
                                      time.time() - state["started"])
             if sampler:
@@ -405,6 +446,7 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
                     ctx.derived["peak_vram_mib"] = sampler.peak
             with _lock:
                 _procs.pop(ctx.job_id, None)
+                _trainers.pop(ctx.job_id, None)
 
     if progress:
         db.stage_progress(ctx.job_id, stage, progress)
@@ -657,6 +699,11 @@ def run_job(job_id: int, gpu_index: int) -> None:
             return
         cfg = JobConfig.model_validate(json.loads(row["config"]))
         ctx = Ctx(job_id=job_id, cfg=cfg, gpu=gpu_index, keys=cfg.keys())
+        # A job queued from a restore point (checkpoints.import_restore): its
+        # train stage runs LichtFeld with --resume (stages._lichtfeld_argv).
+        resume = db.job_resume(row)
+        if resume:
+            ctx.derived["resume"] = resume
         if not _start_running(job_id, gpu_index):
             cur = db.get_job(job_id)
             print(f"job {job_id}: no longer queued at dispatch "
@@ -736,6 +783,10 @@ def run_job(job_id: int, gpu_index: int) -> None:
         # like a finalizer, rather than ending done with nothing to hand on.
         bundle = handoff.export(job_id) if cfg.run_until == "sfm" else None
         db.set_job_state(job_id, "done", ended=time.time())
+        # Trained to the end: a restore point, made here or resumed from, has
+        # nothing left to offer. Kept when the job fails, to resume from.
+        checkpoints.discard_local(job_id)
+        checkpoints.discard_resume(job_id)
         if cfg.run_until:
             # No splat to deliver. The bundle is, when there is one and a
             # target, and the record's upload waits for it as it does below.

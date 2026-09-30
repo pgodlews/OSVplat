@@ -776,7 +776,8 @@ with tempfile.TemporaryDirectory() as _d:
           == ["--eval-steps=5000", "--eval-steps=10000"])
     check("the eval-image switch is not a cache-key term",
           _mp4.k_train() == key_of("train", _jobs.TRAINER, _mp4.k_sfm(),
-                                   _mp4.k_mask(), _mp4.train.model_dump()))
+                                   _mp4.k_mask(),
+                                   _mp4.train.model_dump(exclude=_jobs.TRAIN_NON_KEY_FIELDS)))
 
     # A bare iter != 30000 has to reach LichtFeld as --steps-scaler, not
     # --iter: --iter alone leaves LichtFeld's internal eval schedule (and so

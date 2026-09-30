@@ -24,6 +24,7 @@ python3 queue/test_regressions.py && python3 queue/test_distance.py
 python3 queue/test_telemetry.py && python3 queue/test_remote.py
 python3 queue/test_benchmark.py && python3 queue/test_hoststats.py
 python3 queue/test_debugdump.py && python3 queue/test_handoff.py
+python3 queue/test_checkpoint.py
 python3 scripts/test_avata_motion.py && python3 scripts/test_imu_select.py
 python3 scripts/test_upright.py                        # numpy
 python3 scripts/test_benchmark.py                      # numpy + OpenCV; GPU part with torch
