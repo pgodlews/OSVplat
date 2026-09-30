@@ -30,6 +30,7 @@ from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, HANDOFF_ROOT,
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, UPRIGHT_DEFAULT, JobConfig, quick_hash
 from . import mask_backends
 from .stages import ARTIFACT_EXTS, ORDER, images_dir, is_cached
+from .probe import ffprobe
 
 import sys
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -50,10 +51,6 @@ except ImportError:
 app = FastAPI(title="splat queue")
 STATIC = Path(__file__).parent / "static"
 
-# Keyed by path and mtime, so it never serves a stale probe -- but every new
-# clip (and every re-encode of one) adds an entry that is never read again.
-_probe_cache: dict[str, dict] = {}
-PROBE_CACHE_MAX = 64
 
 
 # ---------------------------------------------------------------- auth
@@ -169,36 +166,6 @@ def _shutdown() -> None:
 
 # ------------------------------------------------------------------ inputs
 
-def ffprobe(path: Path) -> dict:
-    key = f"{path}:{path.stat().st_mtime_ns}"
-    if key in _probe_cache:
-        return _probe_cache[key]
-    info: dict[str, Any] = {"duration": None, "width": None, "height": None,
-                            "fps": None, "codec": None}
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries",
-             "stream=width,height,codec_name,avg_frame_rate:format=duration",
-             "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=60)
-        if out.returncode == 0:
-            j = json.loads(out.stdout)
-            st = (j.get("streams") or [{}])[0]
-            info["width"], info["height"] = st.get("width"), st.get("height")
-            info["codec"] = st.get("codec_name")
-            fr = st.get("avg_frame_rate", "0/1")
-            if "/" in fr:
-                n, d = fr.split("/")
-                info["fps"] = round(float(n) / float(d), 3) if float(d) else None
-            dur = (j.get("format") or {}).get("duration")
-            info["duration"] = round(float(dur), 2) if dur else None
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
-        pass
-    if len(_probe_cache) >= PROBE_CACHE_MAX:
-        _probe_cache.clear()
-    _probe_cache[key] = info
-    return info
 
 
 STITCHED_EXTS = (".mp4", ".mov", ".mkv")

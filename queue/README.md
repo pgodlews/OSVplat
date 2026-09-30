@@ -69,8 +69,8 @@ the failure mode is a full disk 80 minutes into a 95-minute run.
 
 | Knob | Default | Effect |
 |---|---|---|
-| `QUEUE_MIN_FREE_GB` | 20 | A stage whose size nothing predicts (frames, select, mask, sfm) refuses to start below this. It first evicts and prunes to try to get there. Set by hand, it applies to train and export too. |
-| `QUEUE_ESTIMATED_SLACK_GB` | 2 | The minimum for train and export, which are sized from the job instead (below). |
+| `QUEUE_MIN_FREE_GB` | 20 | A stage with no estimate (the clip does not probe) refuses to start below this. It first evicts and prunes to try to get there. Set by hand, it holds for every stage and the estimates are not used. |
+| `QUEUE_ESTIMATED_SLACK_GB` | 3 | Headroom on top of a stage's estimate (below): an estimated stage wants estimate + this free. |
 | `QUEUE_CACHE_BUDGET_GB` | 0 (none) | Ceiling the cache is evicted down to. |
 | `QUEUE_LOG_KEEP_DAYS` | 30 | Stage logs older than this are pruned at startup. |
 | `QUEUE_RENDER_KEEP_DAYS` | 30 | Comparison sheets older than this are pruned at startup. |
@@ -92,9 +92,22 @@ sized from the job (`stages.space_estimate`): train from `max_cap` and the SH
 degree (the PLY is 4 × (14 + 3 × (sh+1)²) bytes per splat, and LichtFeld
 writes about 4.5 times that with `project.licht`, SOG and SPZ, measured at
 3M splats, SH 1), export from the size of the exports its result tar packs,
-each with a 1.25 margin. They want the largest of that estimate, their
-history, and `QUEUE_ESTIMATED_SLACK_GB`. A `QUEUE_MIN_FREE_GB` set by hand
-still holds for every stage.
+each with a 1.25 margin.
+
+The prep stages had the same problem on rented boxes: a prep-only box
+(2026-09-30, 21 GB disk) had to be launched with the floor set by hand, and its
+job peaked at 13.7 GB. So frames, select, mask and sfm are sized from the job
+too: the frames they handle (frames: fps x the clip's span; the others: select's
+panoramas, or candidates / window before select has run) times the clip's
+pixels per frame (both lenses of a fisheye rig) times what the stage wrote per
+pixel on a measured clip (0141: frames 0.133, mask 0.248, sfm 0.118 bytes per
+pixel; select only links), with a 1.5 margin. The handoff bundle, a copy of
+what it packs, is checked the same way before it is written.
+
+An estimated stage wants its estimate plus `QUEUE_ESTIMATED_SLACK_GB`, or its
+history if that is larger. A clip that does not probe leaves the prep stages
+to the flat floor. A `QUEUE_MIN_FREE_GB` set by hand still holds for every
+stage, and the estimates are then not used.
 
 Eviction is least-recently-used and conservative: it skips any entry an
 unfinished job depends on --- queued, running, **or parked in

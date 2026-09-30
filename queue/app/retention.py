@@ -26,14 +26,15 @@ GB = 1_000_000_000
 # frames directory plus a training run's exports, so a job that passes the check
 # can finish rather than dying half way.
 MIN_FREE_BYTES = float(os.environ.get("QUEUE_MIN_FREE_GB", 20)) * GB
-# The floor is for stages whose size nothing predicts (frames, select, mask,
-# sfm). Train and export are sized from the job instead (stages.space_estimate)
-# and keep only this much slack, unless QUEUE_MIN_FREE_GB was set by hand, which
-# then holds for every stage as before. The flat 20 GB refused a train-only box
-# twice on 2026-09-29: train with 15.9 GB free, then export with 20.0 GB free
-# after 114 min of training, for a job whose stages added 1.3 GB in total.
+# The floor is for a stage whose size nothing predicts: every stage is sized
+# from the job (stages.space_estimate) and wants its estimate plus this much
+# headroom instead, unless the clip does not probe or QUEUE_MIN_FREE_GB was set
+# by hand, which then holds for every stage as before. The flat 20 GB refused a
+# train-only box twice on 2026-09-29 (train with 15.9 GB free, then export with
+# 20.0 GB free after 114 min, for a job that added 1.3 GB), and a prep box had
+# to be launched with the floor set by hand (2026-09-30, 21 GB disk, peak 13.7).
 MIN_FREE_SET = "QUEUE_MIN_FREE_GB" in os.environ
-ESTIMATED_SLACK_BYTES = float(os.environ.get("QUEUE_ESTIMATED_SLACK_GB", 2)) * GB
+ESTIMATED_SLACK_BYTES = float(os.environ.get("QUEUE_ESTIMATED_SLACK_GB", 3)) * GB
 # 0 = no ceiling; eviction then only happens to satisfy MIN_FREE_BYTES.
 CACHE_BUDGET_BYTES = float(os.environ.get("QUEUE_CACHE_BUDGET_GB", 0)) * GB
 LOG_KEEP_DAYS = float(os.environ.get("QUEUE_LOG_KEEP_DAYS", 30))
@@ -192,8 +193,8 @@ def stage_need(stage: str) -> float:
 
 
 def stage_floor(estimated: bool) -> float:
-    """The minimum free space for a stage: the flat floor, or only the slack
-    when the stage's own need is estimated and the floor was not set by hand."""
+    """The flat floor, or, when the stage's own need is estimated and the floor
+    was not set by hand, the headroom that goes on top of the estimate."""
     if estimated and not MIN_FREE_SET:
         return ESTIMATED_SLACK_BYTES
     return MIN_FREE_BYTES
@@ -210,13 +211,17 @@ def ensure_space(stage: str, estimate: float | None = None) -> None:
     floor = stage_floor(estimate is not None)
     hist = stage_need(stage)
     est = estimate or 0.0
-    want = max(floor, hist, est)
-    if want == est and est > floor:
-        basis = f"the estimate for this job's {stage}"
-    elif want == hist and hist > floor:
+    headroom = estimate is not None and not MIN_FREE_SET
+    # An estimated stage wants its estimate plus the headroom; history still
+    # wins when this stage has written more before.
+    want = max(hist, est + floor) if headroom else max(floor, hist, est)
+    if want == hist and hist > (est + floor if headroom else max(floor, est)):
         basis = f"{NEED_SAFETY:g}x the largest {stage} entry on record"
-    elif estimate is not None and not MIN_FREE_SET:
-        basis = f"the {floor/GB:g} GB slack under an estimated stage"
+    elif headroom:
+        basis = (f"the estimate for this job's {stage}, {est/GB:.1f} GB, "
+                 f"plus {floor/GB:g} GB headroom")
+    elif want == est and est > floor:
+        basis = f"the estimate for this job's {stage}"
     else:
         basis = f"the {MIN_FREE_BYTES/GB:.0f} GB floor"
     if free_bytes() >= want:
