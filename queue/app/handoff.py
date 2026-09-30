@@ -44,7 +44,7 @@ from typing import Optional
 
 from pydantic import ValidationError
 
-from . import db, outputs, telemetry
+from . import db, outputs, retention, telemetry
 from .config import (CACHE_ROOT, HANDOFF_ROOT, HANDOFF_UPLOAD, HANDOFF_UPLOAD_ERROR,
                      IMAGE_VARIANT, RUNS_ROOT, SPLAT_ROOT, ssl_context)
 from .jobs import (FISHEYE_PIPELINE, FISHEYE_SFM, IMU_SELECT, REDUNDANT_POINTS, UPRIGHT,
@@ -283,6 +283,15 @@ def _clip_seconds(cfg: JobConfig) -> Optional[float]:
         return None
 
 
+def _payload_bytes(roots: list) -> int:
+    """Bytes of the files under the bundle's roots, which the tar will copy."""
+    total = 0
+    for p, _arc in roots:
+        files = [p] if p.is_file() else (f for f in p.rglob("*") if f.is_file())
+        total += sum(f.stat().st_size for f in files)
+    return total
+
+
 def _verify(ctx: Ctx, stage: str, info: dict) -> None:
     spec = STAGES[stage]
     if spec.get("verify"):
@@ -333,6 +342,10 @@ def export(job_id: int) -> dict:
             # Frames: only their record travels.
             info = read_done(d) if is_cached(d) else json.loads(r["progress"] or "{}")
         stages[st] = {"key": keys[st], "shipped": st in paths, "info": _portable(info)}
+
+    # The tar is a copy of what it packs, written after the last stage's space
+    # check: 2.18 GB on a 21 GB prep box that had 8.8 GB free (0141, 2026-09-30).
+    retention.ensure_space("handoff", float(_payload_bytes(roots)))
 
     # Random, never derived from the clip, a path or the host: telemetry
     # carries it on both sides and it must name nothing (docs/job-telemetry.md).

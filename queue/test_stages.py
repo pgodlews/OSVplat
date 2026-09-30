@@ -434,7 +434,40 @@ with tempfile.TemporaryDirectory() as d:
     (Path(d) / "project.licht").write_bytes(b"x" * 5000)       # not packed
     check("export is sized from the exports it packs",
           space_estimate(sctx, "export") == ESTIMATE_MARGIN * 1200)
-    check("other stages have no estimate", space_estimate(sctx, "sfm") is None)
+    check("a prep stage has no estimate when the clip does not probe",
+          space_estimate(sctx, "sfm") is None)
+
+# 12c. The prep stages are sized from the frames they handle and the clip's
+# pixels, against 0141 (Avata 360, 2x 3840^2 lenses, 141.8 s at 10 fps, 473
+# panoramas) as measured on a prep box on 2026-09-30: frames 5.56 GB, mask
+# 3.47 GB, sfm 1.65 GB, handoff tar 2.18 GB.
+from app import stages as stages_mod                           # noqa: E402
+
+with tempfile.TemporaryDirectory() as d:
+    osv = JobConfig.model_validate({"name": "p", "input": {"file": "samples/c.OSV", "quick_hash": "cafe"},
+                                    "mask": {"enabled": True}, "run_until": "sfm",
+                                    "select": {"mode": "window", "window": 3}})   # as 0141 ran
+    pctx = Ctx(job_id=2, cfg=osv, gpu=0, keys=osv.keys())
+    probe = {"width": 3840, "height": 3840, "duration": 141.8}
+    with patch.object(stages_mod, "ffprobe", lambda p: probe), \
+            patch.object(stages_mod, "CACHE_ROOT", Path(d)):
+        got = {st: space_estimate(pctx, st) for st in ("frames", "select", "mask", "sfm")}
+        measured = {"frames": 5.56e9, "mask": 3.47e9, "sfm": 1.65e9}
+        check("prep estimates cover what 0141 wrote, with the margin",
+              all(measured[st] <= got[st] <= 2 * measured[st] for st in measured),
+              {st: round(v / 1e9, 2) for st, v in got.items()})
+        check("frames is fps x clip span: 1418 candidates",
+              round(got["frames"] / (stages_mod.PREP_MARGIN * 2 * 3840 ** 2 * 0.133)) == 1418)
+        check("mask and sfm count select's panoramas: 1418 / window 3 = 473",
+              round(got["mask"] / (stages_mod.PREP_MARGIN * 2 * 3840 ** 2 * 0.248)) == 473)
+        osv.input.trim_start, osv.input.trim_end = 10.0, 70.0
+        check("a trimmed clip is sized from its span",
+              round(space_estimate(pctx, "frames") / (stages_mod.PREP_MARGIN * 2 * 3840 ** 2 * 0.133)) == 600)
+        pctx.derived["n_panos"] = 100
+        check("select's record wins once it has run",
+              round(space_estimate(pctx, "sfm") / (stages_mod.PREP_MARGIN * 2 * 3840 ** 2 * 0.118)) == 100)
+    with patch.object(stages_mod, "ffprobe", lambda p: {"width": None, "height": None, "duration": None}):
+        check("no probe, no estimate: the floor stands", space_estimate(pctx, "frames") is None)
 
 GB_ = retention.GB
 quiet = {"n_evicted": 0, "freed": 0, "skipped_in_use": 0, "evicted": []}
@@ -451,14 +484,17 @@ with patch.object(retention, "gc_cache", lambda **k: quiet), \
             return str(exc)
     check("an unestimated stage still needs the 20 GB floor",
           "20 GB floor" in (refused("frames") or ""), refused("frames"))
-    check("an estimated train stage needs its estimate, not the floor",
-          refused("train", 3.0 * GB_) is None)
+    head = retention.ESTIMATED_SLACK_BYTES
+    check("an estimated train stage needs its estimate plus the headroom, not the floor",
+          refused("train", 5 * GB_ - head - 0.1 * GB_) is None)
     check("and export likewise", refused("export", 0.5 * GB_) is None)
+    check("the headroom goes on top of the estimate",
+          "headroom" in (refused("train", 5 * GB_ - head + 0.1 * GB_) or ""),
+          refused("train", 5 * GB_ - head + 0.1 * GB_))
     check("an estimate larger than the free space still refuses, naming it",
           "estimate" in (refused("train", 9.0 * GB_) or ""), refused("train", 9.0 * GB_))
-    check("the slack stands under a tiny estimate",
-          refused("export", 0.1 * GB_) is None
-          and retention.stage_floor(True) == retention.ESTIMATED_SLACK_BYTES)
+    check("an estimated prep stage is not held to the 20 GB floor",
+          refused("frames", 1.0 * GB_) is None and refused("handoff", 1.5 * GB_) is None)
     with patch.object(retention, "MIN_FREE_SET", True):
         check("QUEUE_MIN_FREE_GB set by hand holds for every stage",
               "floor" in (refused("export", 0.5 * GB_) or ""))

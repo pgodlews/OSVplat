@@ -25,6 +25,7 @@ from .config import (CACHE_ROOT, FISHEYE_FRAMES, FISHEYE_MASKS, FISHEYE_SFM,
                      MASK_PY, MODELS_ROOT, RUN_SFM, SELECT_SHARP, SCRIPTS,
                      SFM_PY, SPLAT_ROOT)
 from .jobs import JobConfig
+from .probe import ffprobe
 from .mask_backends import MASK_BACKENDS, weights_dir
 
 # mask reads the selected panoramas and feeds BOTH sfm (suppressing features on
@@ -1386,13 +1387,84 @@ TRAIN_FIXED_BYTES = 1_000_000_000    # masks, metrics, logs; 77 MB measured
 ESTIMATE_MARGIN = 1.25
 
 
+# What the prep stages write, from the frames they are about to handle and the
+# clip's pixels per frame (two lenses for a fisheye rig). Measured 2026-09-30,
+# 0141 (Avata 360, two 3840x3840 lenses, fps 10, jpeg_q 2, masks on), from the
+# per-stage disk samples (peak minus start): frames 5.56 GB for 1418 candidates,
+# 0.133 B per pixel; mask 3.47 GB for 473 panoramas, 0.248 B/px; sfm 1.65 GB,
+# 0.118 B/px (database, models, dataset). Select hardlinks the chosen frames
+# (dir_bytes) and grew 4 MB; 0.005 B/px (~0.2 GB there) covers its lists and
+# records. One clip, and JPEG size follows the scene, so the margin is wider
+# than the train one; lower jpeg_q (larger files) than 2 is not modelled.
+PREP_BYTES_PER_PX = {"frames": 0.133, "select": 0.005, "mask": 0.248, "sfm": 0.118}
+PREP_MARGIN = 1.5
+
+
+def _probe(ctx: Ctx) -> dict:
+    """The clip's ffprobe, or {} when it will not probe: no estimate, the floor."""
+    try:
+        return ffprobe(SPLAT_ROOT / ctx.cfg.input.file)
+    except OSError:
+        return {}
+
+
+def _pixels_per_frame(ctx: Ctx) -> Optional[float]:
+    info = _probe(ctx)
+    if not info.get("width") or not info.get("height"):
+        return None
+    return float(info["width"] * info["height"] * (2 if ctx.cfg.is_fisheye else 1))
+
+
+def _n_candidates(ctx: Ctx) -> Optional[int]:
+    """Frames the frames stage writes: its record when it ran, else fps x clip span."""
+    if ctx.derived.get("n_candidates"):
+        return ctx.derived["n_candidates"]
+    d = ctx.dir("frames") if "frames" in ctx.keys else None
+    if d is not None and d.is_dir():
+        n = _lens_counts(d)[0] if ctx.cfg.is_fisheye else len(list(d.glob("*.jpg")))
+        if n:
+            return n
+    dur = _probe(ctx).get("duration")
+    if not dur:
+        return None
+    start = ctx.cfg.input.trim_start or 0.0
+    end = ctx.cfg.input.trim_end if ctx.cfg.input.trim_end is not None else dur
+    return max(0, round((min(end, dur) - start) * ctx.cfg.frames.fps))
+
+
+def _n_panos(ctx: Ctx, n_candidates: int) -> int:
+    """Panoramas select keeps: its record when it ran, else candidates / window."""
+    if ctx.derived.get("n_panos"):
+        return ctx.derived["n_panos"]
+    d = ctx.dir("select") if "select" in ctx.keys else None
+    if d is not None and d.is_dir():
+        n = (_lens_counts(d / "images")[0] if ctx.cfg.is_fisheye
+             else len(list(d.glob("pano_*.jpg"))))
+        if n:
+            return n
+    sel = ctx.cfg.select
+    window = ctx.derived.get("window") or (
+        max(1, round(n_candidates / max(1, sel.target_panos))) if sel.mode == "target"
+        else max(1, sel.window))
+    return -(-n_candidates // window)
+
+
 def space_estimate(ctx: Ctx, stage: str) -> Optional[float]:
     """Bytes this stage is expected to write, or None to leave it to the floor.
 
-    train: max_cap splats at the job's SH degree, times what LichtFeld writes
-    per PLY byte. export: links to the training exports, then the result tar
-    that packs them, so the size of those exports.
+    frames, select, mask, sfm: the frames they handle times the clip's pixels
+    per frame times what the stage wrote per pixel on a measured clip; None
+    when the clip does not probe. train: max_cap splats at the job's SH degree,
+    times what LichtFeld writes per PLY byte. export: links to the training
+    exports, then the result tar that packs them, so the size of those exports.
     """
+    if stage in PREP_BYTES_PER_PX:
+        px = _pixels_per_frame(ctx)
+        n = _n_candidates(ctx) if px else None
+        if not px or n is None:
+            return None
+        frames = n if stage == "frames" else _n_panos(ctx, n)
+        return PREP_MARGIN * frames * px * PREP_BYTES_PER_PX[stage]
     if stage == "train":
         t = ctx.cfg.train
         ply = t.max_cap * 4 * (14 + 3 * (t.sh_degree + 1) ** 2)
