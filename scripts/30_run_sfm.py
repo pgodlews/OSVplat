@@ -68,6 +68,13 @@ if masks is not None:
             f"only {n_masks} masks for {n_panos} panoramas in {masks}; "
             f"refusing to run a partially masked reconstruction")
 
+if not pycolmap.has_cuda:
+    # pycolmap.panorama builds its own extraction and matching options, with no
+    # way to pass the Metal or CPU backend scripts/sift_backend.py picks for the
+    # fisheye rig. Only the rig pipeline runs without CUDA so far.
+    raise SystemExit("30_run_sfm.py needs a CUDA build of pycolmap; on a Mac, feed the raw "
+                     ".OSV (fisheye rig pipeline) instead of a stitched video")
+
 options = PanoramaReconstructionOptions(
     matcher=Matcher.SEQUENTIAL, mapper=Mapper(mapper),
     render_type=PanoRenderType(render),

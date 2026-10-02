@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 SPLAT_ROOT = Path(os.environ.get("SPLAT_ROOT", Path.home() / "splat")).expanduser()
@@ -30,6 +31,11 @@ MASK_PY = Path(os.environ.get("QUEUE_MASK_PY", GS_PY)).expanduser()
 MODELS_ROOT = Path(os.environ.get("QUEUE_MODELS_DIR", SPLAT_ROOT / "models")).expanduser()
 RENDER_COMPARE = SCRIPTS / "93_render_compare.py"
 BENCHMARK = SCRIPTS / "benchmark.py"               # fixed-workload host benchmark
+
+# ffmpeg's hardware decoder for the frames stage: NVDEC on the Linux hosts,
+# VideoToolbox on a Mac. scripts/80_fisheye_frames.py reads the same variable.
+HWACCEL = os.environ.get("SPLAT_HWACCEL") or (
+    "videotoolbox" if sys.platform == "darwin" else "cuda")
 
 # Raw DJI dual fisheye (.OSV) runs its own stage implementations -- no stitch.
 # See stages.py "fisheye rig" and docs/how-it-works.md, "Fisheye rig".

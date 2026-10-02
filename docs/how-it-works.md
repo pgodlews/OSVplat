@@ -311,6 +311,131 @@ what they do to the picture.
 | `.sog` | ~27 MB | Web viewers ([SuperSplat](https://superspl.at/editor), PlayCanvas). |
 | `.spz` | ~40 MB | Compact interchange (v4, zstd). |
 
+## Prep on Apple silicon
+
+Everything before training (frames, select, mask, SfM) runs on an Apple silicon
+Mac from `scripts/setup_mac.sh`; training does not (LichtFeld and gsplat are
+CUDA-only), so a Mac's output is meant to reach a CUDA box as a
+[handoff bundle](cloud.md#split-pipeline). Only the fisheye rig pipeline is
+ported: `30_run_sfm.py` refuses to run without CUDA.
+
+This is the scripts only, not yet the queue. The queue hands stages to NVIDIA
+GPUs and does not schedule on a Mac, so the stages are run by hand with the
+arguments `queue/app/stages.py` builds (`fisheye_*_argv`), and nothing in the
+repo writes a handoff bundle from stages run that way: the bundles trained
+below were assembled by hand around a CUDA run's manifest.
+
+```mermaid
+flowchart LR
+    osv[".OSV"] --> frames["80_fisheye_frames.py<br/>SPLAT_HWACCEL=videotoolbox"]
+    frames --> mask["87_fisheye_masks.py<br/>81 stitch + 70 maskrcnn on MPS"]
+    frames --> sfm["88_fisheye_sfm.py<br/>sift_backend: metal"]
+    mask --> sfm
+    sfm --> handoff["handoff bundle"]
+    handoff --> train["train + export<br/>CUDA box"]
+```
+
+What differs from the Linux path, each measured on clip 0141 (Avata 360, 141.8 s,
+473 rig frames = 946 images of 3840 px) on an M5 Max (18 cores, 128 GB), against
+the prep-only cloud run of the same clip (Core Ultra 9 285K + RTX 5080,
+0.2.0-rc3, 2026-09-30), 2026-10-01 and 02:
+
+- **SIFT extraction runs in Metal.** COLMAP 4.2.1 has no GPU SIFT on macOS: the
+  PyPI wheel is built without CUDA, OpenGL and ONNX, and its VLFeat is scalar on
+  arm64. `setup_mac.sh` builds pycolmap from a fork instead,
+  [pgodlews/colmap](https://github.com/pgodlews/colmap) branch
+  `metal-sift-lanxinger`, pinned by commit: lanxinger/colmap-metal (COLMAP
+  4.2.0-dev with selected 4.2.1 fixes and SIFT in Metal compute shaders) plus
+  one commit that sorts each image's features into a fixed order. So the Mac's
+  COLMAP is not the 4.2.1 release the Linux pin is. The order is fixed but the
+  feature set is not: on images this large, candidates past the extractor's
+  buffer are dropped in GPU arrival order, and two extractions of 24 images at
+  3200 px shared 99.9 % of keypoint positions, none byte-identical.
+- **Matching stays on the CPU** (FAISS). The fork has a Metal matcher too; on
+  this clip it took 309 s where the CPU took 236 s, and the two models' camera
+  centres differ by 0.0007 % of the path length (median; at most 0.0028 %).
+- **`scripts/sift_backend.py` picks the backend** (`cuda`, `metal`, `cpu`;
+  `SPLAT_SIFT` overrides). pycolmap turns `use_gpu` off unless `device` says
+  CUDA, so the Metal build is driven with `device=pycolmap.Device.cuda`.
+- **Masks run on MPS with a newer torch** (2.14.1, torchvision 0.29.1). With the
+  Linux pin (2.9.1 / 0.24.1) `torchvision.ops.roi_align` takes 92 s per 1000
+  boxes on MPS, 0.2 s on the CPU and 0.02 s with 2.14.1. `81_fisheye_stitch.py`
+  builds its float64 sampling grids on the CPU there (Metal has no float64).
+- **Decoding uses VideoToolbox**, whose frames are byte-identical to ffmpeg's
+  software decoder on the same machine (2836 of 2836 JPEGs).
+
+| 0141, SfM stage | Mac, Metal SIFT | Mac, CPU SIFT (PyPI wheel) | CUDA run |
+|---|---|---|---|
+| extract / match / map | 85 / 236 / 797 s | 775 / 213 / 730 s | not split; map ~798 s |
+| `seconds_sfm` | 1121 | 1721 | 1014 |
+| registered rig frames | 473 / 473 | 473 / 473 | 473 / 473 |
+| 3D points | 510,391 | 498,907 | 381,979 |
+| mean reprojection error | 0.806 px | 0.904 px | 0.979 px |
+| angular error, median / p90 | 0.034 / 0.092 deg | 0.040 / 0.099 deg | 0.043 / 0.104 deg |
+| keypoints per image, after masks | 11,085 | 10,264 | not recorded |
+| peak memory | 9.6 GB | 56 GB | not recorded |
+| trained from it: PSNR / SSIM / LPIPS | 27.109 / 0.8342 / 0.1240 | 26.938 / 0.8315 / 0.1268 | 27.010 / 0.8316 / 0.1265 |
+
+Both Mac runs used the CUDA run's selected images and person masks, so the
+table isolates the SfM stage. The last row is the queue's own evaluation after
+training each model on an RTX 3090 (30,000 iterations, 3M splats, 0.2.0-rc3
+train image), one run per column; two trainings of one model differed by about
+0.005 dB on another clip, so the Metal column is not worse than CUDA, and one
+clip does not show it is better. After a similarity alignment of the 946 camera
+centres, the Metal model differs from the CUDA model by 0.012 % of the path
+length (median; at most 0.027 %) and 0.10 degrees in rotation; the CPU SIFT
+model by 0.006 % (at most 0.027 %) and 0.03 degrees. The Metal extractor keeps
+up to two orientations for each of its 8192 features, which is where its extra
+keypoints come from.
+
+An earlier build is recorded as a null. The Metal SIFT of byplay-io/colmap-metal
+on the 4.2.1 tag, with four fixes made here (a 4096-per-octave candidate cap,
+output order, embedded shaders, the half-pixel keypoint origin), was faster
+(`seconds_sfm` 777 to 1023) but trained to 26.83 to 26.88 dB in five runs on
+these frames, whatever the feature budget (8192, 10,000, 18,000), the keypoint
+origin or the intrinsics (fixed to the CPU SIFT model's). The cause was not
+found. It is branch `metal-sift-4.2.1` of the same fork.
+
+| 0141, other stages | Mac | CUDA run | Output against the CUDA run |
+|---|---|---|---|
+| frames (VideoToolbox) | 26 s | 2.6 min | same frames, 46.8 to 48.1 dB: the image's ffmpeg is 6.1, the Mac's 8.1 |
+| select | 4 s | 0.1 min | 472 of 473 picks identical |
+| mask (Mask R-CNN, MPS) | 421 s | 154 s | the same 84 frames without a detection; coverage 0.003636 vs 0.003629 |
+
+The mask stage sets `net.roi_heads.score_thresh` to the mask's own score on MPS
+(40 panoramas: 54 s to 31 s, no pixel changed; not checked on CUDA, so not
+applied there). Half-precision masks were tried and dropped: 286 s instead of
+385 s, but two detections lost. A whole prep run, every stage on the Mac, was
+timed with the earlier build: 24.6 min and 27 Wh at 66 W mean, and it trained to
+26.923 dB. With the current build the SfM stage alone is 1121 s; the whole run
+was not timed again.
+
+A second clip, with every stage made on the Mac by the current build: 0005 (Osmo
+360, 296.9 s trimmed to 5 to 291.9 s, 957 rig frames, a person in every frame),
+against a prep of the same job on an RTX 3090 with a Ryzen 7 H 255 (0.2.0-rc3),
+both trained as above, 2026-10-02:
+
+| 0005, whole prep | Mac | CUDA run |
+|---|---|---|
+| frames / select / mask / sfm | 74 / 9 / 806 / 2220 s | 752 / 14 / 511 / 2809 s |
+| whole prep | 51.8 min | 68.1 min |
+| selected frames | 957, the same 957 | 957 |
+| mask coverage, mean | 0.04706 | 0.04720 |
+| registered rig frames | 957 / 957 | 957 / 957 |
+| 3D points | 900,396 | 832,860 |
+| mean reprojection error | 0.951 px | 1.068 px |
+| angular error, median / p90 | 0.040 / 0.098 deg | 0.046 / 0.107 deg |
+| trained from it: PSNR / SSIM / LPIPS | 21.990 / 0.6770 / 0.2155 | 22.027 / 0.6775 / 0.2156 |
+
+Each column is evaluated against its own decoded frames, one run each. Over the
+two clips the Mac's PSNR is 0.10 dB above and 0.04 dB below the CUDA run's, with
+SSIM and LPIPS within 0.003: no difference in either direction is shown. Not
+measured: SAM 3 on MPS and a Mac smaller than this one.
+
+A reconstruction made on a Mac is not the one a CUDA host makes from the same
+options: the SIFT backend, the decoder's ffmpeg and the torch build all differ.
+Until the cache keys carry that, do not mix the two in one queue cache.
+
 ## Pinned toolchain
 
 The setup scripts pin the exact commits this pipeline was validated at, so a
@@ -322,6 +447,7 @@ rebuild months later does not silently produce a different trainer:
 | vcpkg | `04a9d8e5` (2026.07.29) | `VCPKG_REF` |
 | gsplat (renders and evaluation only) | `28e794ca` (1.6.0), torch 2.9.1+cu130 | `GSPLAT_REF` |
 | pycolmap-cuda12 | 4.2.1 | edit `setup_sfm_venv.sh` |
+| pycolmap on a Mac | pgodlews/colmap `0fea5683` (`metal-sift-lanxinger`, COLMAP 4.2.0-dev), torch 2.14.1 (MPS) | `COLMAP_REF` in `setup_mac.sh` |
 
 The LichtFeld patches only add options (`--save-steps`, and SIGUSR1 for a
 snapshot in headless mode; see each patch's header) and change no default, so

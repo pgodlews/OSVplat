@@ -85,6 +85,8 @@ jobs:
         run: python3 scripts/test_imu_select.py
       - name: test_upright.py
         run: python3 scripts/test_upright.py
+      - name: test_sift_backend.py
+        run: python3 scripts/test_sift_backend.py
       - name: test_benchmark.py (CPU part; GPU part skips without CUDA)
         run: python3 scripts/test_benchmark.py
 

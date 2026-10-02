@@ -123,12 +123,32 @@ def frame_number(name):
     return m.group(1)
 
 
+def grid_device(dev):
+    """Where the sampling grids are computed: on `dev`, except on MPS.
+
+    The grids are float64 until their last line and Metal has no float64, so
+    there they are built on the CPU and moved over as float32. CUDA keeps
+    building them on the GPU: its trigonometry differs from the CPU's in the
+    last bits, and moving it would change pixels the cache keys do not cover.
+    """
+    return torch.device("cpu") if dev.type == "mps" else dev
+
+
+def pick_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    raise SystemExit("81_fisheye_stitch.py needs a GPU torch can use (CUDA, or MPS on a Mac)")
+
+
 def stitch(a, L, dev):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     W, _ = size_of(L[0])
     erp_w, erp_h = 2 * W, W
-    grids = [erp_grid(l, M, a.fscale, dev, erp_w, erp_h) for l, M in zip(L, world_to_cams(L))]
+    grids = [tuple(t.to(dev) for t in erp_grid(l, M, a.fscale, grid_device(dev), erp_w, erp_h))
+             for l, M in zip(L, world_to_cams(L))]
     wsum = (grids[0][1] + grids[1][1]).clamp_min(1e-6)
     names = sorted(p.name for p in (Path(a.images) / "lens0").glob("*.jpg"))[: a.limit or None]
     t = time.time()
@@ -150,7 +170,8 @@ def stitch(a, L, dev):
 
 
 def masks(a, L, dev):
-    grids = [fish_grid(l, M, a.fscale, dev, a.valid_radius) for l, M in zip(L, world_to_cams(L))]
+    grids = [tuple(t.to(dev) for t in fish_grid(l, M, a.fscale, grid_device(dev), a.valid_radius))
+             for l, M in zip(L, world_to_cams(L))]
     names = sorted(p.name for p in (Path(a.images) / "lens0").glob("*.jpg"))[: a.limit or None]
     for i in (0, 1):
         (Path(a.out) / f"lens{i}").mkdir(parents=True, exist_ok=True)
@@ -184,7 +205,7 @@ def main():
     ap.add_argument("--valid-radius", type=float, default=0.0)
     ap.add_argument("--limit", type=int, default=0)
     a = ap.parse_args()
-    dev = torch.device("cuda")
+    dev = pick_device()
     L = lenses(a.calib)
     with torch.no_grad():
         (stitch if a.cmd == "stitch" else masks)(a, L, dev)

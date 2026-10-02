@@ -60,13 +60,19 @@ def score(f):
     return float(cv2.Laplacian(img, cv2.CV_64F).var())
 
 
+# ffmpeg's hardware decoder: NVDEC on the Linux hosts, VideoToolbox on a Mac
+# (same frames as the software decoder there, byte for byte: 2836 of 2836 JPEGs
+# on an Avata 360 clip). The queue's frames stage reads the same variable.
+HWACCEL = os.environ.get("SPLAT_HWACCEL") or ("videotoolbox" if sys.platform == "darwin" else "cuda")
+
+
 def decode(src, cand, fps, start, duration):
     for d in cand:
         d.mkdir(parents=True, exist_ok=True)
     t = time.time()
     trim = (["-ss", str(start)] if start else []) + (["-t", str(duration)] if duration else [])
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "cuda",
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", HWACCEL,
          *trim, "-i", src,
          "-filter_complex", f"[0:v:0]fps={fps}[a];[0:v:1]fps={fps}[b]",
          "-map", "[a]", "-q:v", "2", str(cand[0] / "%05d.jpg"),

@@ -9,6 +9,12 @@ workstation below: the tools, the queue service and its web UI. You can open
 the UI from any other computer on your network, but there is nothing to install
 anywhere else.
 
+An Apple silicon Mac can run the stages before training (frames, select, mask,
+SfM) and hand the result to a CUDA machine: `scripts/setup_mac.sh`, described in
+[how-it-works.md](how-it-works.md#prep-on-apple-silicon). It needs Xcode with
+its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), and
+`brew install ffmpeg micromamba`.
+
 ## Requirements
 
 | | Validated on | Minimum (expected) |

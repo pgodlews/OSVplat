@@ -13,6 +13,8 @@ docs/; this file is the rules that are not visible from the code.
   so heavy work belongs in a script, not in `queue/app/`.
 - `scripts/setup_*.sh` — tool builds, shared by the native install and the
   Dockerfile. Keep them runnable without a GPU (`CUDA_ARCH` set explicitly).
+  `setup_mac.sh` is the exception: prep-only tools for an Apple silicon Mac
+  (docs/how-it-works.md, "Prep on Apple silicon"), with its own pins.
 
 ## Tests
 
@@ -27,6 +29,7 @@ python3 queue/test_debugdump.py && python3 queue/test_handoff.py
 python3 queue/test_checkpoint.py
 python3 scripts/test_avata_motion.py && python3 scripts/test_imu_select.py
 python3 scripts/test_upright.py                        # numpy
+python3 scripts/test_sift_backend.py                   # no dependencies
 python3 scripts/test_benchmark.py                      # numpy + OpenCV; GPU part with torch
 ~/splat/venv/bin/python scripts/test_fisheye.py        # needs pycolmap
 ```

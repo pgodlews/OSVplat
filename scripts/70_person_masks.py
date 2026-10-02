@@ -240,10 +240,22 @@ def main() -> int:
             raise SystemExit(
                 f"--backend maskrcnn segments the COCO person class only; "
                 f"--prompts {args.prompts!r} needs --backend sam3")
-        device = (args.device if torch.cuda.is_available() or args.device == "cpu"
-                  else "cpu")
+        # --device is honoured when torch has it; a Mac has no CUDA, and there
+        # the default falls to MPS before the CPU (10 s a panorama).
+        if args.device == "cpu" or (args.device == "cuda" and torch.cuda.is_available()) \
+                or (args.device == "mps" and torch.backends.mps.is_available()):
+            device = args.device
+        else:
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
         net = maskrcnn_resnet50_fpn_v2(
             weights=MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT).eval().to(device)
+        if device == "mps":
+            # torchvision pastes a full-size mask for every detection above its
+            # own 0.05 threshold, all classes: ~300 a panorama, of which the union
+            # below uses the people above `score`. Dropping the rest before the
+            # mask head gave the same masks 1.7x faster on MPS (40 panoramas, 0
+            # differing pixels). Not yet applied on CUDA: unverified there.
+            net.roi_heads.score_thresh = score
         views = build_views(DEFAULT_VIEWS)
         # Where each equirect pixel lands in each view, kept on the GPU so the
         # view masks are carried back there and only the union comes home.
