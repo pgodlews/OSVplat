@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import (CACHE_ROOT, FISHEYE_FRAMES, FISHEYE_MASKS, FISHEYE_SFM,
-                     FISHEYE_TRAIN, GS_PY, LFS_BIN, OSV_META, PERSON_MASKS,
+                     FISHEYE_TRAIN, GS_PY, HWACCEL, LFS_BIN, OSV_META, PERSON_MASKS,
                      MASK_PY, MODELS_ROOT, RUN_SFM, SELECT_SHARP, SCRIPTS,
                      SFM_PY, SPLAT_ROOT)
 from .jobs import JobConfig
@@ -267,7 +267,7 @@ def frames_argv(ctx: Ctx) -> list[str]:
     # the longest cheap stage in the pipeline reported nothing at all.
     argv = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-progress", "pipe:1", "-nostats",
-            "-hwaccel", "cuda"]
+            "-hwaccel", HWACCEL]
     # -ss before -i is a fast keyframe seek; -t after -i bounds the decode.
     if cfg.input.trim_start:
         argv += ["-ss", f"{cfg.input.trim_start:g}"]
@@ -1108,7 +1108,7 @@ def fisheye_frames_argv(ctx: Ctx) -> list[str]:
     for i in (0, 1):
         (out / f"lens{i}").mkdir(parents=True, exist_ok=True)
     argv = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-progress", "pipe:1", "-nostats", "-hwaccel", "cuda"]
+            "-progress", "pipe:1", "-nostats", "-hwaccel", HWACCEL]
     if cfg.input.trim_start:
         argv += ["-ss", f"{cfg.input.trim_start:g}"]
     if cfg.input.trim_end is not None:

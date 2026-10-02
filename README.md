@@ -163,6 +163,8 @@ see [Capturing for a good splat](docs/how-it-works.md#capturing-for-a-good-splat
 ## Limitations
 
 - Linux + NVIDIA only (driver 580+). Stages call CUDA builds of ffmpeg, COLMAP and LichtFeld.
+  The stages before training also run on an Apple silicon Mac, by hand and outside the
+  queue so far ([how it works](docs/how-it-works.md#prep-on-apple-silicon)).
 - One queue per machine. Multiple GPUs are scheduled, but there is no multi-machine support.
 - Insta360 `.insv` is not supported (its calibration is not decoded). Stitch it
   to an equirectangular MP4 first.

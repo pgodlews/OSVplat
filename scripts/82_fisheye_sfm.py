@@ -47,6 +47,7 @@ import pycolmap
 from colmap_incremental import (DIRECT_SOLVER_MAX_IMAGES, LOCAL_BA_MIN_RESIDUALS_FOR_THREADS,
                                 incremental_mapping)
 from osmo_fisheye import colmap_params, lenses, rig_rotation
+import sift_backend
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -95,11 +96,11 @@ def main():
             raise SystemExit(f"lens{i}: {n_mask} masks for {n_img} images under {masks}; "
                              "refusing to extract features outside the valid circle")
 
+    backend, extraction, extract_kwargs, matching = sift_backend.options(pycolmap, THREADS)
     logging.info(f"START refine_intrinsics={a.refine_intrinsics} fscale={a.fscale} "
-                 f"frames={n_img} overlap={a.overlap} cuda={pycolmap.has_cuda} "
+                 f"frames={n_img} overlap={a.overlap} cuda={pycolmap.has_cuda} sift={backend} "
                  f"direct_solver_max_images={a.direct_solver_max_images}")
     t_all = t = time.time()
-    extraction = pycolmap.FeatureExtractionOptions(use_gpu=True, num_threads=THREADS)
     for i, l in enumerate(L):
         # k1..k4 refitted to the lens's full polynomial: COLMAP has no k5.
         params = colmap_params(l, a.fscale)
@@ -111,7 +112,7 @@ def main():
                 camera_model="OPENCV_FISHEYE",
                 camera_params=",".join(f"{p:.9g}" for p in params),
                 mask_path=str(masks)),
-            extraction_options=extraction)
+            extraction_options=extraction, **extract_kwargs)
     logging.info(f"STAGE extract {time.time() - t:.0f}s")
 
     R10 = rig_rotation(L)  # lens1_from_lens0: stored module extrinsic when present
@@ -129,8 +130,8 @@ def main():
     t = time.time()
     pycolmap.match_sequential(
         db_path,
-        matching_options=pycolmap.FeatureMatchingOptions(use_gpu=True, num_threads=THREADS,
-                                                         skip_image_pairs_in_same_frame=True),
+        matching_options=pycolmap.FeatureMatchingOptions(skip_image_pairs_in_same_frame=True,
+                                                         **matching),
         pairing_options=pycolmap.SequentialPairingOptions(overlap=a.overlap, expand_rig_images=True))
     logging.info(f"STAGE match {time.time() - t:.0f}s")
 

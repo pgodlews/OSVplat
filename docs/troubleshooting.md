@@ -59,6 +59,10 @@ Code comments refer to these by number (`docs/troubleshooting.md #18`).
 
 36. **"only N GB free ... needs at least 20.0 GB (the 20 GB floor)" on a small disk.** Before 0.2.0 every stage wanted `QUEUE_MIN_FREE_GB` (20 GB) free, whatever it would write. On a train-only box that refused training (a 25 GB disk holding a 5.45 GB bundle tar and 5.47 GB of imported cache left 15.9 GB) and, after 114 minutes of training, export (20.0 GB free), for a job that wrote 1.3 GB. Train and export are now sized from the job (queue/README.md, "Disk retention"), and a verified bundle's tar is deleted after import. On older images, set `QUEUE_MIN_FREE_GB=8` for train-only runs, and remove the tar from `QUEUE_ROOT/handoffs/` once it is imported. Since the prep stages are sized from the clip too (frames x pixels, queue/README.md), a prep-only box needs no floor set either; a clip that does not probe still gets the 20 GB floor. Setting `QUEUE_MIN_FREE_GB` by hand turns every estimate off.
 
+37. **Mac: the mask stage crawls (minutes per panorama) with the GPU idle.** torch 2.9.1 with torchvision 0.24.1, the Linux pin, runs `torchvision.ops.roi_align` on MPS at 92 s per 1000 boxes (0.2 s on the CPU). `scripts/setup_mac.sh` installs torch 2.14.1 / torchvision 0.29.1, where it takes 0.02 s. Do not point `QUEUE_MASK_PY` at a venv built from the Linux pins on a Mac.
+
+38. **Mac: SfM logs "Creating SIFT CPU feature extractor" although the build has Metal.** pycolmap sets `use_gpu` from its `device` argument, and `Device.auto` means CUDA only, so `FeatureExtractionOptions(use_gpu=True)` alone is switched off without a word. `scripts/sift_backend.py` passes `device=pycolmap.Device.cuda` for the Metal build; the log line to look for is `Creating SIFT Metal GPU feature extractor`, and `START ... sift=metal` in the SfM log.
+
 ## Fisheye rig traps
 
 - **Read every `DewarpParams` field.** Dropping `k5` (field 15) made an accurate calibration look wrong at the rim, and rebuilding the rig from yaw/pitch/roll instead of `cam_extri_q` (field 28) put the lenses 1.65° apart from where they are.
