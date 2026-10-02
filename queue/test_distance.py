@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "queue"))
 TMP = tempfile.TemporaryDirectory(prefix="avata_queue_test_")
-os.environ.update(SPLAT_ROOT=TMP.name, QUEUE_ROOT=str(Path(TMP.name) / "queue"), QUEUE_GPUS="")
+os.environ.update(SPLAT_ROOT=TMP.name, QUEUE_ROOT=str(Path(TMP.name) / "queue"), QUEUE_GPUS="", QUEUE_PREP_BACKEND="cuda")
 
 import avata_motion
 from app import estimate, main, stages

@@ -10,7 +10,8 @@ the UI from any other computer on your network, but there is nothing to install
 anywhere else.
 
 An Apple silicon Mac can run the stages before training (frames, select, mask,
-SfM) and hand the result to a CUDA machine: `scripts/setup_mac.sh`, described in
+SfM) and hand the result to a CUDA machine: `scripts/setup_mac.sh` builds the
+tools and `queue/run_mac.sh` starts the queue, described in
 [how-it-works.md](how-it-works.md#prep-on-apple-silicon). It needs Xcode with
 its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), and
 `brew install ffmpeg micromamba`.

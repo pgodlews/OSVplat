@@ -362,6 +362,11 @@ IMU_SELECT = "imu-select-1"
 # 4: pycolmap-cuda12 4.2.0 -> 4.2.1 (track-merge colours, rig and two-view
 # fixes that change extraction, matching and mapping).
 FISHEYE_SFM = "fisheye-sfm-4"
+# What an Apple silicon Mac's prep stages make (VideoToolbox frames, MPS masks,
+# Metal SIFT; docs/how-it-works.md, "Prep on Apple silicon"). A term of every
+# key of a job whose prep_backend is "apple", and of no other: bump it when the
+# Mac's output changes for the same options (setup_mac.sh's COLMAP_REF or torch).
+PREP_APPLE = "prep-apple-1"
 # What the API sets for .OSV input when a request leaves select.imu out.
 IMU_SELECT_DEFAULT = False
 
@@ -408,6 +413,11 @@ class JobConfig(Cfg):
     # (handoff.py). Where a job stops changes no stage's output, so it is in no
     # cache key; a prep job and an all-in-one job share every upstream entry.
     run_until: Optional[Literal["frames", "select", "mask", "sfm"]] = None
+    # Which toolchain makes (or made) the prep stages. Set by the host that
+    # creates the job, never by the client, and carried in a handoff bundle so
+    # the train box computes the same keys. "cuda" adds no key term, which
+    # leaves every key made before this field what it was.
+    prep_backend: Literal["cuda", "apple"] = "cuda"
 
     @property
     def is_fisheye(self) -> bool:
@@ -469,7 +479,8 @@ class JobConfig(Cfg):
         return self
 
     def _pipeline_terms(self) -> tuple:
-        return (FISHEYE_PIPELINE,) if self.is_fisheye else ()
+        return ((FISHEYE_PIPELINE,) if self.is_fisheye else ()) \
+            + ((PREP_APPLE,) if self.prep_backend == "apple" else ())
 
     # ------------------------------------------------------- cache keys
     # Each key covers its own params plus the key of everything upstream, so a

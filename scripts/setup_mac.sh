@@ -87,5 +87,5 @@ print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'mps',
 raise SystemExit(0 if torch.backends.mps.is_available() else 'torch has no MPS device here')"
 
 echo
-echo "Done: prep-only tools in $SPLAT_ROOT. The queue does not schedule on a Mac yet"
-echo "(it hands out NVIDIA GPUs); run the scripts by hand as docs/how-it-works.md shows."
+echo "Done: prep-only tools in $SPLAT_ROOT. Start the queue with queue/run_mac.sh;"
+echo "a job needs run_until, and \"sfm\" writes the handoff bundle a CUDA box trains from."

@@ -31,6 +31,7 @@ TMP = tempfile.mkdtemp(prefix="queue_checkpoint_test_")
 os.environ["SPLAT_ROOT"] = TMP
 os.environ["QUEUE_ROOT"] = str(Path(TMP) / "q")
 os.environ["QUEUE_GPUS"] = ""
+os.environ["QUEUE_PREP_BACKEND"] = "cuda"      # a CUDA host, also when run on a Mac
 os.environ["QUEUE_TELEMETRY"] = "1"
 os.environ["QUEUE_RESTORE_POINTS"] = "1"          # local restore points, no upload target
 os.environ["QUEUE_LFS_PYTHON"] = sys.executable

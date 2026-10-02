@@ -26,7 +26,7 @@ python3 queue/test_regressions.py && python3 queue/test_distance.py
 python3 queue/test_telemetry.py && python3 queue/test_remote.py
 python3 queue/test_benchmark.py && python3 queue/test_hoststats.py
 python3 queue/test_debugdump.py && python3 queue/test_handoff.py
-python3 queue/test_checkpoint.py
+python3 queue/test_checkpoint.py && python3 queue/test_prep_backend.py
 python3 scripts/test_avata_motion.py && python3 scripts/test_imu_select.py
 python3 scripts/test_upright.py                        # numpy
 python3 scripts/test_sift_backend.py                   # no dependencies
@@ -37,7 +37,7 @@ python3 scripts/test_benchmark.py                      # numpy + OpenCV; GPU par
 `queue/test_api.py` needs a running service and its token.
 
 Every test must set `SPLAT_ROOT`/`QUEUE_ROOT` to a temporary directory and
-`QUEUE_GPUS=""` **before** importing `app.*` — `config.py` reads them at import
+`QUEUE_GPUS=""` and `QUEUE_PREP_BACKEND="cuda"` **before** importing `app.*` — `config.py` reads them at import
 time, and a test that forgot once wrote into a live queue database.
 
 **CI** (`.github/workflows/tests.yml`) runs everything above except
@@ -56,6 +56,8 @@ to keep the layout rule above honest.
   `colmap_incremental.py`), `FISHEYE_PIPELINE` for any other fisheye script,
   `IMU_SELECT` for gyro selection scoring, `UPRIGHT` for what `upright.py` does
   to a model, `TRAINER` when `LFS_REF` moves (train and export only),
+  `PREP_APPLE` for what a Mac's prep makes (`setup_mac.sh` pins, the MPS and
+  Metal paths; a term only of jobs with `prep_backend: "apple"`),
   `config_version` for everything. Adding an option that
   does not change pixels (like `mask.review`) must *not* enter the key.
   `test_stages.py` pins existing keys; update the pins only on purpose.

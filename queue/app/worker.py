@@ -22,7 +22,7 @@ from typing import Iterator, Optional
 from . import (checkpoints, db, debugdump, gpu, handoff, outputs, resources,
                retention, telemetry)
 from .config import (DEFAULT_MAX_CONCURRENT, FIRST_PROGRESS_GRACE, LOG_ROOT,
-                     SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
+                     PREP_BACKEND, SPLAT_ROOT, STALL_TIMEOUT, START_PAUSED)
 from .jobs import JobConfig, quick_hash
 from .resources import stage_threads, thread_env
 from .stages import (ORDER, STAGES, Ctx, dir_bytes, done_marker, images_dir,
@@ -765,6 +765,15 @@ def run_job(job_id: int, gpu_index: int) -> None:
                 continue
 
             telemetry.notify("stage.started", job_id, stage, "running")
+            # Its prep stages were (or were to be) made by another toolchain:
+            # building one here would cache this machine's output under a key
+            # that says otherwise. Reached only when the stage is not cached,
+            # e.g. a queue database moved between a Mac and a CUDA host.
+            if stage in handoff.UPSTREAM and cfg.prep_backend != PREP_BACKEND:
+                raise RuntimeError(
+                    f"{stage} is not in the cache and this job's prep_backend is "
+                    f"{cfg.prep_backend!r}; this machine preps with {PREP_BACKEND!r}. "
+                    f"Create the job again here")
             info = _build_stage(ctx, job_id, stage, spec, d, key, log_path)
             db.cache_put(key, stage, str(d), dir_bytes(d))
             db.upsert_stage(job_id, stage, key, "done", path=str(d),

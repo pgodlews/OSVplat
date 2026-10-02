@@ -21,6 +21,7 @@ TMP = tempfile.TemporaryDirectory(prefix="queue_benchmark_")
 os.environ["SPLAT_ROOT"] = TMP.name
 os.environ["QUEUE_ROOT"] = str(Path(TMP.name) / "queue")
 os.environ["QUEUE_GPUS"] = ""
+os.environ["QUEUE_PREP_BACKEND"] = "cuda"      # a CUDA host, also when run on a Mac
 os.environ.pop("QUEUE_BENCHMARK", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

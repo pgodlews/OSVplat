@@ -29,6 +29,7 @@ TMP = tempfile.mkdtemp(prefix="queue_handoff_test_")
 os.environ["SPLAT_ROOT"] = TMP
 os.environ["QUEUE_ROOT"] = str(Path(TMP) / "q")
 os.environ["QUEUE_GPUS"] = ""
+os.environ["QUEUE_PREP_BACKEND"] = "cuda"      # a CUDA host, also when run on a Mac
 os.environ["QUEUE_TELEMETRY"] = "1"
 # Most tests import one bundle several times; Cleanup tests the default.
 os.environ["QUEUE_HANDOFF_KEEP"] = "1"

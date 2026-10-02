@@ -15,7 +15,7 @@ import subprocess
 from typing import Iterable, Optional
 
 from . import resources
-from .config import GPUS
+from .config import GPUS, PREP_BACKEND
 
 _caps: Optional[dict[int, str]] = None
 
@@ -87,12 +87,26 @@ def compute_caps() -> dict[int, str]:
     """{index: "8.6"}, probed once: a card does not change under us. {} (and
     retried next time) when nvidia-smi failed, so no card is refused on a guess."""
     global _caps
+    if PREP_BACKEND == "apple":
+        return {}
     if _caps is None:
         rows = _nvidia_smi("gpu=index,compute_cap")
         if rows is None:
             return {}
         _caps = {int(r[0]): r[1] for r in rows if len(r) >= 2 and r[0].isdigit()}
     return _caps
+
+
+def _apple_status(held: set) -> list[dict]:
+    """The one GPU of an Apple silicon Mac, as a row status() would return.
+
+    macOS has no per-process GPU accounting to query, so there is no foreign-
+    process guard here: the GPU is shared with the desktop and never refuses
+    work, and index 0 only serialises the queue's own jobs.
+    """
+    return [{"index": g, "schedulable": True, "unsupported": None, "procs": [],
+             "foreign": [], "busy_foreign": False, "probe_ok": True,
+             "held": g in held, "available": g not in held} for g in GPUS]
 
 
 def status(own_pids: Iterable[int] = (), held: Iterable[int] = ()) -> list[dict]:
@@ -103,6 +117,8 @@ def status(own_pids: Iterable[int] = (), held: Iterable[int] = ()) -> list[dict]
     """
     own = set(own_pids)
     held = set(held)
+    if PREP_BACKEND == "apple":
+        return _apple_status(held)
     procs = compute_procs()
     probe_ok = procs is not None
     procs = procs or {}

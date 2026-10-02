@@ -30,6 +30,7 @@ TMP = tempfile.mkdtemp(prefix="queue_worker_test_")
 os.environ["QUEUE_ROOT"] = TMP
 os.environ["SPLAT_ROOT"] = TMP
 os.environ["QUEUE_GPUS"] = ""
+os.environ["QUEUE_PREP_BACKEND"] = "cuda"      # a CUDA host, also when run on a Mac
 os.environ["QUEUE_CANCEL_GRACE"] = "3"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

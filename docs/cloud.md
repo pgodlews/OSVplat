@@ -282,7 +282,9 @@ sequenceDiagram
 ```
 
 **1. Prep, at home.** Start the prep image like the all-in-one one (Compose
-with `IMAGE=ghcr.io/pgodlews/osvplat:<ver>-prep`, or `docker run`), and queue
+with `IMAGE=ghcr.io/pgodlews/osvplat:<ver>-prep`, or `docker run`), or
+`queue/run_mac.sh` on an Apple silicon Mac
+([how-it-works.md](how-it-works.md#prep-on-apple-silicon)), and queue
 the clip with `run_until`:
 
 ```bash
