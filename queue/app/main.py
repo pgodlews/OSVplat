@@ -25,7 +25,7 @@ from pydantic import BaseModel, ValidationError
 from . import (benchmark, checkpoints, db, debugdump, estimate, gpu, handoff, metrics,
                outputs, preempt, progress, resources, retention, telemetry, worker)
 from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, HANDOFF_ROOT,
-                     IMAGE_VARIANT, METRICS_ENABLED, MODELS_ROOT, QUEUE_TOKEN,
+                     IMAGE_VARIANT, METRICS_ENABLED, MODELS_ROOT, PREP_BACKEND, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, UPRIGHT_DEFAULT, JobConfig, quick_hash
 from . import mask_backends
@@ -125,8 +125,11 @@ def _startup() -> None:
           "auth: NO TOKEN SET -- serving loopback clients only")
     # What the stages will be sized to (resources.py); telemetry has already
     # probed the GPUs, so this costs no extra nvidia-smi call later.
-    print(resources.summary(telemetry.host()["gpus"], worker.max_concurrent()))
-    if GPUS and resources.probe_cuda():
+    line = resources.summary(telemetry.host()["gpus"], worker.max_concurrent())
+    if PREP_BACKEND == "apple":         # no nvidia-smi to fail: gpu._apple_status
+        line = line.split("; ")[0] + "; Apple GPU (Metal, MPS), prep only"
+    print(line)
+    if GPUS and PREP_BACKEND == "cuda" and resources.probe_cuda():
         print(f"ERROR: CUDA does not start on this machine ({resources.CUDA_ERROR}) "
               f"although nvidia-smi lists the GPU. The host is faulty: no job can "
               f"run here, new jobs are refused. On a rented GPU, destroy it and "
@@ -263,6 +266,13 @@ def input_path(rel: str) -> Path:
 
 def _prepare(cfg_in: dict) -> JobConfig:
     cfg = _validate(cfg_in)
+    # The host decides, not the client: the keys must say what really made the
+    # stages, and a config copied from another machine carries that machine's.
+    cfg.prep_backend = PREP_BACKEND
+    if PREP_BACKEND == "apple" and not cfg.is_fisheye:
+        raise HTTPException(400, "a Mac preps raw DJI .OSV clips only: the stitched "
+                            "pipeline needs CUDA (docs/how-it-works.md, \"Prep on "
+                            "Apple silicon\")")
     src = input_path(cfg.input.file)
     # Always recompute. A client-supplied hash is a claim about a file the
     # client may not even have; trusting it let a config copied from another job
@@ -380,8 +390,10 @@ def _refuse_for_image(cfg: Optional[JobConfig] = None) -> None:
     if cfg is None:
         return
     if IMAGE_VARIANT == "prep" and not cfg.run_until:
-        raise HTTPException(400, "this is the prep image: it has no trainer. Set "
-                            "run_until (\"sfm\" writes a handoff bundle to train from)")
+        raise HTTPException(400, ("a Mac has no trainer" if PREP_BACKEND == "apple"
+                                  else "this is the prep image: it has no trainer")
+                            + ". Set run_until (\"sfm\" writes a handoff bundle to "
+                            "train from)")
     if not cfg.run_until and resources.CPU_ERROR:
         raise HTTPException(400, f"this CPU cannot train: {resources.CPU_ERROR}. Set "
                             f"run_until (\"sfm\" writes a handoff bundle), or use a "

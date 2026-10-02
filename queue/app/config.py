@@ -50,6 +50,17 @@ FISHEYE_TRAIN = SCRIPTS / "89_fisheye_train_view.py"  # training masks, then exe
 RESTORE_POINT = SCRIPTS / "licht_restore_point.py"
 LFS_PYTHON = os.environ.get("QUEUE_LFS_PYTHON", "python3")
 
+# What the prep stages run on here. "cuda": NVDEC, SiftGPU and torch CUDA.
+# "apple": VideoToolbox, Metal SIFT and torch MPS (scripts/setup_mac.sh), prep
+# only. The two do not make the same output from the same options, so a job
+# records its backend and the cache keys carry it (JobConfig.prep_backend).
+# QUEUE_PREP_BACKEND overrides the detection; the tests set it to model a CUDA
+# host wherever they run.
+PREP_BACKEND = (os.environ.get("QUEUE_PREP_BACKEND", "").strip().lower()
+                or ("apple" if sys.platform == "darwin" else "cuda"))
+if PREP_BACKEND not in ("cuda", "apple"):
+    raise SystemExit(f"QUEUE_PREP_BACKEND={PREP_BACKEND!r}: expected cuda or apple")
+
 # GPUs the queue is allowed to schedule on. A GPU carrying a foreign compute
 # process is skipped at runtime regardless of this list (see gpu.py).
 
@@ -63,6 +74,8 @@ STALL_TIMEOUT = float(os.environ.get("QUEUE_STALL_TIMEOUT", 900))
 FIRST_PROGRESS_GRACE = float(os.environ.get("QUEUE_FIRST_PROGRESS_GRACE", 1800))
 
 def _all_gpus() -> list[int]:
+    if PREP_BACKEND == "apple":
+        return [0]           # the one Apple GPU: no nvidia-smi to list it (gpu.py)
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
                              capture_output=True, text=True, timeout=10).stdout
@@ -231,7 +244,9 @@ GCP_METADATA_URL = os.environ.get("QUEUE_PREEMPT_GCP_URL",
 # no trainer and only takes jobs that stop at SfM or earlier, "train" has no
 # ffmpeg or mask models and only runs imported handoff bundles. A native
 # install is "all".
-IMAGE_VARIANT = os.environ.get("OSVPLAT_VARIANT", "all").strip().lower() or "all"
+# A Mac has no trainer whatever was installed, so it is a prep install.
+IMAGE_VARIANT = (os.environ.get("OSVPLAT_VARIANT", "").strip().lower()
+                 or ("prep" if PREP_BACKEND == "apple" else "all"))
 if IMAGE_VARIANT not in ("all", "prep", "train"):
     print(f"WARNING: OSVPLAT_VARIANT={IMAGE_VARIANT!r} is not all, prep or train; using all")
     IMAGE_VARIANT = "all"

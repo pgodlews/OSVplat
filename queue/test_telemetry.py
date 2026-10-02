@@ -24,6 +24,7 @@ TMP = tempfile.TemporaryDirectory(prefix="queue_telemetry_")
 os.environ["SPLAT_ROOT"] = TMP.name
 os.environ["QUEUE_ROOT"] = str(Path(TMP.name) / "queue")
 os.environ["QUEUE_GPUS"] = ""
+os.environ["QUEUE_PREP_BACKEND"] = "cuda"      # a CUDA host, also when run on a Mac
 os.environ.pop("QUEUE_TELEMETRY", None)
 os.environ.pop("QUEUE_TELEMETRY_UPLOAD", None)
 os.environ["QUEUE_TELEMETRY_PLACEMENT"] = '{"provider": "test", "price_per_hour": 0.5}'

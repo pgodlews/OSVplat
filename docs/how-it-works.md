@@ -319,11 +319,24 @@ CUDA-only), so a Mac's output is meant to reach a CUDA box as a
 [handoff bundle](cloud.md#split-pipeline). Only the fisheye rig pipeline is
 ported: `30_run_sfm.py` refuses to run without CUDA.
 
-This is the scripts only, not yet the queue. The queue hands stages to NVIDIA
-GPUs and does not schedule on a Mac, so the stages are run by hand with the
-arguments `queue/app/stages.py` builds (`fisheye_*_argv`), and nothing in the
-repo writes a handoff bundle from stages run that way: the bundles trained
-below were assembled by hand around a CUDA run's manifest.
+`queue/run_mac.sh` starts the queue there. It is a prep install: a job must set
+`run_until`, and `"sfm"` writes the bundle. The queue schedules on the Mac's one
+GPU without `nvidia-smi`, so it has no guard against other programs using that
+GPU, and runs one job at a time. Each job records the toolchain that preps it
+(`prep_backend`, set by the host that creates the job), and a Mac's jobs carry
+the term `PREP_APPLE` in every cache key: a reconstruction made on a Mac is not
+the one a CUDA host makes from the same options (SIFT backend, ffmpeg and torch
+all differ), so the two never share a cache entry. A CUDA host imports a Mac's
+bundle under those keys and trains it; it refuses to build a prep stage of such
+a job itself. Images older than this field refuse the bundle, as an unknown
+config field.
+
+Checked on 0141 through the queue (2026-10-02): frames 26 s, select 5 s, mask
+420 s, sfm 1243 s, 28.2 min in all, 473 / 473 rig frames, 510,745 points at
+0.807 px, and a 2.27 GB bundle that a second queue instance set to `cuda`
+imported under the same six keys. That bundle was not trained. The bundles
+trained below were made before the queue ran on a Mac, from the same stages run
+by hand and packed around a CUDA run's manifest.
 
 ```mermaid
 flowchart LR
@@ -432,9 +445,6 @@ two clips the Mac's PSNR is 0.10 dB above and 0.04 dB below the CUDA run's, with
 SSIM and LPIPS within 0.003: no difference in either direction is shown. Not
 measured: SAM 3 on MPS and a Mac smaller than this one.
 
-A reconstruction made on a Mac is not the one a CUDA host makes from the same
-options: the SIFT backend, the decoder's ffmpeg and the torch build all differ.
-Until the cache keys carry that, do not mix the two in one queue cache.
 
 ## Pinned toolchain
 

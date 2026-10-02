@@ -415,7 +415,9 @@ set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_a
 
 None of the nine non-API suites need a GPU, and every one of them sets its
 own `SPLAT_ROOT`/`QUEUE_ROOT`/`QUEUE_GPUS` to a scratch directory before
-importing `app.*`, so they never touch a live queue. `.github/workflows/tests.yml`
+importing `app.*`, so they never touch a live queue, and `QUEUE_PREP_BACKEND`
+(`cuda`, or `apple` in `test_prep_backend.py`) so they model the same host
+wherever they run. `.github/workflows/tests.yml`
 runs the CPU-only subset (everything above except `test_api.py` and
 `test_fisheye.py`, which need a running service and pycolmap respectively) on
 every push and pull request; see [AGENTS.md](../AGENTS.md#tests) for the full

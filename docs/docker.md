@@ -93,6 +93,7 @@ under `./data/cache/export/<key>/`.
 | `HF_TOKEN` | empty | Hugging Face token, only used by `get-weights` |
 | `QUEUE_TOKEN` | generated | Fix the access token instead of generating one |
 | `QUEUE_GPUS` | `all` | Restrict the queue to some GPUs: `0`, `0,1` |
+| `QUEUE_PREP_BACKEND` | detected | `cuda`, or `apple` on a Mac: which toolchain preps here. Set only to test one host's behaviour on another |
 | `QUEUE_METRICS` | 0 | `1` enables a Prometheus `/metrics` endpoint |
 | `QUEUE_TELEMETRY` | 1 | `0` stops writing per-job telemetry; it never leaves the machine unless you set an upload target ([job-telemetry.md](job-telemetry.md)) |
 | `QUEUE_CPUS` | discovered | CPUs the stages are sized to; by default the container's CPU quota ([cloud.md](cloud.md#cpu-and-gpu-discovery)) |

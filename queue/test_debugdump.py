@@ -21,6 +21,7 @@ TMP = tempfile.TemporaryDirectory(prefix="queue_debug_")
 os.environ["SPLAT_ROOT"] = TMP.name
 os.environ["QUEUE_ROOT"] = str(Path(TMP.name) / "queue")
 os.environ["QUEUE_GPUS"] = ""
+os.environ["QUEUE_PREP_BACKEND"] = "cuda"      # a CUDA host, also when run on a Mac
 os.environ["QUEUE_TOKEN"] = "tok-5f2b9c1e7a"
 os.environ["QUEUE_DEBUG"] = "basic"
 os.environ["INPUT_URL"] = "https://s3.example/in/clip.OSV?X-Amz-Signature=abcdef123456"

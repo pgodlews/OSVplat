@@ -35,6 +35,8 @@ import queue as _queue
 import re
 import socket
 import statistics
+import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -100,10 +102,22 @@ def _read(path: str) -> Optional[str]:
         return None
 
 
+def _sysctl(name: str) -> Optional[str]:
+    """One macOS sysctl value, or None (not a Mac, or the key is unknown)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
 def _cpu() -> dict:
     info = _read("/proc/cpuinfo") or ""
     model = next((l.split(":", 1)[1].strip() for l in info.splitlines()
-                  if l.startswith("model name")), None) or platform.processor() or None
+                  if l.startswith("model name")), None) \
+        or _sysctl("machdep.cpu.brand_string") or platform.processor() or None
     flags_line = next((l for l in info.splitlines() if l.startswith("flags")), "")
     flags = set(flags_line.split(":", 1)[1].split()) if ":" in flags_line else set()
     logical = os.cpu_count()
@@ -142,6 +156,8 @@ def _memory() -> dict:
     for l in (_read("/proc/meminfo") or "").splitlines():
         if l.startswith("MemTotal:"):
             total = int(l.split()[1]) * 1024
+    if total is None and (_sysctl("hw.memsize") or "").isdigit():
+        total = int(_sysctl("hw.memsize"))
     limit = None
     raw = (_read("/sys/fs/cgroup/memory.max") or "").strip()
     if raw and raw != "max":
