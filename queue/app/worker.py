@@ -342,8 +342,9 @@ class VramSampler(threading.Thread):
 
 
 def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
-              cache_dir: Path | None = None) -> dict:
-    """Run one stage subprocess, streaming its output to log_path."""
+              cache_dir: Path | None = None, note: str = "") -> dict:
+    """Run one stage subprocess, streaming its output to log_path (after the
+    command line and `note`)."""
     spec = STAGES[stage]
     parse = spec["parse"]
     env = dict(os.environ)
@@ -370,7 +371,8 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
     final_step = ctx.cfg.train.effective_iters
 
     with log_path.open("wb") as log:
-        log.write(f"$ {' '.join(argv)}\n".encode())
+        # debugdump reads the command back from the first line.
+        log.write(f"$ {' '.join(argv)}\n{note}".encode())
         log.flush()
         proc = subprocess.Popen(
             argv, cwd=str(SPLAT_ROOT), env=env, stdout=subprocess.PIPE,
@@ -597,6 +599,19 @@ def _claim_stage(ctx: Ctx, job_id: int, stage: str, spec: dict, d: Path,
         waited += CACHE_WAIT_POLL
 
 
+def _eviction_note(evicted: dict | None) -> str:
+    """Log lines for the cache entries evicted to make room for this stage."""
+    if not evicted:
+        return ""
+    gb = retention.GB
+    lines = [f"cache: evicted {evicted['n_evicted']} entries to make room, "
+             f"{evicted['free_before']/gb:.1f} GB free of {evicted['want']/gb:.1f} GB "
+             f"wanted ({evicted['basis_kind']}), freed {evicted['freed']/gb:.1f} GB"]
+    lines += [f"cache: evicted {e['stage']} {e['key']} ({(e['bytes'] or 0)/gb:.2f} GB)"
+              for e in evicted["evicted"]]
+    return "".join(f"{x}\n" for x in lines)
+
+
 def _build_stage(ctx: Ctx, job_id: int, stage: str, spec: dict, d: Path,
                  key: str, log_path: Path) -> dict:
     """Build one stage into its cache dir, whose lock the caller holds.
@@ -617,7 +632,7 @@ def _build_stage(ctx: Ctx, job_id: int, stage: str, spec: dict, d: Path,
             # Refused at submission too; this catches jobs queued before a
             # restart onto this host (a bundle imported by an older image).
             raise RuntimeError(f"this CPU cannot train: {resources.CPU_ERROR}")
-        retention.ensure_space(stage, space_estimate(ctx, stage))
+        evicted = retention.ensure_space(stage, space_estimate(ctx, stage), job_id)
         db.upsert_stage(job_id, stage, key, "running", path=str(d),
                         log_path=str(log_path), started=time.time())
         # We hold the lock and there is no valid .done, so whatever is
@@ -626,7 +641,11 @@ def _build_stage(ctx: Ctx, job_id: int, stage: str, spec: dict, d: Path,
         reset_stage_dir(d)
         argv = spec["argv"](ctx)
         if argv:
-            run_stage(ctx, stage, argv, log_path, cache_dir=d)
+            run_stage(ctx, stage, argv, log_path, cache_dir=d,
+                      note=_eviction_note(evicted))
+        elif evicted:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(_eviction_note(evicted))
         # run_stage stamped the lock with the stage subprocess's pid,
         # which has exited by now. Take it back before finalizing:
         # finalize can run for minutes (SfM model selection), and a

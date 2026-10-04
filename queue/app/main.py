@@ -606,10 +606,12 @@ def api_job(job_id: int) -> dict:
     # upload: OUTPUT_UPLOAD_URL's result for this job (outputs.py), or None.
     # handoff: the bundle this job wrote or was imported from (handoff.py).
     # checkpoints: its restore points (checkpoints.py); resume: the one it
-    # resumes training from.
+    # resumes training from. evictions: cache entries evicted to make room
+    # for its stages (retention.py).
     return {**_job_dict(row), "upload": outputs.status(job_id),
             "handoff": handoff.status(job_id),
-            "checkpoints": checkpoints.status(job_id), "resume": db.job_resume(row)}
+            "checkpoints": checkpoints.status(job_id), "resume": db.job_resume(row),
+            "evictions": retention.evictions(job_id)}
 
 
 @app.delete("/api/jobs/{job_id}")

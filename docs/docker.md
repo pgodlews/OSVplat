@@ -32,7 +32,7 @@ job data and optional model weights stay in folders on the workstation.
   LichtFeld, a slim CUDA base; [sizes](#three-images)), plus ~20 GB per clip for job data: a 2-minute
   Standard run used 10.8 GB of decoded frames, 3.4 GB of masks, 1 GB of SfM
   and 4.5 GB of training output. The cache keeps them so later jobs on the
-  same clip reuse the work; `Reclaim space` in the UI evicts the oldest.
+  same clip reuse the work; `Reclaim space` in the UI evicts the oldest, training runs last.
 
 ## Start
 

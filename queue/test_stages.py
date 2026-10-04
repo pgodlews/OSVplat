@@ -416,6 +416,8 @@ check("a stage with no history falls back to the floor",
 # box (2026-09-29) was refused train with 15.9 GB free and export with 20.0 GB
 # free, for a job whose stages added 1.3 GB.
 from unittest.mock import patch                                # noqa: E402
+from app import checkpoints, telemetry                         # noqa: E402
+from app import stages as stages_mod                           # noqa: E402
 from app.stages import ESTIMATE_MARGIN, space_estimate         # noqa: E402
 
 db.conn().execute("DELETE FROM cache WHERE cache_key='bigtrain'")
@@ -427,7 +429,10 @@ with tempfile.TemporaryDirectory() as d:
     check("train estimate at 3M / sh 1 is the measured 1.33 GB with margin",
           1.33e9 < est < 3.5e9, f"{est/1e9:.2f} GB")
     sctx.cfg.train.sh_degree = 3
-    check("and grows with SH degree", space_estimate(sctx, "train") > est * 1.5)
+    fixed = stages_mod.TRAIN_FIXED_BYTES
+    check("and grows with SH degree",
+          space_estimate(sctx, "train") / ESTIMATE_MARGIN - fixed
+          > (est / ESTIMATE_MARGIN - fixed) * 1.5)
     check("export has nothing to estimate before train wrote anything",
           space_estimate(sctx, "export") is None)
     (Path(d) / "splat_30000.ply").write_bytes(b"x" * 1000)
@@ -437,6 +442,27 @@ with tempfile.TemporaryDirectory() as d:
           space_estimate(sctx, "export") == ESTIMATE_MARGIN * 1200)
     check("a prep stage has no estimate when the clip does not probe",
           space_estimate(sctx, "sfm") is None)
+
+# 12b'. Snapshots are charged what project.licht measured, not 1.8x the PLY
+# each plus copies (issue #28): 6M splats, SH 3, 100k steps, a snapshot every
+# 10k grew the train dir ~15.7 GB and was estimated at 69.9 GB; at 9M the
+# estimate (104 GB) outgrew the disk and evicted the 6M job's project.licht.
+with tempfile.TemporaryDirectory() as d:
+    sctx = make_ctx(Path(d), 100000)
+    t = sctx.cfg.train
+    t.max_cap, t.sh_degree, t.checkpoint_every = 6_000_000, 3, 10000
+    with patch.object(checkpoints, "CHECKPOINT_UPLOAD", {}), \
+            patch.object(checkpoints, "LOCAL", False):
+        est6 = space_estimate(sctx, "train")
+        check("9 snapshots at 6M / SH 3 cover the measured 15.7 GB, within 1.5x",
+              15.7e9 < est6 < 1.5 * 15.7e9, f"{est6/1e9:.1f} GB")
+        t.max_cap = 9_000_000
+        est9 = space_estimate(sctx, "train")
+        check("and 9M / SH 3 fits the 98 GB that refused it, with room to spare",
+              est9 < 50e9, f"{est9/1e9:.1f} GB")
+    with patch.object(checkpoints, "LOCAL", True):
+        check("restore points add a copy of the live file and the cleaned one",
+              est9 < space_estimate(sctx, "train") < 2.5 * est9)
 
 # 12c. The prep stages are sized from the frames they handle and the clip's
 # pixels, against 0141 (Avata 360, 2x 3840^2 lenses, 141.8 s at 10 fps, 473
@@ -499,6 +525,45 @@ with patch.object(retention, "gc_cache", lambda **k: quiet), \
     with patch.object(retention, "MIN_FREE_SET", True):
         check("QUEUE_MIN_FREE_GB set by hand holds for every stage",
               "floor" in (refused("export", 0.5 * GB_) or ""))
+
+# 12d. Eviction takes train entries last: a finished job's train dir holds the
+# only copy of its snapshots and is hours of GPU to rebuild (issue #28). And
+# what was evicted is recorded with the job that needed the room.
+db.conn().execute("DELETE FROM cache")
+for key, stage, used in (("oldtrain", "train", 100.0), ("newframes", "frames", 200.0)):
+    db.cache_put(key, stage, str(retention.CACHE_ROOT / stage / key), 7 * GB_)
+    db.conn().execute("UPDATE cache SET last_used=? WHERE cache_key=?", (used, key))
+res = retention.gc_cache(target_free=retention.free_bytes() + 1, dry_run=True)
+check("a newer frames entry goes before an older train entry",
+      [e["key"] for e in res["evicted"]] == ["newframes"], res["evicted"])
+res = retention.gc_cache(target_free=retention.free_bytes() + 14 * GB_, dry_run=True)
+check("and the train entry only when that is not enough",
+      [e["key"] for e in res["evicted"]] == ["newframes", "oldtrain"], res["evicted"])
+db.conn().execute("DELETE FROM cache")
+
+ejob = db.create_job("needs room", {})
+gone = {"n_evicted": 1, "freed": 7 * GB_, "skipped_in_use": 0, "cache_total": 0,
+        "free": 9 * GB_, "evicted": [{"key": "oldtrain", "stage": "train", "bytes": 7 * GB_}]}
+frees = iter([2 * GB_, 9 * GB_])
+with patch.object(retention, "gc_cache", lambda **k: gone), \
+        patch.object(retention, "prune_logs", lambda: None), \
+        patch.object(retention, "prune_renders", lambda: None), \
+        patch.object(retention, "free_bytes", lambda *a: next(frees)), \
+        patch.object(retention, "MIN_FREE_SET", False):
+    made = retention.ensure_space("train", 5 * GB_, ejob)
+check("ensure_space returns what it evicted",
+      made is not None and made["evicted"] == gone["evicted"]
+      and made["free_before"] == 2 * GB_ and made["basis_kind"] == "estimate", made)
+rec = retention.evictions(ejob)
+check("and records it with the job",
+      len(rec) == 1 and rec[0]["stage"] == "train"
+      and rec[0]["evicted"][0]["key"] == "oldtrain", rec)
+tel = telemetry._evictions(ejob)
+check("which telemetry carries, without paths",
+      tel is not None and tel[0]["evicted"] == [{"stage": "train", "key": "oldtrain",
+                                                 "bytes": 7 * GB_}]
+      and "path" not in json.dumps(tel), tel)
+check("a job that evicted nothing has no record", telemetry._evictions(ejob + 1) is None)
 
 # 13. Two smaller cache-correctness rules, both of which showed the previous
 # run's output as if it were this one's.

@@ -1394,17 +1394,22 @@ def _by_input(stitched, fisheye):
 # What train and export will write, for retention.ensure_space. Measured
 # 2026-09-29 (0005, 1914 fisheye images, 3M splats, sh_degree 1): the train
 # directory grew 1.33 GB, as splat_30000.ply 312 MB (26 floats = 104 B per
-# splat), project.licht 936 MB (3x the PLY: parameters plus Adam's two
-# moments), sog 38 MB + spz 54 MB (0.3x), and 77 MB of combined masks.
-# PLY floats per splat: xyz 3, normal 3, opacity 1, scale 3, rotation 4, and
-# 3 colours x (sh_degree+1)^2 SH coefficients.
-TRAIN_GROWTH_PER_PLY = 4.5           # ply 1 + licht 3 + sog/spz 0.3, rounded up
-# Each snapshot beyond LichtFeld's default mid-run one appends a checkpoint to
-# project.licht: 547 MB per generation at 3M splats, SH 1, a 312 MB PLY (issue
-# #10). A restore point briefly needs a copy of the whole live file (all its
-# generations) plus the cleaned one-checkpoint result (checkpoints.py), so at the
-# last snapshot the peak is the live file twice over plus one checkpoint.
-CHECKPOINT_PER_PLY = 1.8
+# splat), project.licht 936 MB, sog 38 MB + spz 54 MB (0.3x the PLY), and
+# 77 MB of combined masks. PLY floats per splat: xyz 3, normal 3, opacity 1,
+# scale 3, rotation 4, and 3 colours x (sh_degree+1)^2 SH coefficients.
+EXPORTS_PER_PLY = 1.3                # ply 1 + sog/spz 0.3
+# project.licht holds one generation per snapshot plus the final one; without
+# train.checkpoint_every, LichtFeld's default mid-run snapshot and the final
+# (2). LichtFeld appends each generation incrementally, so it costs less than
+# a PLY's worth of floats per SH coefficient. Measured per generation: 3M
+# splats, SH 1 (12 coefficients), 936 MB / 2 = 156 B per splat (a cleaned
+# one-checkpoint file: 467 MB, the same); 6M, SH 3 (48), 13.86 GB / 10 =
+# 231 B (issue #28, 0.93x the PLY). The line through both: 131 B + 2.1 B per
+# coefficient. The old 1.8x the PLY per snapshot, plus a copy of the file,
+# put a 9M, SH 3 run with 9 snapshots at 104 GB and evicted a finished job's
+# project.licht to make room for it.
+LICHT_GEN_BASE = 131                 # bytes per splat per generation
+LICHT_GEN_PER_COEF = 2.1             # bytes per splat per SH coefficient
 TRAIN_FIXED_BYTES = 1_000_000_000    # masks, metrics, logs; 77 MB measured
 ESTIMATE_MARGIN = 1.25
 
@@ -1488,12 +1493,19 @@ def space_estimate(ctx: Ctx, stage: str) -> Optional[float]:
         frames = n if stage == "frames" else _n_panos(ctx, n)
         return PREP_MARGIN * frames * px * PREP_BYTES_PER_PX[stage]
     if stage == "train":
+        from . import checkpoints            # checkpoints imports this module
         t = ctx.cfg.train
-        ply = t.max_cap * 4 * (14 + 3 * (t.sh_degree + 1) ** 2)
+        coefs = 3 * (t.sh_degree + 1) ** 2
+        ply = t.max_cap * 4 * (14 + coefs)
+        gen = t.max_cap * (LICHT_GEN_BASE + LICHT_GEN_PER_COEF * coefs)
         snapshots = len(t.checkpoint_steps())
-        # beyond the default mid-run generation, then the copy and the result
-        extra = (max(0, snapshots - 1) + (snapshots + 1 if snapshots else 0)) * CHECKPOINT_PER_PLY
-        return ESTIMATE_MARGIN * (ply * (TRAIN_GROWTH_PER_PLY + extra) + TRAIN_FIXED_BYTES)
+        gens = snapshots + 1 if snapshots else 2
+        if snapshots and checkpoints.enabled():
+            # A restore point at the last snapshot: a copy of the live file
+            # (its generations so far), the cleaned one-checkpoint result, and
+            # the previous restore point's tar until the new one replaces it.
+            gens += snapshots + 2
+        return ESTIMATE_MARGIN * (ply * EXPORTS_PER_PLY + gens * gen + TRAIN_FIXED_BYTES)
     if stage == "export":
         src = ctx.dir("train")
         size = sum(p.stat().st_size for pat in ("*.ply", "*.sog", "*.spz", "*.html")

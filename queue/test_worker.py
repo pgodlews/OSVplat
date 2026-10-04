@@ -288,6 +288,30 @@ worker.retention.ensure_space = _real_space
 check("a disk-space refusal still fails the stage", raised)
 check("and releases the stage lock", not lock_path(d2).exists())
 
+# 12. What the preflight evicted goes in the stage's log, under the command
+# line (debugdump reads the command from the first line). It was a line in the
+# service's stdout only (issue #28).
+d3 = Path(TMP) / "cache" / "select" / "evicted"
+d3.mkdir(parents=True)
+take_lock(d3, os.getpid())
+GB = worker.retention.GB
+worker.retention.ensure_space = lambda stage, *_: {
+    "n_evicted": 1, "freed": 7 * GB, "want": 8 * GB, "free_before": 2 * GB,
+    "basis_kind": "estimate",
+    "evicted": [{"key": "oldtrain", "stage": "train", "bytes": 7 * GB}]}
+log3 = Path(TMP) / "logs" / "evicted.log"
+try:
+    worker._build_stage(ctx, jid, "select",
+                        {"argv": lambda c: [sys.executable, "-c", "print('hi')"],
+                         "finalize": None, "prepare": None},
+                        d3, "evicted", log3)
+finally:
+    worker.retention.ensure_space = _real_space
+lines = log3.read_text().splitlines()
+check("the stage log names what was evicted for it",
+      any("evicted train oldtrain" in x for x in lines), lines)
+check("under the command line", lines[0].startswith("$ "), lines[:2])
+
 print()
 print("FAILURES:", fails if fails else "none")
 raise SystemExit(1 if fails else 0)
