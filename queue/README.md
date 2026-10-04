@@ -88,11 +88,18 @@ The floor was also too much for the stages that come last. A train-only box
 (the split pipeline, 2026-09-29) was refused training with 15.9 GB free and,
 on a second try, export with 20.0 GB free after 114 minutes of training, for
 a job whose train and export added 1.3 GB together. So train and export are
-sized from the job (`stages.space_estimate`): train from `max_cap` and the SH
-degree (the PLY is 4 × (14 + 3 × (sh+1)²) bytes per splat, and LichtFeld
-writes about 4.5 times that with `project.licht`, SOG and SPZ, measured at
-3M splats, SH 1), export from the size of the exports its result tar packs,
-each with a 1.25 margin.
+sized from the job (`stages.space_estimate`): train from `max_cap`, the SH
+degree and the snapshots it takes, export from the size of the exports its
+result tar packs, each with a 1.25 margin. Train is the PLY (4 × (14 + 3 ×
+(sh+1)²) bytes per splat) plus SOG and SPZ, 1.3 times the PLY, and
+`project.licht` at one generation per `train.checkpoint_every` snapshot plus
+the final one (two without snapshots), about 131 + 2.1 bytes per splat per SH
+coefficient each: 156 B at SH 1 (3M splats, 936 MB for two generations) and
+231 B at SH 3 (6M, 13.86 GB for ten). A restore point (`CHECKPOINT_UPLOAD_URL`
+or `QUEUE_RESTORE_POINTS`) adds a copy of the live file, the cleaned
+checkpoint and the previous restore point. The old model, 1.8 times the PLY
+per snapshot plus a copy of the file, asked 104 GB for a 9M, SH 3 run with 9
+snapshots that writes about 23 (issue #28).
 
 The prep stages had the same problem on rented boxes: a prep-only box
 (2026-09-30, 21 GB disk) had to be launched with the floor set by hand, and its
@@ -109,7 +116,11 @@ history if that is larger. A clip that does not probe leaves the prep stages
 to the flat floor. A `QUEUE_MIN_FREE_GB` set by hand still holds for every
 stage, and the estimates are then not used.
 
-Eviction is least-recently-used and conservative: it skips any entry an
+Eviction is least-recently-used, with train entries last, and conservative:
+a finished job's train directory holds the only copy of its snapshots and its
+resume point, and is hours of GPU to rebuild, where the other stages come back
+from the clip in minutes (issue #28: LRU alone took a finished job's
+`project.licht` for the next job's training). It skips any entry an
 unfinished job depends on --- queued, running, **or parked in
 `awaiting_review`** --- and any entry whose directory is locked by a live
 process. The review state is the one that is easy to miss and the worst to get
@@ -121,6 +132,10 @@ sweep would likewise lose the shared SfM it was built around. It measures
 what it actually reclaimed rather than trusting the recorded size, because
 `select/` hardlinks its panoramas out of `frames/` — deleting one of the pair
 frees nothing until the other goes too.
+
+What a stage's preflight evicted is kept with the job that needed the room:
+in the stage's log (`cache: evicted ...` under the command line), in the job API
+(`evictions`, from `runs/job<id>/evictions.json`) and in its telemetry.
 
 ## Stage cache
 
@@ -387,7 +402,8 @@ GET    /api/status              pause state, per-GPU status
 POST   /api/pause               {paused: bool}
 GET    /api/cache               cache entries, sizes, free space, retention settings
 POST   /api/cache/gc[?dry_run&budget_gb]
-                                evict least-recently-used entries. Never touches
+                                evict least-recently-used entries, train
+                                entries last. Never touches
                                 a cache a queued or running job needs, or one
                                 whose dir is locked by a live process.
 ```

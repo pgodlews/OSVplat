@@ -11,12 +11,13 @@ whose directory is locked by a live process.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
 from pathlib import Path
 
-from . import db
+from . import db, telemetry
 from .config import CACHE_ROOT, LOG_ROOT, QUEUE_ROOT, RENDER_ROOT
 from .stages import lock_holder_alive, read_lock
 
@@ -77,9 +78,23 @@ def protected_keys() -> set[str]:
     return {r["cache_key"] for r in rows}
 
 
+# Evicted only after every other stage's entries. A finished job's train
+# directory holds the only copy of its snapshots (project.licht) and its resume
+# point, and is hours of GPU to rebuild; frames, select, mask, sfm and export
+# come back from the clip or from it. LRU alone took a finished job's
+# project.licht, nine snapshots, minutes after it ended (issue #28).
+EVICT_LAST = ("train",)
+
+
+def eviction_order(rows: list) -> list:
+    """Cache rows oldest use first, with EVICT_LAST stages after the rest."""
+    oldest_first = list(reversed(rows))             # list_cache is newest-first
+    return sorted(oldest_first, key=lambda r: r["stage"] in EVICT_LAST)
+
+
 def gc_cache(target_free: float = 0.0, budget: float | None = None,
              dry_run: bool = False) -> dict:
-    """Evict least-recently-used cache entries.
+    """Evict cache entries, least recently used first, train entries last.
 
     Stops as soon as both conditions hold: total cache bytes within `budget`
     and free disk at or above `target_free`.
@@ -96,8 +111,7 @@ def gc_cache(target_free: float = 0.0, budget: float | None = None,
     # (their recorded size: an upper bound, since select/ hardlinks frames/).
     would_free = 0
 
-    # Oldest use first -- list_cache is newest-first.
-    for row in reversed(db.list_cache()):
+    for row in eviction_order(db.list_cache()):
         over_budget = budget is not None and total > budget
         short_of_free = free_bytes() + would_free < target_free
         if not over_budget and not short_of_free:
@@ -200,13 +214,51 @@ def stage_floor(estimated: bool) -> float:
     return MIN_FREE_BYTES
 
 
-def ensure_space(stage: str, estimate: float | None = None) -> None:
+def evictions_path(job_id: int) -> Path:
+    return telemetry.run_dir(job_id) / "evictions.json"
+
+
+def evictions(job_id: int) -> list[dict]:
+    """Cache entries evicted to make room for this job's stages."""
+    try:
+        out = json.loads(evictions_path(job_id).read_text())
+    except (OSError, ValueError):
+        return []
+    return [e for e in out if isinstance(e, dict)] if isinstance(out, list) else []
+
+
+def record_evictions(job_id: int, stage: str, res: dict) -> None:
+    """Keep what ensure_space evicted for `stage` with the job that needed it.
+
+    It was a line in the service's stdout only, so the client of a job whose
+    train directory went (issue #28) had no way to see it. Never raises: a
+    record that cannot be written must not fail the stage.
+    """
+    rec = {"stage": stage, "at": round(time.time(), 1), "want": res.get("want"),
+           "basis": res.get("basis_kind"), "free_before": res.get("free_before"),
+           "freed": res["freed"], "evicted": res["evicted"]}
+    try:
+        p = evictions_path(job_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(evictions(job_id) + [rec], indent=1))
+        os.replace(tmp, p)
+    except OSError as exc:
+        print(f"job {job_id}: evictions before {stage} not recorded: {exc}")
+
+
+def ensure_space(stage: str, estimate: float | None = None,
+                 job_id: int | None = None) -> dict | None:
     """Preflight before a stage writes. Frees what it can, then refuses.
 
     Wants the largest of: the floor (stage_floor), the stage's history
     (stage_need) and the caller's estimate of what it will write. Raising here
     costs nothing; discovering it at 80% of a 95-minute training run costs the
     run, and leaves a truncated export behind for the finalizer to reject.
+
+    Returns the eviction it made (gc_cache's result plus `want`, `basis_kind`
+    and `free_before`) when it evicted anything, else None; with a job id, it
+    is also recorded with the job (record_evictions).
     """
     floor = stage_floor(estimate is not None)
     hist = stage_need(stage)
@@ -216,20 +268,27 @@ def ensure_space(stage: str, estimate: float | None = None) -> None:
     # wins when this stage has written more before.
     want = max(hist, est + floor) if headroom else max(floor, hist, est)
     if want == hist and hist > (est + floor if headroom else max(floor, est)):
-        basis = f"{NEED_SAFETY:g}x the largest {stage} entry on record"
+        kind, basis = "history", f"{NEED_SAFETY:g}x the largest {stage} entry on record"
     elif headroom:
-        basis = (f"the estimate for this job's {stage}, {est/GB:.1f} GB, "
-                 f"plus {floor/GB:g} GB headroom")
+        kind, basis = "estimate", (f"the estimate for this job's {stage}, {est/GB:.1f} GB, "
+                                   f"plus {floor/GB:g} GB headroom")
     elif want == est and est > floor:
-        basis = f"the estimate for this job's {stage}"
+        kind, basis = "estimate", f"the estimate for this job's {stage}"
     else:
-        basis = f"the {MIN_FREE_BYTES/GB:.0f} GB floor"
-    if free_bytes() >= want:
-        return
+        kind, basis = "floor", f"the {MIN_FREE_BYTES/GB:.0f} GB floor"
+    before = free_bytes()
+    if before >= want:
+        return None
     res = gc_cache(target_free=want)
+    made = None
     if res["n_evicted"]:
-        print(f"cache GC before {stage}: evicted {res['n_evicted']} entries, "
-              f"freed {res['freed']/GB:.1f} GB")
+        made = {**res, "want": round(want), "basis_kind": kind, "free_before": before}
+        print(f"cache GC before {stage}{'' if job_id is None else f' of job {job_id}'}: "
+              f"evicted {res['n_evicted']} entries "
+              f"({', '.join(e['stage'] + ' ' + e['key'] for e in res['evicted'])}), "
+              f"freed {res['freed']/GB:.1f} GB toward {want/GB:.1f} GB ({basis})")
+        if job_id is not None:
+            record_evictions(job_id, stage, made)
     prune_logs()
     prune_renders()
     have = free_bytes()
@@ -240,6 +299,7 @@ def ensure_space(stage: str, estimate: float | None = None) -> None:
             f"entries could not be evicted because unfinished jobs depend on "
             f"them. Free space, lower QUEUE_MIN_FREE_GB or QUEUE_NEED_SAFETY, "
             f"or clear the cache")
+    return made
 
 
 def status() -> dict:

@@ -169,6 +169,7 @@ for this job, which is what a rented container disk is sized on.
 | stage `disk_free_bytes_min` | the least free space during the stage |
 | `host.disk.used_peak_bytes`, `host.disk.free_min_bytes` | the same over the whole job |
 | `host.disk.job_growth_peak_bytes` | peak used minus used at the start of the stage that ran first: what the job itself wrote on top of the clip and what was already there. Cached stages write little, so compare jobs that ran every stage |
+| `evictions` | cache entries evicted to make room for this job's stages, one record per preflight that evicted: `stage` (the one that needed the room), `at`, `want` and `free_before` (bytes), `basis` (`estimate`, `history` or `floor`: what set `want`), `freed`, and `evicted`: `stage`, `key` (the cache key, a hash of options), `bytes` per entry. Null when nothing was evicted |
 
 ### Machine load
 

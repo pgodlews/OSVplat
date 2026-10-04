@@ -345,7 +345,7 @@ def export(job_id: int) -> dict:
 
     # The tar is a copy of what it packs, written after the last stage's space
     # check: 2.18 GB on a 21 GB prep box that had 8.8 GB free (0141, 2026-09-30).
-    retention.ensure_space("handoff", float(_payload_bytes(roots)))
+    retention.ensure_space("handoff", float(_payload_bytes(roots)), job_id)
 
     # Random, never derived from the clip, a path or the host: telemetry
     # carries it on both sides and it must name nothing (docs/job-telemetry.md).

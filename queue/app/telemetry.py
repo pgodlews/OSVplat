@@ -833,6 +833,23 @@ def _checkpoints(job_id: int) -> Optional[dict]:
     return out
 
 
+def _evictions(job_id: int) -> Optional[list]:
+    """Cache entries evicted to make room for this job's stages, or None.
+
+    Stages, cache keys (hashes of options), sizes and the kind of requirement
+    that asked for the room; never a path.
+    """
+    from . import retention                  # retention imports this module
+    out = [{"stage": e.get("stage"), "at": _num(e.get("at")), "want": _num(e.get("want"), int),
+            "basis": e.get("basis"), "free_before": _num(e.get("free_before"), int),
+            "freed": _num(e.get("freed"), int),
+            "evicted": [{"stage": x.get("stage"), "key": x.get("key"),
+                         "bytes": _num(x.get("bytes"), int)}
+                        for x in e.get("evicted") or [] if isinstance(x, dict)]}
+           for e in retention.evictions(job_id)]
+    return out or None
+
+
 def _resumed(row) -> tuple[Optional[dict], Optional[dict]]:
     """The restore point this job resumed from, and RESUME_URL's download of it."""
     r = db.job_resume(row)
@@ -938,6 +955,7 @@ def build(job_id: int) -> Optional[dict]:
                       "handoff": handoff_xfer, "resume": resume_xfer},
         "handoff": handoff,
         "checkpoints": _checkpoints(job_id),
+        "evictions": _evictions(job_id),
         "resumed": resumed,
         "placement": TELEMETRY_PLACEMENT or None,
         "timeline": {"host_boot": _boot_time(),
