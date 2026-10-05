@@ -146,6 +146,36 @@ Evaluated over identical pixels, the two produce equivalent splats (scene-pixel
 PSNR 21.33 vs 21.41 dB, against 20.91 unmasked). Pick on licence and setup, not
 quality. SAM 3 can mask other things too (`"prompts": ["person", "dog"]`).
 
+**The vehicle carrying the camera.** A boat, car or bike the camera rides on is
+camera-fixed in the same way, and Mask R-CNN cannot mask it. With SAM 3, add it
+to the prompts and name it in `attached`, for example on a boat:
+
+```json
+"mask": {"enabled": true, "backend": "sam3",
+         "prompts": ["person", "boat", "boat deck", "life buoy"],
+         "attached": ["boat"]}
+```
+
+An `attached` prompt keeps only the instances that reach 60° below the horizon
+(`ATTACHED_LAT_DEG` in `70_person_masks.py`), i.e. the vehicle you ride on, and
+leaves the same kind of object out in the scene unmasked. The test is purely
+geometric, so it applies to any prompt, but it assumes a roughly level
+panorama, and parts of the vehicle that stay above the horizon need an
+unfiltered prompt of their own. Do not put `"person"` in `attached`: it would
+mask only the operator and leave passers-by in.
+
+Measured only on a boat so far. On 8 panoramas from a 10-minute River Aire
+water-taxi clip (Osmo 360, handheld on deck), "boat" found one instance per
+frame reaching −82° to −89° (the taxi, 14–16 % of the sphere) and 36 more that
+never went below −15° (moored boats along the quay), and those 36 were dropped.
+"boat deck" fills the deck floor that "boat" leaves out. The life rings stacked
+on the cabin roof sit above the horizon, out of reach of `attached`, so they get
+the unfiltered "life buoy" prompt: it found the stack in 4 of 4 frames (scores
+0.41-0.77), plus one ring on a quay. A dark rope pile at the nadir is still
+missed. The first three prompts (person, boat, boat deck) cost 3.9 s a panorama
+on an M5 Max (MPS, equirect + nadir view); the four-prompt set was not timed.
+Training on the result has not been compared with an unmasked run yet.
+
 For `.OSV` input the masker runs on a calibrated stitch and the masks are
 carried back into each fisheye through the same geometry. With
 `"mask": {"review": true}` the job pauses after masking and releases its GPU
@@ -443,7 +473,9 @@ both trained as above, 2026-10-02:
 Each column is evaluated against its own decoded frames, one run each. Over the
 two clips the Mac's PSNR is 0.10 dB above and 0.04 dB below the CUDA run's, with
 SSIM and LPIPS within 0.003: no difference in either direction is shown. Not
-measured: SAM 3 on MPS and a Mac smaller than this one.
+measured: a Mac smaller than this one. SAM 3 masks run on MPS in float32 at
+3.9 s a panorama with three prompts (person, boat, boat deck), against 0.53 s
+on a 3090 with one; `setup_mac.sh` installs `transformers` for it.
 
 
 ## Pinned toolchain

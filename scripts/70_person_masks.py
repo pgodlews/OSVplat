@@ -59,6 +59,8 @@ import numpy as np
 from io_pool import WriteBehind, read_ahead
 
 PERSON_LABEL = 1  # COCO
+# --attached keeps an instance only if it reaches this far below the horizon.
+ATTACHED_LAT_DEG = -60.0
 
 # torch and the model libraries are imported inside the backends on purpose:
 # both now run in venv_gs, but an install may still point a backend at its own
@@ -120,6 +122,15 @@ def main() -> int:
                          "exhaustively; anything you do not name is simply not "
                          "masked, which is how 'people and cats but not dogs' "
                          "is expressed -- there is no textual negation.")
+    ap.add_argument("--attached", default="",
+                    help="sam3 only: comma-separated prompts (a subset of "
+                         "--prompts) whose instances are masked only where they "
+                         "reach below ATTACHED_LAT_DEG in the equirect -- the "
+                         "vehicle carrying the camera, not the same kind of "
+                         "object out in the scene. 'boat' masks the boat you "
+                         "ride on and keeps the moored ones as scenery. The "
+                         "nadir view is all attached by construction and is "
+                         "not filtered.")
     ap.add_argument("--model", default=os.path.join(os.path.expanduser(
                         os.environ.get("SPLAT_ROOT", "~/splat")), "models/sam3"),
                     help="sam3 only: local weights directory")
@@ -228,6 +239,10 @@ def main() -> int:
     prompts = [t.strip() for t in args.prompts.split(",") if t.strip()]
     score = args.score if args.score is not None else (
         0.5 if args.backend == "maskrcnn" else 0.3)
+    attached = [t.strip() for t in args.attached.split(",") if t.strip()]
+    if attached and (args.backend != "sam3" or not set(attached) <= set(prompts)):
+        raise SystemExit(f"--attached {args.attached!r} needs --backend sam3 and "
+                         f"must name prompts from --prompts {args.prompts!r}")
 
     if args.backend == "maskrcnn":
         import torch
@@ -293,7 +308,11 @@ def main() -> int:
         import torch
         from PIL import Image
         from transformers import Sam3Model, Sam3Processor
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # MPS runs it in float32 (no fp16 here: it costs Mask R-CNN detections
+        # on the Mac and is untested for SAM 3); CPU is the last resort, about
+        # ten times slower.
+        device = ("cuda" if torch.cuda.is_available() else
+                  "mps" if torch.backends.mps.is_available() else "cpu")
         dtype = torch.float16 if device == "cuda" else torch.float32
         proc = Sam3Processor.from_pretrained(args.model)
         net = Sam3Model.from_pretrained(args.model, dtype=dtype).to(device).eval()
@@ -304,7 +323,14 @@ def main() -> int:
         # cannot be recovered from any other frame.
         views = build_views([(0, -90)]) if args.nadir_view else []
 
-        def sam(img_bgr, h, w_):
+        # Lowest row an attached instance must reach: ATTACHED_LAT_DEG below
+        # the horizon. The deck of the boat the camera rides on runs into the
+        # nadir in every frame; a moored boat sits within ~10 degrees of the
+        # horizon (measured on a River Aire water-taxi clip, see docs).
+        attached_row = int(np.ceil((0.5 - ATTACHED_LAT_DEG / 180.0) * eh))
+        dropped = [0]
+
+        def sam(img_bgr, h, w_, filter_attached=False):
             pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
             inp = proc(images=[pil] * len(prompts), text=prompts,
                        return_tensors="pt").to(device)
@@ -315,19 +341,24 @@ def main() -> int:
                 target_sizes=[(h, w_)] * len(prompts))
             u = np.zeros((h, w_), bool)
             n = 0
-            for r in res:
+            for prompt, r in zip(prompts, res):
                 m, sc = r["masks"], r["scores"]
                 for i in range(len(sc)):
+                    inst = np.asarray(m[i].cpu() if hasattr(m[i], "cpu")
+                                      else m[i]).astype(bool)
+                    if (filter_attached and prompt in attached
+                            and not inst[attached_row:].any()):
+                        dropped[0] += 1
+                        continue
                     n += 1
-                    u |= np.asarray(m[i].cpu() if hasattr(m[i], "cpu")
-                                    else m[i]).astype(bool)
+                    u |= inst
             return u, n
 
         def prepare(work):
             return None
 
         def segment(work, _):
-            found, n = sam(work, eh, ew)
+            found, n = sam(work, eh, ew, filter_attached=True)
             for v in views:
                 tile = cv2.remap(work, v["map_x"], v["map_y"], cv2.INTER_LINEAR,
                                  borderMode=cv2.BORDER_WRAP)
@@ -419,6 +450,8 @@ def main() -> int:
         "backend": args.backend,
         "prompts": prompts,
         "score": score,
+        **({"attached": attached, "attached_lat_deg": ATTACHED_LAT_DEG,
+            "attached_dropped": dropped[0]} if attached else {}),
         "dilate": args.dilate,
         "views": len(views) + (1 if args.backend == "sam3" else 0),
         "colmap_masks": len(list(colmap_dir.glob("*.png"))) if colmap_dir else 0,

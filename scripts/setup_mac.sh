@@ -81,6 +81,9 @@ rm -rf venv_gs
 "$SPLAT_ROOT/venv/bin/python" -m venv venv_gs
 ./venv_gs/bin/pip install -q --upgrade pip
 ./venv_gs/bin/pip install -q torch==2.14.1 torchvision==0.29.1 numpy opencv-python-headless==5.0.0.93
+# The SAM 3 mask backend (weights are still fetched separately, get_mask_weights.sh).
+# Same pin as Linux; it leaves torch alone.
+./venv_gs/bin/pip install -q transformers==5.5.0
 ./venv_gs/bin/python -c "
 import torch, torchvision
 print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'mps', torch.backends.mps.is_available())
