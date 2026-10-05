@@ -408,6 +408,8 @@ def _masker_options(m) -> list[str]:
         opts += ["--model", str(wdir)]
     if MASK_BACKENDS[m.backend]["prompts"]:
         opts += ["--nadir-view"] if m.nadir_view else ["--no-nadir-view"]
+    if m.attached:
+        opts += ["--attached", ",".join(m.attached)]
     return opts
 
 

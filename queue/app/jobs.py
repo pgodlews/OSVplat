@@ -158,6 +158,11 @@ class MaskCfg(Cfg):
     # Hold the job after masking and wait for a human to look at the contact
     # sheet before spending a GPU-hour on training.
     review: bool = False
+    # Prompts masked only where they run into the nadir: the vehicle carrying
+    # the camera, not the same kind of object out in the scene ("boat" masks
+    # the water taxi you sit in, not the narrowboats moored along the bank).
+    # A subset of `prompts`, sam3 only (70_person_masks.py --attached).
+    attached: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_backend(self):
@@ -173,6 +178,14 @@ class MaskCfg(Cfg):
                 "cache key would describe the wrong run")
         if not self.prompts:
             raise ValueError("at least one prompt is required")
+        if self.attached and not MASK_BACKENDS[self.backend]["prompts"]:
+            raise ValueError(f"mask.attached needs a prompt-capable backend, "
+                             f"not {self.backend!r}")
+        if not set(self.attached) <= set(self.prompts):
+            raise ValueError(f"mask.attached {self.attached} must name prompts "
+                             f"from mask.prompts {self.prompts}")
+        # Order does not change a pixel, so it must not change the key.
+        self.attached = sorted(set(self.attached))
         return self
     # None means "the backend's own default" (0.5 maskrcnn, 0.3 sam3). Stored as
     # None rather than resolved, so the two backends cannot collide on one key.
@@ -539,8 +552,11 @@ class JobConfig(Cfg):
         # sentinel: that collapses those configs onto one key WITHOUT moving the
         # key every already-cached unmasked run is stored under.
         m = self.mask if self.mask.enabled else MaskCfg()
+        # attached joins only when set, so every config without it keeps the
+        # key it had before the field existed.
         return key_of("mask", self.k_select(),
-                      m.model_dump(include=MASK_OUTPUT_FIELDS))
+                      m.model_dump(include=MASK_OUTPUT_FIELDS),
+                      *((("attached", m.attached),) if m.attached else ()))
 
     def k_train(self) -> str:
         # Masks change what the trainer optimises, so they belong in the train

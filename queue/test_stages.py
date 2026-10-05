@@ -292,6 +292,32 @@ except Exception as e:                                        # noqa: BLE001
     check("prompts the maskrcnn backend cannot honour are rejected",
           "sam3" in str(e), str(e)[:70])
 
+# 7d. mask.attached (the camera's own vehicle) changes pixels, so it forks the
+# mask key -- but only when set: an empty list must leave every key as it was.
+from app.stages import _masker_options                        # noqa: E402
+m_boat = {**base, "mask": {"enabled": True, "backend": "sam3",
+                           "prompts": ["person", "boat"]}}
+m_boat_off = JobConfig.model_validate(m_boat)
+m_boat_empty = JobConfig.model_validate(
+    {**base, "mask": {**m_boat["mask"], "attached": []}})
+m_boat_on = JobConfig.model_validate(
+    {**base, "mask": {**m_boat["mask"], "attached": ["boat"]}})
+check("an empty attached list keeps the mask key",
+      m_boat_empty.keys() == m_boat_off.keys())
+check("attached forks the mask key", m_boat_on.k_mask() != m_boat_off.k_mask())
+check("and the stage is told about it",
+      "--attached" in _masker_options(m_boat_on.mask)
+      and "--attached" not in _masker_options(m_boat_off.mask))
+for bad, why in ((["dog"], "a prompt not in mask.prompts"),
+                 (None, "a backend without prompts")):
+    mask = ({**m_boat["mask"], "attached": bad} if bad
+            else {"enabled": True, "attached": ["person"]})
+    try:
+        JobConfig.model_validate({**base, "mask": mask})
+        check(f"attached naming {why} is rejected", False, "did not raise")
+    except Exception as e:                                    # noqa: BLE001
+        check(f"attached naming {why} is rejected", "attached" in str(e), str(e)[:70])
+
 # 8. Locking: only one of N racing workers may own a cache dir, and a lock left
 # behind by a dead process must be reclaimable rather than wedging the stage
 # forever. This is the mechanism a sweep leans on when four variants reach the
