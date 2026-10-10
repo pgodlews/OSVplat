@@ -72,7 +72,7 @@ MP4 = {"name": "pano", "input": {"file": "samples/c.mp4", "quick_hash": "q2"},
        "train": {"checkpoint_every": 1000, "iter": 30000, "steps_scaler": 0.1}}
 OSV = {"name": "rig", "input": {"file": "samples/c.OSV", "quick_hash": "q1"}}
 
-# LichtFeld's lines, as 3067e9e0 with scripts/lichtfeld-patches/ prints them.
+# LichtFeld's lines, as 09d33818 with scripts/lichtfeld-patches/ prints them.
 FAKE_TRAINER = Path(TMP) / "fake_trainer.py"
 FAKE_TRAINER.write_text('''
 import os, pathlib, signal, sys, time

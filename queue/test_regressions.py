@@ -275,9 +275,11 @@ class TrainerFlagConflicts(unittest.TestCase):
                 "exposure_correction": True, "bilateral_grid": True}})
         JobConfig.model_validate({**base, "train": {"exposure_correction": True,
                                   "enable_mip": True}})
-        # Refused while the pin (04e4607) crashed with it; fixed upstream (#2074)
-        # and trained through on 0005 at e654717e.
-        JobConfig.model_validate({**base, "train": {"background_improvements": True}})
+        # Removed from LichtFeld in 0.5.4 (#2780), which rejects the flag; the
+        # field stays so stored configs (all False) still load.
+        with self.assertRaisesRegex(ValueError, "background_improvements"):
+            JobConfig.model_validate({**base, "train": {"background_improvements": True}})
+        JobConfig.model_validate({**base, "train": {"background_improvements": False}})
         JobConfig.model_validate({**base, "train": {"bilateral_grid": True}})
         with self.assertRaises(ValueError):     # LichtFeld: replaces PPISP too
             JobConfig.model_validate({**base, "train": {

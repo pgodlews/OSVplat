@@ -239,13 +239,12 @@ summary{cursor:pointer;font-size:12px;color:var(--muted);
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="imuOn" style="width:auto" disabled> <span>Gyro blur veto (raw .OSV only)<span class="i" data-tip="imu">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="uprightOn" style="width:auto" disabled> <span>Upright, in metres with GPS (raw .OSV only)<span class="i" data-tip="upright">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="mip" style="width:auto"> <span>--enable-mip<span class="i" data-tip="mip">i</span></span></label>
-          <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bgimp" style="width:auto"> <span>--background-improvements<span class="i" data-tip="bgimp">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="expcorr" style="width:auto"> <span>--exposure-correction<span class="i" data-tip="expcorr">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="bilat" style="width:auto"> <span>--bilateral-grid<span class="i" data-tip="bilat">i</span></span></label>
           <label style="display:flex;gap:7px;align-items:center"><input type="checkbox" id="ppisp" style="width:auto"> <span>--ppisp<span class="i" data-tip="ppisp">i</span></span></label>
         </div>
         <label>Extra args (verbatim)<span class="i" data-tip="extra">i</span></label>
-        <textarea id="extra" placeholder="--far-seed-dose 4000"></textarea>
+        <textarea id="extra" placeholder="--opacity-reg 0.003"></textarea>
       </details>
 
       <details>
@@ -381,7 +380,6 @@ function buildConfig() {
       max_width: +$('#maxWidth').value,
       eval: $('#evalOn').checked,
       enable_mip: $('#mip').checked,
-      background_improvements: $('#bgimp').checked,
       exposure_correction: $('#expcorr').checked,
       bilateral_grid: $('#bilat').checked,
       ppisp: $('#ppisp').checked,
@@ -790,18 +788,14 @@ const TIPS = {
     comes from, and where the ETA gets the iteration rate it fits per config.`,
   mip: `Mip-splatting anti-aliasing. <b>Measured:</b> did nothing on the reference
     clip — 0.12 dB below the control, at identical cost and identical VRAM.`,
-  bgimp: `Treats the far field (sky, distant trees) separately so it does not
-    turn into grey haze. On a 957-frame Osmo walk it visibly cleared the haze
-    over distant trees, scored 0.06 dB <em>lower</em> on held-out views (PSNR
-    barely sees haze) and trained about 35 % longer. Try it for outdoor clips
-    with a lot of far field. It crashed on the old LichtFeld pin (04e4607).`,
   expcorr: `Per-photo exposure model, for clips whose lighting changes across the
     flight. It scored 0.55 dB below the control on the backyard reference clip —
     but that clip cannot answer the question, since the flag is aimed at the aerial
     runs, where most of the scene sits near infinity. On a 957-frame Osmo walk
     (LichtFeld e654717e) it scored 0.14 dB lower, with the same SSIM and LPIPS,
     and halved the renders' colour bias against the photos. The old pin
-    (04e4607) could paint bright red or yellow pixels with it.`,
+    (04e4607) could paint bright red or yellow pixels with it. LichtFeld 0.5.4
+    turns it on by default for MRNF; the queue keeps it off unless this is ticked.`,
   ppisp: `Learns a per-lens camera response: exposure, white balance and
     vignetting. The exported splat carries none of it, so a viewer shows the
     scene as if taken by an even, vignette-free camera. On a 957-frame Osmo
@@ -811,7 +805,7 @@ const TIPS = {
   bilat: `Per-image bilateral grid, for colour and white-balance drift between
     frames. Not yet tested in this project — there is no measured result either way.`,
   extra: `Passed to the trainer verbatim, split with <code>shlex</code>, so
-    <code>--far-seed-dose "4000 5000"</code> stays a single argument. Repeating a
+    <code>--eval-mask "masks:my masks"</code> stays a single argument. Repeating a
     flag this form already manages is rejected rather than quietly passed twice.`,
   axes: `JSON of dotted config field to a list of values; the queue queues the full
     cross product. Every variant shares one frame dump, selection and SfM through
