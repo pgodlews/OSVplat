@@ -491,7 +491,7 @@ rebuild months later does not silently produce a different trainer:
 | pycolmap-cuda12 | 4.2.1 | edit `setup_sfm_venv.sh` |
 | pycolmap on a Mac | pgodlews/colmap `0fea5683` (`metal-sift-lanxinger`, COLMAP 4.2.0-dev), torch 2.14.1 (MPS) | `COLMAP_REF` in `setup_mac.sh` |
 
-The LichtFeld patches only add options (`--save-steps`, and SIGUSR1 for a
-snapshot in headless mode; see each patch's header) and change no default, so
-they do not move `TRAINER`. A patch that no longer applies to a new `LFS_REF`
+The LichtFeld patches only add options (`--save-steps`, SIGUSR1 for a
+snapshot in headless mode, and `--opacity-reg`; see each patch's header) and
+change no default, so they do not move `TRAINER`. A patch that no longer applies to a new `LFS_REF`
 stops the build.
