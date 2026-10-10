@@ -211,7 +211,7 @@ MANAGED_TRAIN_FLAGS = {
     "-d", "--images", "-o", "--headless", "--strategy", "--max-cap",
     "--sh-degree", "--iter", "--steps-scaler", "--max-width", "--gut",
     "--eval", "--no-save-eval-images", "--enable-mip", "--background-improvements",
-    "--exposure-correction", "--bilateral-grid", "--min-opacity",
+    "--exposure-correction", "--no-exposure-correction", "--bilateral-grid", "--min-opacity",
     "--max-screen-share", "--export", "--mask-mode", "--invert-masks", "--ppisp",
     "--save-steps", "--resume",
 }
@@ -242,7 +242,11 @@ class TrainCfg(Cfg):
     eval: bool = True
 
     enable_mip: bool = False
+    # Removed in LichtFeld 0.5.4 (#2780), which rejects the flag. Kept so every
+    # stored config (they all carry it, as False) still loads; True is refused.
     background_improvements: bool = False
+    # Off unless set, on every strategy: LichtFeld 0.5.4 turns it on by default
+    # for MRNF, so the queue passes --no-exposure-correction when this is False.
     exposure_correction: bool = False
     bilateral_grid: bool = False
     ppisp: bool = False
@@ -292,6 +296,10 @@ class TrainCfg(Cfg):
                 f"checkpoint_every must be 0 (off) or at least "
                 f"{MIN_CHECKPOINT_EVERY} steps: each snapshot adds a checkpoint "
                 f"of about 0.5 GB to the run's project file")
+        if self.background_improvements:
+            raise ValueError(
+                "background_improvements was removed in LichtFeld 0.5.4, which "
+                "rejects the flag; leave it off")
         # LichtFeld refuses this pair at startup, after the whole SfM has run:
         # "exposure correction replaces the standalone bilateral grid".
         if self.exposure_correction and (self.bilateral_grid or self.ppisp):
@@ -397,7 +405,7 @@ REDUNDANT_POINTS = "redundant-points-1"
 # trainer build retrains from the frames, masks and SfM already cached, where a
 # config_version bump would redo all of them. Moves with LFS_REF in
 # scripts/setup_lichtfeld.sh.
-TRAINER = "lichtfeld-3067e9e0"
+TRAINER = "lichtfeld-09d33818"
 
 # What the API sets for .OSV input when a request leaves sfm.upright out. On:
 # it only moves and scales the model, and falls back on its own when the clip

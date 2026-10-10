@@ -800,10 +800,10 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
             argv.append(f"--eval-steps={LFS_DEFAULT_ITER}")
     if t.enable_mip:
         argv.append("--enable-mip")
-    if t.background_improvements:
-        argv.append("--background-improvements")
-    if t.exposure_correction:
-        argv.append("--exposure-correction")
+    # Always explicit: LichtFeld 0.5.4's MRNF turns exposure correction on by
+    # default, and it refuses --bilateral-grid and --ppisp alongside it.
+    argv.append("--exposure-correction" if t.exposure_correction
+                else "--no-exposure-correction")
     if t.bilateral_grid:
         argv.append("--bilateral-grid")
     if t.ppisp:
@@ -823,7 +823,7 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
         argv.append(f"--export={fmts}")
 
     if t.extra_args.strip():
-        # shlex, not split(): --far-seed-dose "4000 5000" is one argument, and
+        # shlex, not split(): --eval-mask "masks:my masks" is one argument, and
         # str.split() would have handed the trainer two malformed ones.
         argv += shlex.split(t.extra_args)
     return argv

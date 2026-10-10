@@ -1,69 +1,68 @@
-OSVplat patch for LichtFeld-Studio 3067e9e0 (applied by scripts/setup_lichtfeld.sh).
+OSVplat patch for LichtFeld-Studio 09d33818 (v0.5.4; applied by scripts/setup_lichtfeld.sh).
 Intended for upstream; drop it once LichtFeld has the flag.
 
 --opacity-reg: the opacity regularizer weight (opacity_reg), a Float binding
 like --max-screen-share, recorded as an explicit override like every other
-optimisation flag. Until now it could only be set through --config, which
-replaces the whole optimisation parameter set. MRNF's default stays 0.003;
-the flag changes nothing unless given.
+optimisation flag. Otherwise it can only be set through --config, which
+replaces the whole optimisation parameter set. The flag changes nothing unless
+given.
 
-Why: LichtFeld #3124 (after this pin) turns MRNF's opacity_reg to 0, measuring
+Why: LichtFeld #3124 set MRNF's opacity_reg from 0.003 to 0, measuring
 24.92 -> 25.73 dB PSNR on a 7,494-view capture where each surface is seen from
-few cameras; OSVplat's 360 walks are that kind of capture. This flag lets the
-pinned trainer be compared with and without it on the same build.
+few cameras, and a small loss on compact scenes. --opacity-reg 0.003 trains
+this build with the previous default, to tell that change apart from the rest
+of the v0.5.4 MRNF retune on OSVplat's own clips.
 
 diff --git a/src/core/argument_parser.cpp b/src/core/argument_parser.cpp
-index 540ffaa4..99d57d56 100644
+index dcae0e97..cff00ddb 100644
 --- a/src/core/argument_parser.cpp
 +++ b/src/core/argument_parser.cpp
-@@ -57,6 +57,7 @@ namespace lfs::core::args {
+@@ -63,6 +63,7 @@ namespace lfs::core::args {
                                     "; values: ssim, ssim_cs"},
              OptimizationCliBinding{"--max-screen-share", "max_screen_share", Float},
              OptimizationCliBinding{"--screen-share-penalty", "screen_share_penalty", Float},
 +            OptimizationCliBinding{"--opacity-reg", "opacity_reg", Float},
-             OptimizationCliBinding{"--oversize-split-fraction", "oversize_split_fraction", Float},
              OptimizationCliBinding{"--no-edge-map", "use_edge_map", Bool, true},
-             OptimizationCliBinding{"--background-improvements", "background_improvements", Bool},
-@@ -636,6 +637,7 @@ namespace {
+             OptimizationCliBinding{"--bg-mode", "bg_mode", Enum, false,
+                                    "; values: solidcolor, modulation, image, random", "solid_color", "solidcolor"},
+@@ -769,6 +770,7 @@ namespace {
                      {"ssim_cs", lfs::core::param::DensifyErrorMap::SsimCs}});
              ::args::ValueFlag<float> max_screen_share(training_group, "max_screen_share", lfs::core::args::optimization_cli_help("--max-screen-share"), {"max-screen-share"});
              ::args::ValueFlag<float> screen_share_penalty(training_group, "screen_share_penalty", lfs::core::args::optimization_cli_help("--screen-share-penalty"), {"screen-share-penalty"});
 +            ::args::ValueFlag<float> opacity_reg(training_group, "opacity_reg", lfs::core::args::optimization_cli_help("--opacity-reg"), {"opacity-reg"});
-             ::args::ValueFlag<float> oversize_split_fraction(training_group, "oversize_split_fraction", lfs::core::args::optimization_cli_help("--oversize-split-fraction"), {"oversize-split-fraction"});
              ::args::Flag no_edge_map(training_group, "no_edge_map", lfs::core::args::optimization_cli_help("--no-edge-map"), {"no-edge-map"});
-             ::args::Flag background_improvements(training_group, "background_improvements", lfs::core::args::optimization_cli_help("--background-improvements"), {"background-improvements"});
-@@ -1376,6 +1378,9 @@ namespace {
-                                         screen_share_penalty_val = cli_option_present({"--screen-share-penalty"})
-                                                                        ? std::optional<float>(::args::get(screen_share_penalty))
-                                                                        : std::optional<float>(),
-+                                        opacity_reg_val = cli_option_present({"--opacity-reg"})
-+                                                              ? std::optional<float>(::args::get(opacity_reg))
-+                                                              : std::optional<float>(),
-                                         oversize_split_fraction_val = cli_option_present({"--oversize-split-fraction"})
-                                                                           ? std::optional<float>(::args::get(oversize_split_fraction))
-                                                                           : std::optional<float>(),
-@@ -1533,6 +1538,7 @@ namespace {
-                 setVal(densify_error_map_val, opt.densify_error_map);
-                 setVal(max_screen_share_val, opt.max_screen_share);
-                 setVal(screen_share_penalty_val, opt.screen_share_penalty);
+             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", lfs::core::args::optimization_cli_help("--bg-mode"), {"bg-mode"});
+             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
+@@ -1500,6 +1502,7 @@ namespace {
+                                         morton_reorder_interval_val = cli_option_present({"--morton-reorder-interval"}) ? std::optional<int>(::args::get(morton_reorder_interval)) : std::optional<int>(),
+                                         sh_degree_val = cli_option_present({"--sh-degree"}) ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
+                                         min_opacity_val = cli_option_present({"--min-opacity"}) ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
++                                        opacity_reg_val = cli_option_present({"--opacity-reg"}) ? std::optional<float>(::args::get(opacity_reg)) : std::optional<float>(),
+                                         eval_mask_opacity_val = cli_option_present({"--eval-mask-opacity"}) ? std::optional<float>(::args::get(eval_mask_opacity)) : std::optional<float>(),
+                                         cropbox_lr_scale_val = cli_option_present({"--cropbox-lr-scale"}) ? std::optional<float>(::args::get(cropbox_lr_scale)) : std::optional<float>(),
+                                         cropbox_loss_weight_val = cli_option_present({"--cropbox-loss-weight"}) ? std::optional<float>(::args::get(cropbox_loss_weight)) : std::optional<float>(),
+@@ -1670,6 +1673,7 @@ namespace {
+                 }
+                 setVal(sh_degree_val, opt.sh_degree);
+                 setVal(min_opacity_val, opt.min_opacity);
 +                setVal(opacity_reg_val, opt.opacity_reg);
-                 setVal(oversize_split_fraction_val, opt.oversize_split_fraction);
-                 if (no_edge_map_flag)
-                     opt.use_edge_map = false;
-@@ -1641,6 +1647,7 @@ namespace {
-                 note_opt("densify_error_map", densify_error_map_val.has_value());
-                 note_opt("max_screen_share", max_screen_share_val.has_value());
-                 note_opt("screen_share_penalty", screen_share_penalty_val.has_value());
+                 setVal(cropbox_lr_scale_val, opt.cropbox_lr_scale);
+                 setVal(cropbox_loss_weight_val, opt.cropbox_loss_weight);
+                 setVal(init_num_pts_val, opt.init_num_pts);
+@@ -1822,6 +1826,7 @@ namespace {
+                 note_opt("morton_reorder_interval", morton_reorder_interval_val.has_value());
+                 note_opt("sh_degree", sh_degree_val.has_value());
+                 note_opt("min_opacity", min_opacity_val.has_value());
 +                note_opt("opacity_reg", opacity_reg_val.has_value());
-                 note_opt("oversize_split_fraction", oversize_split_fraction_val.has_value());
-                 note_opt("use_edge_map", no_edge_map_flag);
-                 note_opt("background_improvements", background_improvements_flag || no_background_improvements_flag);
+                 note_opt("cropbox_lr_scale", cropbox_lr_scale_val.has_value());
+                 note_opt("cropbox_loss_weight", cropbox_loss_weight_val.has_value());
+                 note_opt("init_num_pts", init_num_pts_val.has_value());
 diff --git a/tests/test_argument_parser.cpp b/tests/test_argument_parser.cpp
-index 929cd767..c512b831 100644
+index e9ed90a2..e86581f7 100644
 --- a/tests/test_argument_parser.cpp
 +++ b/tests/test_argument_parser.cpp
-@@ -637,6 +637,31 @@ TEST(ArgumentParserTest, MrnfKnobFlagsParseAndPopulateExplicitOverrides) {
-     EXPECT_EQ(restored.optimization.far_seed_dose, 500u);
+@@ -802,6 +802,31 @@ TEST(ArgumentParserTest, MrnfCapacityDefaultsResolveAfterCliOverrides) {
+     EXPECT_FLOAT_EQ((*parsed)->optimization.shs_lr, 0.005f);
  }
  
 +TEST(ArgumentParserTest, OpacityRegFlagSetsFieldAndExplicitOverride) {
@@ -78,17 +77,17 @@ index 929cd767..c512b831 100644
 +        "--output-path",
 +        output_path.c_str(),
 +        "--opacity-reg",
-+        "0"};
++        "0.003"};
 +
 +    auto parsed = lfs::core::args::parse_args_and_params(static_cast<int>(std::size(argv)), argv);
 +    ASSERT_TRUE(parsed.has_value()) << parsed.error();
-+    EXPECT_FLOAT_EQ((*parsed)->optimization.opacity_reg, 0.0f);
++    EXPECT_FLOAT_EQ((*parsed)->optimization.opacity_reg, 0.003f);
 +    EXPECT_TRUE((*parsed)->overrides.has_optimization_key("opacity_reg"));
 +
 +    lfs::core::param::TrainingParameters restored;
-+    restored.optimization.opacity_reg = 0.003f;
++    restored.optimization.opacity_reg = 0.0f;
 +    apply_explicit_training_overrides(restored, (*parsed)->overrides);
-+    EXPECT_FLOAT_EQ(restored.optimization.opacity_reg, 0.0f);
++    EXPECT_FLOAT_EQ(restored.optimization.opacity_reg, 0.003f);
 +}
 +
  TEST(ArgumentParserTest, SafeModeIsProcessLocalAndNotATrainingConfigurationOption) {

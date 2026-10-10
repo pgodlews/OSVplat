@@ -323,9 +323,11 @@ RTX 3090s capped at 250 W; times are from one card, except where marked
 
 ### When to turn the appearance options on
 
-All three are off by default and exposed in the UI and as `train.*` fields.
-None of them is free, and none of them improves held-out PSNR, so pick them for
-what they do to the picture.
+All three are off by default and exposed as `train.*` fields, the last two in
+the UI. LichtFeld v0.5.4 removed `background_improvements` and the queue now
+refuses it; its row is the last measurement of it. None of them is free, and
+none of them improves held-out PSNR, so pick them for what they do to the
+picture. The measurements predate v0.5.4.
 
 | Option | What it does | Try it for | Cost (0005) | Watch out |
 |---|---|---|---|---|
@@ -485,13 +487,14 @@ rebuild months later does not silently produce a different trainer:
 
 | Component | Pin | Override |
 |---|---|---|
-| LichtFeld Studio | `3067e9e0`, plus `scripts/lichtfeld-patches/` | `LFS_REF` |
+| LichtFeld Studio | `09d33818` (v0.5.4), plus `scripts/lichtfeld-patches/` | `LFS_REF` |
 | vcpkg | `04a9d8e5` (2026.07.29) | `VCPKG_REF` |
 | gsplat (renders and evaluation only) | `28e794ca` (1.6.0), torch 2.9.1+cu130 | `GSPLAT_REF` |
 | pycolmap-cuda12 | 4.2.1 | edit `setup_sfm_venv.sh` |
 | pycolmap on a Mac | pgodlews/colmap `0fea5683` (`metal-sift-lanxinger`, COLMAP 4.2.0-dev), torch 2.14.1 (MPS) | `COLMAP_REF` in `setup_mac.sh` |
 
 The LichtFeld patches only add options (`--save-steps`, SIGUSR1 for a
-snapshot in headless mode, and `--opacity-reg`; see each patch's header) and
-change no default, so they do not move `TRAINER`. A patch that no longer applies to a new `LFS_REF`
+snapshot in headless mode, and `--opacity-reg`) and restore two log lines the
+queue reads (see each patch's header). They change no default, so they do not
+move `TRAINER`. A patch that no longer applies to a new `LFS_REF`
 stops the build.

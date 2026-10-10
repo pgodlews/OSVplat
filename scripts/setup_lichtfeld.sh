@@ -12,7 +12,7 @@
 # Moving LFS_REF means moving TRAINER in queue/app/jobs.py with it.
 set -x
 set -euo pipefail
-LFS_REF=${LFS_REF:-3067e9e096880e02900a3614117443a82f587f1c}
+LFS_REF=${LFS_REF:-09d338189162b52d888fdbe2c88025e31d0dea05}    # v0.5.4
 VCPKG_REF=${VCPKG_REF:-04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4}    # 2026.07.29-440
 SPLAT_ROOT=${SPLAT_ROOT:-$HOME/splat}
 # Compute capability of GPU 0 (8.6 for an RTX 3090, 8.9 for a 4090), or a list
@@ -29,11 +29,14 @@ CUDA_ARCH=$(echo "$CUDA_ARCH" | tr -d .)
 LFS_MIN_SM=$(tr ';' '\n' <<< "$CUDA_ARCH" | sort -n | head -1)
 LFS_MIN_CC="${LFS_MIN_SM%?}.${LFS_MIN_SM: -1}"
 LFS_TORCH_ARCHS=$(tr ';' '\n' <<< "$CUDA_ARCH" | sed -E 's/^(.*)(.)$/\1.\2/' | paste -sd';' -)
-# CPU target for lfs_core, whose Release flags hard-code -march=native: code for
-# whatever CPU runs the compile. That is right for a box building for itself and
-# wrong for an image, which then dies with SIGILL on any CPU lacking an
-# instruction set the build machine had (troubleshooting #25). The Dockerfile
-# sets x86-64-v3 (AVX2 + FMA, which the rest of LichtFeld already requires).
+# CPU target for lfs_core. Up to 3067e9e0 its Release flags hard-coded
+# -march=native: code for whatever CPU runs the compile, which is right for a
+# box building for itself and wrong for an image, which then dies with SIGILL
+# on any CPU lacking an instruction set the build machine had (troubleshooting
+# #25). v0.5.4 dropped it for an explicit -mavx2 -mfma, so there is nothing to
+# rewrite there; an older LFS_REF still gets the rewrite. Either way a
+# non-native build is checked after compiling. The Dockerfile sets x86-64-v3
+# (AVX2 + FMA, which the rest of LichtFeld already requires).
 LFS_MARCH=${LFS_MARCH:-native}
 export CC=gcc-14 CXX=g++-14 CUDACXX=/usr/local/cuda/bin/nvcc CUDA_HOME=/usr/local/cuda
 export VCPKG_ROOT=$SPLAT_ROOT/vcpkg VCPKG_MAX_CONCURRENCY=6
@@ -56,8 +59,6 @@ pin() {   # pin <dir> <ref>
 # patches), or checking out another ref refuses.
 git -C "$SPLAT_ROOT/LichtFeld-Studio" checkout -- . 2>/dev/null || true
 pin "$SPLAT_ROOT/LichtFeld-Studio" "$LFS_REF"
-grep -q -- '-march=native>' "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt" \
-  || { echo "src/core/CMakeLists.txt no longer sets -march=native; recheck LFS_MARCH" >&2; exit 1; }
 sed -i "s/-march=native>/-march=$LFS_MARCH>/" "$SPLAT_ROOT/LichtFeld-Studio/src/core/CMakeLists.txt"
 # The architecture override (see LFS_MIN_SM above): two blocks, each anchored
 # on a line that must occur exactly once, or the build stops here.

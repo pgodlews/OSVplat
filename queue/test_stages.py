@@ -899,6 +899,16 @@ with tempfile.TemporaryDirectory() as _d:
     _pp.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"), needs_gut=True)
     check("train.ppisp reaches LichtFeld as --ppisp",
           "--ppisp" in _stages.STAGES["train"]["argv"](_pp))
+    # LichtFeld 0.5.4's MRNF turns exposure correction on unless told not to,
+    # and refuses it next to --ppisp or --bilateral-grid.
+    check("exposure correction is off unless asked, and said so explicitly",
+          "--no-exposure-correction" in _sl and "--exposure-correction" not in _sl
+          and "--no-exposure-correction" in _stages.STAGES["train"]["argv"](_pp))
+    _ec = _ctx_for(_cfg("samples/x.osv", train={"exposure_correction": True}))
+    _ec.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"), needs_gut=True)
+    _el = _stages.STAGES["train"]["argv"](_ec)
+    check("train.exposure_correction reaches LichtFeld as --exposure-correction",
+          "--exposure-correction" in _el and "--no-exposure-correction" not in _el)
     check("a learning-curve sweep's own --eval-steps replaces the final-only one",
           [a for a in _cl if a.startswith("--eval-steps")]
           == ["--eval-steps=5000", "--eval-steps=10000"])
