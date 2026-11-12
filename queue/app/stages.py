@@ -1427,6 +1427,8 @@ ESTIMATE_MARGIN = 1.25
 # (dir_bytes) and grew 4 MB; 0.005 B/px (~0.2 GB there) covers its lists and
 # records. One clip, and JPEG size follows the scene, so the margin is wider
 # than the train one; lower jpeg_q (larger files) than 2 is not modelled.
+# mask is the stage's peak: since 2026-11 87_fisheye_masks.py deletes its
+# stitched panoramas at the end, so a finished fisheye mask entry is smaller.
 PREP_BYTES_PER_PX = {"frames": 0.133, "select": 0.005, "mask": 0.248, "sfm": 0.118}
 PREP_MARGIN = 1.5
 

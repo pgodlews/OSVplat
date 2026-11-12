@@ -532,6 +532,16 @@ class JobConfig(Cfg):
         # window land in the stage record. select.imu is a term, and only while
         # on (IMU_SELECT), so every entry cached before the option keeps its key.
         sel = self.select.model_dump(exclude={"imu", "distance_m", "max_gap_s"})
+        # The field the mode does not read is hashed at its default, the way
+        # k_mask treats a disabled mask: window mode never reads target_panos,
+        # target mode never reads window (which the API sets to 3 for .OSV), so
+        # two jobs selecting the same frames share one entry. Window mode with
+        # the default target_panos -- every UI job -- keeps the key it had.
+        defaults = SelectCfg()
+        if self.select.mode == "window":
+            sel["target_panos"] = defaults.target_panos
+        elif self.select.mode == "target":
+            sel["window"] = defaults.window
         if self.select.mode == "distance":
             sel = {"mode": "distance", "distance_m": self.select.distance_m,
                    "max_gap_s": self.select.max_gap_s, "algorithm": "avata_velocity_v1"}

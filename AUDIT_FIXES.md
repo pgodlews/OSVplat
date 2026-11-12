@@ -16,17 +16,18 @@ wrong, where, how to fix it, and how to know it is fixed.
 | A6 | Fixed on `claude/audit-fixes-a`. |
 | A7–A10 | Fixed (`app/jobrows.py`; one 90 % threshold passed from 88 to 85; `extra_args` reduced to flag names; `exclusive()` clears its hold on a failed probe). |
 | B1–B4, B8–B12 | Fixed. B1: comments only; the SfM estimate seed is *not* refit (no fisheye-sfm-4 history to fit from here). |
-| B5 | Presets fixed. "currently 0.1.4-rc6" left alone: **owner's call** (`:latest` is the last signed release). |
-| B6 | Open, **owner's call**: re-measure on LichtFeld 0.5.4 or label the tables with the build they were measured on. |
+| B5 | Presets fixed. "currently 0.1.4-rc6" is accurate (`:latest` = 0.1.4-rc6, checked 2026-11-12). Decided: update README and docs/docker.md to 0.2.0 once rc5 is tested, signed and published. |
+| B6 | The tables already name their build and say they predate v0.5.4. Decided: one Standard run on clip 0005 during the rc5 test adds a 0.5.4 row. |
 | B7 | Fixed: `app/osv.py`; the import failure is printed at startup and answered with a 400. |
-| B13 | Camera serial blanked in debug bundles; the GPS reference in `alignment.json` is documented, not removed (**owner's call**). |
+| B13 | Camera serial blanked in debug bundles. Decided: the GPS reference in `alignment.json` stays, documented in docs/cloud.md. |
 | B14 | `publish_image.sh` fixed. `numpy` unpinned in `venv_gs`: **owner's call**. `30_run_sfm.py` vs pycolmap 4.2.1's `panorama.py`: needs a CUDA host. |
 | C1 | Fixed: `app/uploads.py`; the result tar is hashed while written and streamed. A damaged-ETag result upload now backs off between retries, as the other three already did. |
 | C2 | uuid map cached, `VramSampler` removed (peak from `ResourceSampler`). The 2 s `/api/status` cache was **not** done: a stale `held`/`foreign` flag for little gain. |
 | C3, C4, C6 | Fixed. C6 adds no key term: nothing read `frames/telemetry.csv`. |
-| C5, C7 | Open, **owner's call** (both touch what a cached stage holds or keys). |
+| C5 | Decided and done: `87_fisheye_masks.py` deletes `erp/` after a successful run. No key change. |
+| C7 | Decided and done: the select key hashes the unused field at its default. UI jobs keep their keys; target-mode API jobs (and window mode with a custom `target_panos`) move once. |
 | C8 | Log stream ends with its stage; redundant prune pattern and per-frame constant fixed. Dockerfile dedup skipped (layer sharing would need measuring). |
-| D | Done, except `scripts/detect_camera.py` and `QUEUE_MASK_PY`: **owner's call** whether they stay. |
+| D | Done. Decided: `scripts/detect_camera.py` deleted; `QUEUE_MASK_PY` stays (documented). |
 
 ## How to work through this file
 

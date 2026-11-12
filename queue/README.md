@@ -167,7 +167,10 @@ in the stage's log (`cache: evicted ...` under the command line), in the job API
 Keys chain: `frames → select → sfm → train → export`. Each key hashes its own
 params plus the upstream key, so changing a training flag reuses frames/select/sfm
 and every variant trains on byte-identical geometry. A stage is reused when its
-cache dir contains a `.done` marker that parses.
+cache dir contains a `.done` marker that parses. A field the job's options do
+not read is hashed at its default: a disabled mask's settings, and the
+`select` field its mode ignores (`target_panos` in window mode, `window` in
+target mode), so two jobs that make the same output share one entry.
 
 **Sharing an *unfinished* stage is the normal case, not an error.** The four
 variants of a sweep reach the same uncached `sfm` key within milliseconds of each

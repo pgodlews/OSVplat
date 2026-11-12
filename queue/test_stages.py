@@ -1095,6 +1095,20 @@ check("the stitched sfm term forks the sfm key of perspective renders only",
                                 "mapper": "incremental"},
                                _persp._sfm_mask_term(), STITCHED_SFM)
       and _persp.k_select() == _mp4.k_select())
+# The select field a mode does not read is hashed at its default.
+_win = JobConfig.model_validate({**_mp4.model_dump(), "select": {"mode": "window", "window": 5}})
+_tgt = JobConfig.model_validate({**_mp4.model_dump(), "select": {"mode": "target", "target_panos": 200}})
+check("window mode ignores target_panos in its key, and keeps the old key at the default",
+      JobConfig.model_validate({**_mp4.model_dump(),
+                                "select": {"mode": "window", "target_panos": 999}}).k_select()
+      == _win.k_select()
+      == key_of("select", _win.k_frames(), {"mode": "window", "window": 5, "target_panos": 300}))
+check("target mode ignores window in its key",
+      JobConfig.model_validate({**_mp4.model_dump(), "select": {"mode": "target", "target_panos": 200,
+                                                               "window": 3}}).k_select()
+      == _tgt.k_select()
+      and _tgt.k_select() != JobConfig.model_validate(
+          {**_mp4.model_dump(), "select": {"mode": "target", "target_panos": 250}}).k_select())
 check("the fisheye sfm term leaves frames, select and mask keys alone",
       _osv.k_frames() == key_of("frames", _osv.config_version, "deadbeef", None, None,
                                 _osv.frames.model_dump(), FISHEYE_PIPELINE)
