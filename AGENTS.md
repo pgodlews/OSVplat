@@ -54,6 +54,8 @@ to keep the layout rule above honest.
   options, bump its version term in `queue/app/jobs.py` so stale caches are not
   served: `FISHEYE_SFM` for the fisheye reconstruction (`82`/`88_fisheye_sfm.py`,
   `colmap_incremental.py`), `FISHEYE_PIPELINE` for any other fisheye script,
+  `STITCHED_SFM` for what `32_pick_model.py` reports on a stitched job with a
+  `perspective_*` `sfm.render` (a term only of those),
   `IMU_SELECT` for gyro selection scoring, `UPRIGHT` for what `upright.py` does
   to a model, `TRAINER` when `LFS_REF` moves (train and export only),
   `PREP_APPLE` for what a Mac's prep makes (`setup_mac.sh` pins, the MPS and

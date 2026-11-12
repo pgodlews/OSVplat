@@ -401,6 +401,12 @@ UPRIGHT = "upright-1"
 # before the option existed. Bump it after changing what the option does in
 # 82_fisheye_sfm.py.
 REDUNDANT_POINTS = "redundant-points-1"
+# Joins the sfm key -- and so train and export -- of stitched jobs with a
+# perspective_* sfm.render only. 1: 32_pick_model.py counts rig frames instead
+# of the 12 pinhole images per panorama, so sfm_finalize's registration floor
+# applies to these runs at all; entries cached before it never passed that
+# check. Spherical and fisheye keys do not carry it and keep theirs.
+STITCHED_SFM = "stitched-sfm-1"
 # Joins every train key -- and so export -- and nothing upstream of it: a new
 # trainer build retrains from the frames, masks and SfM already cached, where a
 # config_version bump would redo all of them. Moves with LFS_REF in
@@ -548,6 +554,8 @@ class JobConfig(Cfg):
                       self.sfm.model_dump(exclude={"upright", "skip_redundant_points"}),
                       self._sfm_mask_term(),
                       *((FISHEYE_SFM,) if self.is_fisheye else ()),
+                      *((STITCHED_SFM,) if not self.is_fisheye
+                        and self.sfm.render != "spherical" else ()),
                       *((UPRIGHT,) if self.sfm.upright else ()),
                       *((REDUNDANT_POINTS,) if self.sfm.skip_redundant_points else ()))
 

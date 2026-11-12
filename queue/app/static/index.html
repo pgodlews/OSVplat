@@ -163,7 +163,17 @@ summary{cursor:pointer;font-size:12px;color:var(--muted);
 
 <main>
   <div>
-    <div class="card">
+    <div class="card" id="importCard" hidden>
+      <h2>Import handoff bundle</h2>
+      <div class="muted small">This is the train image: it trains from bundles a prep
+        install wrote (<span class="mono">run_until: "sfm"</span>). Put one in
+        <span class="mono">QUEUE_ROOT/handoffs/</span>, or start the container with
+        <span class="mono">HANDOFF_URL</span>.</div>
+      <div id="bundles" style="margin-top:8px"></div>
+      <div id="importMsg"></div>
+    </div>
+
+    <div class="card" id="newJobCard">
       <h2>New job</h2>
       <label>Input clip<span class="i" data-tip="input">i</span></label>
       <select id="input"></select>
@@ -253,6 +263,16 @@ summary{cursor:pointer;font-size:12px;color:var(--muted);
         <textarea id="axes" placeholder='{"train.sh_degree":[1,3],"train.enable_mip":[false,true]}'></textarea>
         <div class="muted small">Leave empty for a single job. One shared SfM covers every variant.</div>
       </details>
+
+      <label>Stop after<span class="i" data-tip="runUntil">i</span></label>
+      <select id="runUntil">
+        <option value="">export · the whole pipeline</option>
+        <option value="sfm">sfm · writes a handoff bundle</option>
+        <option value="mask">mask</option>
+        <option value="select">select</option>
+        <option value="frames">frames</option>
+      </select>
+      <div id="runUntilNote" class="muted small"></div>
 
       <label>Name<span class="i" data-tip="name">i</span></label>
       <input id="name" placeholder="auto">
@@ -399,8 +419,75 @@ function buildConfig() {
   };
   // steps_scaler and iter must never both be non-default.
   if (budget === 1) { cfg.train.iter = 30000; cfg.train.steps_scaler = 1.0; }
+  if ($('#runUntil').value) cfg.run_until = $('#runUntil').value;
   return cfg;
 }
+
+// The training fields mean nothing to a job that stops before training. They
+// are still sent (the bundle carries them, and an import can replace them),
+// just greyed out so nobody tunes them expecting an effect.
+const TRAIN_FIELDS = ['#budget', '#maxCap', '#maxWidth', '#shDegree', '#strategy',
+                      '#evalOn', '#mip', '#expcorr', '#bilat', '#ppisp', '#extra'];
+function syncRunUntil() {
+  const stop = $('#runUntil').value;
+  TRAIN_FIELDS.forEach(s => { $(s).disabled = !!stop; });
+  $('#runUntilNote').textContent = imageVariant === 'prep'
+    ? (prepBackend === 'apple' ? 'A Mac has no trainer: jobs here stop before training.'
+                               : 'The prep image has no trainer: jobs here stop before training.')
+    : stop ? 'Training options are kept in the config but not used here.' : '';
+}
+
+// What this install can run (/api/status image_variant): "all", "prep" (no
+// trainer: every job sets run_until) or "train" (imports handoff bundles only).
+let imageVariant = null, prepBackend = null;
+function applyVariant(s) {
+  if (s.image_variant === imageVariant) return;
+  imageVariant = s.image_variant;
+  prepBackend = s.prep_backend || null;
+  const full = $('#runUntil option[value=""]');
+  if (imageVariant === 'prep') {
+    if (full) full.remove();
+    if (!$('#runUntil').value) $('#runUntil').value = 'sfm';
+  }
+  $('#newJobCard').hidden = imageVariant === 'train';
+  $('#importCard').hidden = imageVariant !== 'train';
+  syncRunUntil();
+}
+
+let lastBundles = '';
+async function refreshBundles() {
+  if (imageVariant !== 'train') return;
+  let list;
+  try { list = await api('/api/handoff/bundles'); } catch { return; }
+  const key = JSON.stringify(list);
+  if (key === lastBundles) return;               // keep a click in flight
+  lastBundles = key;
+  $('#bundles').innerHTML = list.length
+    ? `<table><tbody>${list.map(b => `<tr><td class="mono small">${esc(b.name)}</td>
+         <td class="mono small muted">${fmtB(b.bytes)}</td>
+         <td><button data-bundle="${esc(b.name)}" style="font-size:11px;padding:2px 8px">Import</button></td>
+       </tr>`).join('')}</tbody></table>`
+    : '<span class="muted small">No bundle waiting.</span>';
+}
+$('#bundles').onclick = async e => {
+  const name = e.target.dataset && e.target.dataset.bundle;
+  if (!name) return;
+  e.target.disabled = true; e.target.textContent = 'importing…';
+  $('#importMsg').innerHTML = '';
+  try {
+    // Blocks while it verifies and unpacks: about a minute for 2 GB.
+    const r = await api('/api/handoff/import', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({bundle: name})});
+    $('#importMsg').innerHTML = `<div class="warnbox">Queued job #${r.id} from ${esc(name)}${
+      r.installed.length ? ` — installed ${r.installed.join(', ')}` : ''}.</div>`;
+    lastBundles = '';
+    refreshJobs(); refreshBundles(); refreshCache();
+  } catch (err) {
+    $('#importMsg').innerHTML = `<div class="errbox">${esc(err.message)}</div>`;
+    e.target.disabled = false; e.target.textContent = 'Import';
+  }
+};
 
 // Mask backends come from the server (app/mask_backends.py), which also knows
 // whether each one's weights are installed. An unavailable one stays listed but
@@ -431,6 +518,8 @@ function showMaskBackend() {
 
 async function refreshStatus() {
   const s = await api('/api/status');
+  applyVariant(s);
+  refreshBundles();
   if (s.mask_backends) renderMaskBackends(s.mask_backends);
   $('#pauseBtn').textContent = s.paused ? '▶ Resume queue' : '⏸ Pause queue';
   $('#pauseBtn').className = s.paused ? 'primary' : '';
@@ -810,6 +899,11 @@ const TIPS = {
   axes: `JSON of dotted config field to a list of values; the queue queues the full
     cross product. Every variant shares one frame dump, selection and SfM through
     the cache, so an N-way sweep costs N trainings, not N pipelines.`,
+  runUntil: `Where the job ends. <b>sfm</b> stops before training and writes a
+    handoff bundle that a train install imports (docs/cloud.md, "Split pipeline");
+    the earlier stages only fill the cache. A prep install (the prep image, or a
+    Mac) has no trainer, so it always stops somewhere. Where a job stops is in no
+    cache key: a later full run reuses every stage it made.`,
   name: `Label shown in the queue. Left blank it becomes
     <code>&lt;clip&gt;-&lt;budget&gt;x</code>.`,
   mask: `Person segmentation to exclude people from photometric loss.
@@ -929,6 +1023,7 @@ async function renderDetail(restartLog) {
         w${j.config.train.max_width} · SH${j.config.train.sh_degree}</span>
     </div>
     ${j.error?`<div class="errbox">${esc(j.error)}</div>`:''}
+    ${handoffLine(j)}
     ${warns.map(w=>`<div class="warnbox">⚠ ${esc(w)}</div>`).join('')}
     ${clock}
     <table style="margin-top:8px"><thead><tr><th>Stage</th><th>State</th>
@@ -976,6 +1071,25 @@ async function renderFiles(j) {
         <span class="muted small">${mb(f.bytes)}</span></a>`).join('')}
       <span class="muted small">— .sog opens in the <a href="https://superspl.at/editor" target="_blank" rel="noopener">SuperSplat editor</a></span>
     </div>`);
+}
+
+// The bundle a prep job wrote (run_until "sfm"), or the one a train job was
+// imported from. Only the first is on this machine to download.
+function handoffLine(j) {
+  const h = j.handoff;
+  if (!h) return '';
+  if (h.role === 'train')
+    return `<div class="muted small" style="margin-top:6px">Imported from handoff bundle
+      <span class="mono">${esc(h.file || h.id)}</span></div>`;
+  const up = h.upload || {};
+  const sent = up.state === 'done' ? ' · uploaded'
+    : up.state ? ` · upload ${esc(up.state)}${up.error ? ': ' + esc(up.error) : ''}` : '';
+  return `<div class="files" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <b class="small">Handoff bundle</b>
+      <a class="dl" href="/api/jobs/${j.id}/handoff/download" download>TAR
+        <span class="muted small">${fmtB(h.bytes)}</span></a>
+      <span class="muted small mono">sha256 ${esc((h.sha256 || '').slice(0, 16))}…${sent}</span>
+    </div>`;
 }
 
 async function renderReview(j) {
@@ -1215,11 +1329,12 @@ async function refreshCache() {
     ? Object.entries(by).map(([s,v]) =>
         `<span class="mono">${s}: ${v.n} entries, ${fmtB(v.b)}</span>`).join('<br>')
     : 'empty')
+    + (c.orphans ? `<br><span class="mono" title="Directories that failed or cancelled builds left behind. Nothing reads them again; reclaim space removes them first.">left by failed builds: ${c.orphans}, ${fmtB(c.orphan_bytes)}</span>` : '')
     + `<div class="mono" style="margin-top:6px${low?';color:var(--err)':''}">
          ${fmtB(c.free)} free${low?` — below the ${fmtB(c.min_free)} floor, jobs will refuse to start`:''}
        </div>
        <button id="gcBtn" style="margin-top:8px;font-size:11px;padding:2px 8px"
-               title="Evicts least-recently-used entries until free space is back above the floor. Never touches a cache a queued or running job needs.">reclaim space</button>`;
+               title="Removes what failed builds left, then evicts least-recently-used entries until free space is back above the floor. Never touches a cache a queued or running job needs.">reclaim space</button>`;
   $('#gcBtn').onclick = async () => {
     const btn = $('#gcBtn'); btn.disabled = true; btn.textContent = 'evicting…';
     try {
@@ -1290,6 +1405,7 @@ function showSelection() {
 }
 $('#selectionMode').onchange = () => { showSelection(); doEstimate(); };
 $('#distanceM').onchange = doEstimate;
+$('#runUntil').onchange = () => { syncRunUntil(); doEstimate(); };
 $('#maxGapS').onchange = doEstimate;
 
 $('#presets').innerHTML = Object.keys(PRESETS).map((k,ix) =>

@@ -147,8 +147,10 @@ def _startup() -> None:
     if n:
         print(f"reconciled {n} job(s) left running by a previous process")
     logs, rends = retention.prune_logs(), retention.prune_renders()
-    if logs["removed"] or rends["removed"]:
-        print(f"pruned {logs['removed']} log(s) and {rends['removed']} render(s)")
+    runs = retention.prune_runs()
+    if logs["removed"] or rends["removed"] or runs["removed"]:
+        print(f"pruned {logs['removed']} log(s), {rends['removed']} render(s) and "
+              f"{runs['removed']} old run file(s), {runs['bytes']/retention.GB:.1f} GB")
     print(f"disk: {retention.free_bytes()/retention.GB:.1f} GB free, "
           f"cache holds {retention.cache_total()/retention.GB:.1f} GB")
     # Before the dispatcher starts: the benchmark holds the machine, so no job
@@ -1090,6 +1092,7 @@ def api_status() -> dict:
                 paused=st["paused"]),
             "metrics": METRICS_ENABLED,
             "image_variant": IMAGE_VARIANT,
+            "prep_backend": PREP_BACKEND,
             "cuda_error": resources.CUDA_ERROR,
             "cpu_error": resources.CPU_ERROR,
             "splat_root": str(SPLAT_ROOT)}
@@ -1302,12 +1305,15 @@ def api_cache_gc(dry_run: bool = Query(False),
     Skips anything a queued or running job depends on, and anything whose
     directory is locked by a live process. `dry_run` lists what would go.
     """
+    # Orphans (what failed or cancelled builds left) always go: nothing reads
+    # them again, and they are in no cache entry the button would otherwise reach.
     if budget_gb is None:
         # No explicit ceiling: reclaim only as far as the free-space floor, so
         # the obvious button is not also the one that wipes the cache.
         return retention.gc_cache(target_free=retention.MIN_FREE_BYTES,
-                                  dry_run=dry_run)
-    return retention.gc_cache(budget=budget_gb * retention.GB, dry_run=dry_run)
+                                  dry_run=dry_run, all_orphans=True)
+    return retention.gc_cache(budget=budget_gb * retention.GB, dry_run=dry_run,
+                              all_orphans=True)
 
 
 # ----------------------------------------------------------------- compare

@@ -74,6 +74,7 @@ the failure mode is a full disk 80 minutes into a 95-minute run.
 | `QUEUE_CACHE_BUDGET_GB` | 0 (none) | Ceiling the cache is evicted down to. |
 | `QUEUE_LOG_KEEP_DAYS` | 30 | Stage logs older than this are pruned at startup. |
 | `QUEUE_RENDER_KEEP_DAYS` | 30 | Comparison sheets older than this are pruned at startup. |
+| `QUEUE_RUN_KEEP_DAYS` | 30 | For jobs that ended (done, failed, cancelled) longer ago than this, the large files in `runs/job<id>/` are deleted: debug, handoff, restore and result tars. The JSON records, `telemetry.json` and `logs.tar.gz` stay. At startup and before each stage. 0 keeps everything. |
 | `QUEUE_NEED_SAFETY` | 1.25 | Margin on the largest entry a stage has produced before, used as its space requirement. 0 falls back to the flat floor. |
 
 The floor alone was not enough: an 8K frames dump is tens of GB and a training
@@ -115,6 +116,15 @@ An estimated stage wants its estimate plus `QUEUE_ESTIMATED_SLACK_GB`, or its
 history if that is larger. A clip that does not probe leaves the prep stages
 to the flat floor. A `QUEUE_MIN_FREE_GB` set by hand still holds for every
 stage, and the estimates are then not used.
+
+Before any cache entry, eviction removes what failed or cancelled builds left
+behind: a stage directory with no valid `.done`, no live lock, no unfinished
+job counting on its key, and untouched for 10 minutes (the failure's debug
+bundle reads it first), plus handoff import staging dirs older than 6 hours.
+These are in no cache entry, so before 2026-11 nothing ever removed them: a
+failed 8K frames dump or a failed training's `project.licht` stayed until the
+same key was rebuilt. `GET /api/cache` reports them as `orphans` and
+`orphan_bytes`; `POST /api/cache/gc` always removes all of them.
 
 Eviction is least-recently-used, with train entries last, and conservative:
 a finished job's train directory holds the only copy of its snapshots and its

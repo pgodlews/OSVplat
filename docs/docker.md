@@ -102,6 +102,12 @@ under `./data/cache/export/<key>/`.
 | `CUDA_ARCH` | `7.5;8.0;8.6;8.9;9.0;12.0` | Build only: GPU architectures to compile for |
 | `BUILD_JOBS` | 8 | Build only: parallel compile jobs; lower it if the machine struggles |
 
+Every line of `.env` reaches the container (`env_file` in `compose.yaml`, which
+needs Docker Compose 2.24 or newer), so any variable in
+[queue/README.md](../queue/README.md) or [cloud.md](cloud.md) can go there too.
+SSH needs the container to run as root: remove the `user:` line from
+`compose.yaml` to use the SSH variables.
+
 ## Updating
 
 ```bash

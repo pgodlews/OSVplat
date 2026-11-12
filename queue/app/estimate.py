@@ -12,6 +12,7 @@ from typing import Optional
 
 from . import db
 from .jobs import JobConfig
+from .stages import ORDER
 
 # Seed constants (README runs 2-5).
 SEED = {
@@ -205,8 +206,11 @@ def estimate(cfg: JobConfig, clip_seconds: float,
             "train": iters / max(0.01, rate),
             "export": c["export_s"],
         }
+    # A job that stops early does not run what comes after, and a plan that
+    # counted it held the next job's slot for a whole training run.
+    skipped = ORDER[ORDER.index(cfg.run_until) + 1:] if cfg.run_until else []
     for k in est:
-        if cached.get(k):
+        if cached.get(k) or k in skipped:
             est[k] = 0.0
     est = {k: round(v, 1) for k, v in est.items()}
     est["total"] = round(sum(est.values()), 1)
@@ -217,6 +221,7 @@ def estimate(cfg: JobConfig, clip_seconds: float,
         "rate_source": c.get("_fisheye_train_rate_source" if cfg.is_fisheye
                              else "_train_rate_source", "seed"),
         "pipeline": "fisheye_rig" if cfg.is_fisheye else "equirect",
+        "run_until": cfg.run_until,
     }
     if cfg.select.mode == "distance":
         est["_assumptions"].update(selection_mode="distance", distance_m=cfg.select.distance_m,

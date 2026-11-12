@@ -14,7 +14,17 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "${PORT:-8090}:8090"
+    # Every .env line reaches the container, so the settings docs/docker.md
+    # and docs/cloud.md list (QUEUE_CPUS, OUTPUT_UPLOAD_URL, SSH_PUBLIC_KEYS,
+    # ...) work without a line here each. Compose otherwise reads .env only to
+    # fill in ${...} in this file. `environment:` below wins over it.
+    env_file:
+      - path: .env
+        required: false
     environment:
+      # Inside, the service always listens on 8090; PORT in .env is the host
+      # side of the mapping above, and must not move the listener with it.
+      PORT: "8090"
       PUBLIC_PORT: ${PORT:-8090}
       QUEUE_TOKEN: ${QUEUE_TOKEN:-}
       QUEUE_GPUS: ${QUEUE_GPUS:-all}

@@ -948,6 +948,27 @@ with tempfile.TemporaryDirectory() as _d:
           "--iter" not in _bls and "--steps-scaler" in _bls
           and _bls[_bls.index("--steps-scaler") + 1] == "0.5")
 
+    # The scaler is printed with %g (6 significant digits), so 10000 goes out
+    # as 0.333333. LichtFeld (09d33818, OptimizationParameters::scale_steps)
+    # computes lround(float(30000) * float(scaler)) in float32, which lands on
+    # the requested count for every iter from 100 to 300000 (checked
+    # exhaustively, 2026-11-12). train_finalize compares against
+    # effective_iters, so a format that lost a step would fail completed runs.
+    import math as _math
+    import struct as _struct
+    _f32 = lambda x: _struct.unpack("f", _struct.pack("f", x))[0]
+    _lround = lambda x: int(_math.floor(x + 0.5))
+    _off = []
+    for _it in (100, 7000, 10000, 20000, 29999, 31000, 50000, 99999, 100000, 299999):
+        _c = _ctx_for(_cfg("samples/x.mp4", train={"iter": _it}))
+        _c.derived.update(dataset=str(_root / "sfm" / "dataset"), images=str(_root / "select"))
+        _a = _stages.STAGES["train"]["argv"](_c)
+        _flag = float(_a[_a.index("--steps-scaler") + 1])
+        if _lround(_f32(_f32(30000.0) * _f32(_flag))) != _it:
+            _off.append((_it, _flag))
+    check("LichtFeld's float32 lround of the printed scaler gives back iter exactly",
+          not _off, str(_off))
+
     try:
         _cfg("samples/x.mp4", train={"extra_args": "--no-save-eval-images"})
         _dup_refused = False
@@ -1062,6 +1083,15 @@ check("the fisheye sfm term forks sfm, train and export of fisheye jobs only",
                              _osv._sfm_mask_term(), FISHEYE_SFM)
       and _mp4.k_sfm() == key_of("sfm", _mp4.k_select(), _sfm_dump,
                                  _mp4._sfm_mask_term()))
+from app.jobs import STITCHED_SFM                              # noqa: E402
+_persp = JobConfig.model_validate({**_mp4.model_dump(),
+                                   "sfm": {"render": "perspective_overlapping"}})
+check("the stitched sfm term forks the sfm key of perspective renders only",
+      _persp.k_sfm() == key_of("sfm", _persp.k_select(),
+                               {"render": "perspective_overlapping",
+                                "mapper": "incremental"},
+                               _persp._sfm_mask_term(), STITCHED_SFM)
+      and _persp.k_select() == _mp4.k_select())
 check("the fisheye sfm term leaves frames, select and mask keys alone",
       _osv.k_frames() == key_of("frames", _osv.config_version, "deadbeef", None, None,
                                 _osv.frames.model_dump(), FISHEYE_PIPELINE)

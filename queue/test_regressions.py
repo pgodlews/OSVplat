@@ -121,6 +121,15 @@ class ReviewRegressions(unittest.TestCase):
         with patch.object(worker, "paused", return_value=True):
             self.assertIsNone(main.api_jobs(limit=1, offset=2)[0]["eta"]["starts_in"])
 
+    def test_estimate_stops_at_run_until(self):
+        cfg = self.cfg.model_copy(deep=True)
+        cfg.run_until = "sfm"
+        est = estimate.estimate(cfg, 60.0)
+        self.assertEqual((est["train"], est["export"]), (0.0, 0.0))
+        self.assertGreater(est["sfm"], 0)
+        self.assertEqual(est["total"], round(sum(est[s] for s in
+                                                ("frames", "select", "mask", "sfm")), 1))
+
     def test_history_limit_is_per_pipeline(self):
         for ext, seconds, count in [("mp4", 2000, 1), ("OSV", 3000, 20)]:
             cfg = self.cfg.model_copy(deep=True)
@@ -150,6 +159,100 @@ class CacheGcPreview(unittest.TestCase):
                                      dry_run=True)
         # 15 GiB short, 10 GiB entries: two deletions suffice, not all five.
         self.assertEqual(out["n_evicted"], 2, out)
+
+
+class OrphansAndRuns(unittest.TestCase):
+    """Disk that failed builds and finished jobs leave outside the cache table."""
+
+    def setUp(self):
+        from app import retention
+        self.r = retention
+        db.init()
+        db.conn().execute("DELETE FROM cache")
+        db.conn().execute("DELETE FROM jobs")
+        self.made = []
+
+    def stage_dir(self, stage, key, done=False, lock=None, age=3600):
+        import json as _json
+        import time as _t
+        d = self.r.CACHE_ROOT / stage / key
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "payload.bin").write_bytes(b"x" * 4096)
+        if done:
+            (d / ".done").write_text("{}")
+        if lock is not None:
+            (d / ".lock").write_text(_json.dumps(lock))
+        t = _t.time() - age
+        os.utime(d, (t, t))
+        self.made.append(d)
+        return d
+
+    def tearDown(self):
+        import shutil
+        for d in self.made:
+            shutil.rmtree(d, ignore_errors=True)
+        self.r._orphan_stat = (0.0, {})
+
+    def test_orphans_go_before_valid_entries(self):
+        valid = self.stage_dir("frames", "orphtest_valid", done=True)
+        db.cache_put("orphtest_valid", "frames", str(valid), 4096)
+        orphan = self.stage_dir("train", "orphtest_failed")
+        live = self.stage_dir("sfm", "orphtest_live", lock={"pid": os.getpid()})
+        fresh = self.stage_dir("mask", "orphtest_fresh", age=10)
+        protected = self.stage_dir("select", "orphtest_protected")
+        base = 100 * 2**30
+        # The disk gets freer once the orphan is gone, and only then.
+        free = lambda: base + (0 if orphan.exists() else 4096)
+        with patch.object(self.r, "free_bytes", free), \
+                patch.object(self.r, "protected_keys", lambda: {"orphtest_protected"}):
+            keys = {o["key"] for o in self.r.orphans()}
+            self.assertEqual(keys & {"orphtest_valid", "orphtest_failed", "orphtest_live",
+                                     "orphtest_fresh", "orphtest_protected"},
+                             {"orphtest_failed"})
+            # 1 byte short: the orphan alone is evicted, the valid entry stays.
+            out = self.r.gc_cache(target_free=base + 1, budget=None)
+        self.assertFalse(orphan.exists())
+        for d in (valid, live, fresh, protected):
+            self.assertTrue(d.exists(), d)
+        self.assertTrue(any(e.get("orphan") and e["key"] == "orphtest_failed"
+                            for e in out["evicted"]), out)
+
+    def test_dry_run_lists_orphans_without_deleting(self):
+        orphan = self.stage_dir("frames", "orphtest_dry")
+        with patch.object(self.r, "free_bytes", lambda: 0), \
+                patch.object(self.r, "protected_keys", lambda: set()):
+            out = self.r.gc_cache(target_free=1, budget=None, dry_run=True)
+        self.assertTrue(orphan.exists())
+        self.assertIn("orphtest_dry", [e["key"] for e in out["evicted"]])
+
+    def test_old_run_tars_are_pruned_records_kept(self):
+        import time as _t
+        from app import telemetry
+        old = db.create_job("old", self.cfg_dump())
+        db.set_job_state(old, "failed", ended=_t.time() - 40 * 86400)
+        recent = db.create_job("recent", self.cfg_dump())
+        db.set_job_state(recent, "failed", ended=_t.time() - 86400)
+        queued = db.create_job("queued", self.cfg_dump())
+        paths = {}
+        for jid in (old, recent, queued):
+            d = telemetry.run_dir(jid)
+            d.mkdir(parents=True, exist_ok=True)
+            tar, rec = d / "debug.tar", d / "debug.json"
+            tar.write_bytes(b"t" * 1000)
+            rec.write_text("{}")
+            t = _t.time() - 40 * 86400
+            os.utime(tar, (t, t))
+            paths[jid] = (tar, rec)
+        out = self.r.prune_runs()
+        self.assertFalse(paths[old][0].exists())
+        self.assertTrue(paths[old][1].exists())
+        self.assertTrue(paths[recent][0].exists())
+        self.assertTrue(paths[queued][0].exists())
+        self.assertGreaterEqual(out["removed"], 1)
+
+    @staticmethod
+    def cfg_dump():
+        return JobConfig.model_validate({"name": "r", "input": {"file": "clip.mp4"}}).model_dump()
 
 
 class SubmitValidation(unittest.TestCase):
