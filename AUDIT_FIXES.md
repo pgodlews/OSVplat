@@ -20,7 +20,7 @@ wrong, where, how to fix it, and how to know it is fixed.
 | B6 | The tables already name their build and say they predate v0.5.4. Decided: one Standard run on clip 0005 during the rc5 test adds a 0.5.4 row. |
 | B7 | Fixed: `app/osv.py`; the import failure is printed at startup and answered with a 400. |
 | B13 | Camera serial blanked in debug bundles. Decided: the GPS reference in `alignment.json` stays, documented in docs/cloud.md. |
-| B14 | `publish_image.sh` fixed. `numpy` unpinned in `venv_gs`: **owner's call**. `30_run_sfm.py` vs pycolmap 4.2.1's `panorama.py`: needs a CUDA host. |
+| B14 | `publish_image.sh` fixed. `numpy` in `venv_gs`: 0.2.0-rc4 carries 2.5.3 (checked 2026-11-12; `venv` is pinned at 2.5.2). Decided: pin `numpy==2.5.3` in `setup_gsplat_venv.sh`, with a check after the transformers install like the torch one, the next time that script changes for another reason. Editing it now would make rc5 recompile gsplat for six architectures (~4.5 h) for no change in the image. `30_run_sfm.py` vs pycolmap 4.2.1's `panorama.py`: needs a CUDA host. |
 | C1 | Fixed: `app/uploads.py`; the result tar is hashed while written and streamed. A damaged-ETag result upload now backs off between retries, as the other three already did. |
 | C2 | uuid map cached, `VramSampler` removed (peak from `ResourceSampler`). The 2 s `/api/status` cache was **not** done: a stale `held`/`foreign` flag for little gain. |
 | C3, C4, C6 | Fixed. C6 adds no key term: nothing read `frames/telemetry.csv`. |
