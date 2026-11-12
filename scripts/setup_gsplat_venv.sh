@@ -23,7 +23,11 @@ echo "gsplat pinned at $(git -C gsplat_src rev-parse HEAD)"
 rm -rf venv_gs; python3 -m venv venv_gs; P=./venv_gs/bin/pip
 $P install -q --upgrade pip
 $P install torch==2.9.1+cu130 torchvision==0.24.1+cu130 --index-url https://download.pytorch.org/whl/cu130 --extra-index-url https://pypi.org/simple
-$P install ninja numpy jaxtyping rich
+# numpy pinned like everything else here: unpinned, a build that missed the
+# Docker cache would take whatever was newest under torch and gsplat. 2.5.3 is
+# what 0.2.0-rc4 resolved to (checked 2026-11-12), so pinning changed nothing.
+NUMPY=2.5.3
+$P install ninja "numpy==$NUMPY" jaxtyping rich
 $P install -r gsplat_src/examples/requirements.txt --no-build-isolation
 $P install ./gsplat_src --no-build-isolation
 # SAM 3 mask backend (queue/app/mask_backends.py) runs here too. This pinned
@@ -33,5 +37,9 @@ torch_before=$(./venv_gs/bin/python -c "import torch; print(torch.__version__)")
 $P install transformers==5.5.0
 torch_after=$(./venv_gs/bin/python -c "import torch; print(torch.__version__)")
 [ "$torch_before" = "$torch_after" ] || { echo "transformers changed torch $torch_before -> $torch_after" >&2; exit 1; }
-# Validated build: torch 2.9.1+cu130 / CUDA 13.0 / gsplat 1.6.0 / transformers 5.5.0.
-./venv_gs/bin/python -c "import torch, gsplat, transformers; print(torch.__version__, torch.version.cuda, gsplat.__version__, transformers.__version__)"
+# gsplat's example requirements and transformers install after the pin and
+# could move it; fail here rather than ship a numpy nobody chose.
+numpy_now=$(./venv_gs/bin/python -c "import numpy; print(numpy.__version__)")
+[ "$numpy_now" = "$NUMPY" ] || { echo "numpy is $numpy_now, pinned $NUMPY: a later install moved it" >&2; exit 1; }
+# Validated build: torch 2.9.1+cu130 / CUDA 13.0 / gsplat 1.6.0 / transformers 5.5.0 / numpy 2.5.3.
+./venv_gs/bin/python -c "import torch, gsplat, transformers, numpy; print(torch.__version__, torch.version.cuda, gsplat.__version__, transformers.__version__, numpy.__version__)"
