@@ -121,6 +121,21 @@ class ReviewRegressions(unittest.TestCase):
         with patch.object(worker, "paused", return_value=True):
             self.assertIsNone(main.api_jobs(limit=1, offset=2)[0]["eta"]["starts_in"])
 
+    def test_job_page_matches_the_per_row_build(self):
+        import time as _t
+        for i, state in enumerate(("done", "failed", "done")):
+            jid = db.create_job(f"j{i}", self.cfg.model_dump())
+            db.set_job_state(jid, state, started=_t.time() - 100, ended=_t.time() - 10)
+            db.upsert_stage(jid, "frames", "kf", "done", started=1.0, ended=3.0)
+            db.upsert_stage(jid, "train", f"kt{i}", state, progress='{"step": 5}')
+            db.put_metric(jid, "psnr", 20.0 + i)
+            db.put_metric(jid, "note", "text")
+        with patch.object(worker, "schedulable_capacity", return_value=1):
+            page = main.api_jobs(limit=10, offset=0)
+        one_by_one = [main._job_dict(r) for r in db.list_jobs(limit=10, offset=0)]
+        self.assertEqual(page, one_by_one)
+        self.assertEqual(page[0]["metrics"]["note"], "text")
+
     def test_estimate_stops_at_run_until(self):
         cfg = self.cfg.model_copy(deep=True)
         cfg.run_until = "sfm"
@@ -253,6 +268,23 @@ class OrphansAndRuns(unittest.TestCase):
     @staticmethod
     def cfg_dump():
         return JobConfig.model_validate({"name": "r", "input": {"file": "clip.mp4"}}).model_dump()
+
+
+class GpuProbeCache(unittest.TestCase):
+    def test_uuid_map_is_read_once_and_dropped_on_failure(self):
+        g = worker.gpu
+        asked = []
+        apps = [[["GPU-a", "42", "LichtFeld", "100"]], None, [["GPU-a", "42", "x", "1"]]]
+
+        def smi(q, extra=None):
+            asked.append(q.split("=")[0])
+            return [["0", "GPU-a"]] if q == "gpu=index,uuid" else apps.pop(0)
+        with patch.object(g, "_uuid_index", None), patch.object(g, "_nvidia_smi", smi):
+            self.assertEqual(g.compute_procs()[0][0]["pid"], 42)
+            self.assertIsNone(g.compute_procs())          # the apps query fails
+            self.assertEqual(g.compute_procs()[0][0]["pid"], 42)
+        # Read for the first call, kept for the second, re-read after the failure.
+        self.assertEqual(asked.count("gpu"), 2, asked)
 
 
 class SubmitValidation(unittest.TestCase):

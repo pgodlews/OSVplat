@@ -1011,7 +1011,10 @@ check("fisheye SfM is priced superlinearly, near the measured 1404-frame run",
 
 # Camera auto-detection and smart mask defaults
 from app.main import _prepare
-from scripts.osv_meta import detect_camera
+from app import osv as _osv_readers
+
+check("the .OSV readers in scripts/ import", _osv_readers.ERROR is None, _osv_readers.ERROR)
+detect_camera = _osv_readers.detect_camera
 
 _repo_dir = Path(__file__).resolve().parent.parent
 _osmo_sample = _repo_dir / "CAM_20260813121712_0040_D.OSV"

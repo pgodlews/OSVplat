@@ -13,7 +13,7 @@ that projection -- so rather than teach it fisheye:
      (81 masks, no valid circle). The round trip is exact by construction, so
      masks land on the right fisheye pixels even where the stored lens model is
      not quite right -- and the circle is left to the SfM, which is the stage
-     that knows which radius each pass can trust.
+     that knows which radius it can trust.
 
 usage (venv_gs):
   87_fisheye_masks.py --images SELECT/images --calib FRAMES/calibration.json --out MASK_DIR \

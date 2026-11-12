@@ -223,6 +223,10 @@ MANAGED_TRAIN_FLAGS = {
 MIN_CHECKPOINT_EVERY = 500
 
 
+# LichtFeld's own iteration count, which steps_scaler scales from.
+LFS_DEFAULT_ITER = 30000
+
+
 class TrainCfg(Cfg):
     trainer: Literal["lichtfeld"] = "lichtfeld"
     strategy: Literal["mrnf", "mcmc", "igs+"] = "mrnf"
@@ -230,7 +234,7 @@ class TrainCfg(Cfg):
     # Training budget. steps_scaler scales iterations AND every schedule
     # (fill_pacing_iter, sh_degree_interval, refine_every, eval_steps, ...).
     # iter is the unscaled base; see the guard in _check_budget.
-    iter: int = Field(default=30000, ge=100)
+    iter: int = Field(default=LFS_DEFAULT_ITER, ge=100)
     steps_scaler: float = Field(default=1.0, gt=0, le=10)
 
     max_cap: int = Field(default=3_000_000, ge=10_000)
@@ -286,7 +290,7 @@ class TrainCfg(Cfg):
         # LichtFeld applies steps_scaler AFTER the CLI assignment, so passing
         # both --iter and --steps-scaler double-scales: --iter 15000
         # --steps-scaler 0.5 yields 7500 iterations. Refuse it.
-        if self.steps_scaler != 1.0 and self.iter != 30000:
+        if self.steps_scaler != 1.0 and self.iter != LFS_DEFAULT_ITER:
             raise ValueError(
                 "set either steps_scaler (scales iterations and all schedules "
                 "together) or a bare iter, not both: LichtFeld applies "
@@ -454,7 +458,7 @@ class JobConfig(Cfg):
     @model_validator(mode="after")
     def _check_pipeline(self):
         # sfm.render and sfm.mapper choose between the STITCHED reconstructions.
-        # A raw .OSV has exactly one: the two-pass incremental rig. Refuse a
+        # A raw .OSV has exactly one: the incremental rig. Refuse a
         # config that asks for something else rather than run the rig under a
         # config -- and a cache key -- that claims otherwise. The defaults are
         # what every client sends, so they pass.

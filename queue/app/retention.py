@@ -311,8 +311,7 @@ def prune_renders() -> dict:
     # glob is not recursive, so the thumbs subdirectory needs naming: they are
     # small and regenerate on demand, but a sweep over trim values would
     # otherwise leave one per variant forever.
-    return _prune_dir(RENDER_ROOT, RENDER_KEEP_DAYS,
-                      ("cmp_*.jpg", "*.jpg", "thumbs/*.jpg"))
+    return _prune_dir(RENDER_ROOT, RENDER_KEEP_DAYS, ("*.jpg", "thumbs/*.jpg"))
 
 
 # Margin on the largest entry a stage has ever produced. The next frames dump

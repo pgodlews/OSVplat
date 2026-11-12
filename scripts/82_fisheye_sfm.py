@@ -13,7 +13,8 @@ intrinsics:
 The rig's relative pose is refined in both, because the calibration gives the
 lenses' rotation but not their ~cm separation.
 
-Masks are required (fmasks_colmap/ from 81_fisheye_stitch.py). Outside the
+Masks are required (88_fisheye_sfm.py builds them: the valid circle, AND the
+person masks when the job has them; COLMAP layout lens{i}/<image>.png). Outside the
 valid circle a keypoint is black corner or past the fold of DJI's polynomial,
 where COLMAP's undistortion stops converging -- and COLMAP treats a missing
 mask as "extract everywhere" without saying so.

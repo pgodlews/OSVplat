@@ -25,18 +25,18 @@ def format_human(path: str, info: dict) -> str:
         lines.append(f"  Camera:           {info.get('camera_name')} (Handheld / Stick)")
         lines.append(f"  Model / Proto:    {info.get('model')} ({info.get('proto')})")
         lines.append(f"  IMU Rate:         ~{info.get('imu_rate_hz')} Hz")
-        lines.append(f"  GPS:              No")
-        lines.append(f"  Recommended Mask: ON (operator in frame)")
+        lines.append("  GPS:              No")
+        lines.append("  Recommended Mask: ON (operator in frame)")
     elif cam == "avata360":
         lines.append(f"  Camera:           {info.get('camera_name')} (Aerial Drone)")
         lines.append(f"  Model / Proto:    {info.get('model')} ({info.get('proto')})")
         lines.append(f"  IMU Rate:         ~{info.get('imu_rate_hz')} Hz")
-        lines.append(f"  GPS:              Yes (embedded fixes + .SRT)")
-        lines.append(f"  Recommended Mask: OFF (drone; enable if flying near people)")
+        lines.append("  GPS:              Yes (embedded fixes + .SRT)")
+        lines.append("  Recommended Mask: OFF (drone; enable if flying near people)")
     else:
         lines.append(f"  Camera:           {info.get('camera_name', 'Unknown / Generic')}")
         lines.append(f"  Is Fisheye:       {info.get('is_fisheye', False)}")
-        lines.append(f"  Recommended Mask: OFF")
+        lines.append("  Recommended Mask: OFF")
     if info.get("firmware"):
         lines.append(f"  Firmware:         {info.get('firmware')}")
     if info.get("serial"):

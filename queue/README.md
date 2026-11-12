@@ -50,6 +50,21 @@ UI is reachable only from the workstation itself.
 - **No `pkill -f`.** Cancellation kills the process group by PID
   (docs/troubleshooting.md #1 — `pkill -f` can kill the shell that runs it).
 
+## Other settings
+
+Environment variables not covered in their own section here or in
+docs/docker.md, docs/cloud.md and docs/job-telemetry.md:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEUE_STALL_TIMEOUT` | 900 s | A training run that reports no iteration for this long is killed and the job fails ("stalled"). |
+| `QUEUE_FIRST_PROGRESS_GRACE` | 1800 s | The same, until the first iteration: the dataset load at full 8K resolution takes minutes. |
+| `QUEUE_MAX_CONCURRENT` | number of GPUs | Training jobs in flight until `POST /api/concurrency` (or the UI's selector) stores another value. |
+| `QUEUE_MODELS_DIR` | `$SPLAT_ROOT/models` | Where gated mask-model weights live, one directory per backend (`app/mask_backends.py`). |
+| `QUEUE_MASK_PY` | `venv_gs` python | Interpreter the mask stage runs under. |
+| `QUEUE_LFS_PYTHON` | `python3` | The python the trainer's `lichtfeld` module was built for; restore points are made under it. |
+| `QUEUE_PREEMPT_POLL_S` | 5 s | How often `QUEUE_PREEMPT_WATCH` polls the cloud's metadata service (docs/cloud.md, "Spot GPUs"). `QUEUE_PREEMPT_AWS_URL` and `QUEUE_PREEMPT_GCP_URL` move that service, for tests only. |
+
 ## Layout on disk
 
 ```
@@ -408,20 +423,24 @@ POST   /api/jobs/clear          hide finished jobs from the view. Metrics, stage
                                 records and cache are all kept — the estimator
                                 fits its it/s constant from that history.
                                 ?purge=true deletes the hidden ones for real.
-GET    /api/status              pause state, per-GPU status
+GET    /api/jobs/{id}/thumb.jpg?w=480|1600   the clip's opening frame (at trim_start)
+GET    /api/jobs/{id}/restore/download   the restore point kept for a job (checkpoints.py)
+GET    /api/status              pause state, per-GPU status, image_variant, prep_backend
 POST   /api/pause               {paused: bool}
-GET    /api/cache               cache entries, sizes, free space, retention settings
+POST   /api/concurrency         {max_concurrent: n}: training jobs in flight, stored
+GET    /api/cache               cache entries, sizes, free space, retention settings,
+                                orphans / orphan_bytes (left by failed builds)
 POST   /api/cache/gc[?dry_run&budget_gb]
-                                evict least-recently-used entries, train
-                                entries last. Never touches
+                                remove every orphan, then evict least-recently-used
+                                entries, train entries last. Never touches
                                 a cache a queued or running job needs, or one
                                 whose dir is locked by a live process.
 ```
 
 ## Tests
 
-Ten suites, installed by `deploy.sh`. Only the API suite needs a running
-service and reads `QUEUE_TOKEN` from the service's own env file:
+Every `queue/test_*.py` is installed by `deploy.sh`. Only the API suite needs a
+running service and reads `QUEUE_TOKEN` from the service's own env file:
 
 ```bash
 set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_api.py
@@ -436,6 +455,10 @@ set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_a
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_remote.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_benchmark.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_hoststats.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_debugdump.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_handoff.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_checkpoint.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_prep_backend.py
 ~/splat/venv/bin/python ~/splat/scripts/test_fisheye.py
 ```
 

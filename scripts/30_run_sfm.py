@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """COLMAP 4.2 panorama SfM via pycolmap-cuda12 (venv/).
 
-usage: 30_run_sfm.py [perspective_overlapping|perspective_non_overlapping|spherical]
-                     [incremental|global] [panos_dir] [out_root] [--masks DIR]
+usage: 30_run_sfm.py {perspective_overlapping|perspective_non_overlapping|spherical}
+                     {incremental|global} PANOS_DIR OUT_ROOT [--masks DIR]
 
 perspective_overlapping = 12 x 90-deg pinhole views per panorama (4 yaw x pitch
 -35/0/35) locked as a rig; GPU SIFT; sequential matching.
@@ -36,10 +36,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 THREADS = int(os.environ.get("SPLAT_THREADS") or -1)
 
 ap = argparse.ArgumentParser()
-ap.add_argument("render", nargs="?", default="perspective_overlapping")
-ap.add_argument("mapper", nargs="?", default="incremental")
-ap.add_argument("panos", nargs="?", default="run1/panos")
-ap.add_argument("out_root", nargs="?", default="run1")
+ap.add_argument("render", choices=("perspective_overlapping", "perspective_non_overlapping",
+                                   "spherical"))
+ap.add_argument("mapper", choices=("incremental", "global"))
+ap.add_argument("panos")
+ap.add_argument("out_root")
 ap.add_argument("--masks", default="",
                 help="directory of COLMAP-named masks (<image name>.png), "
                      "black = ignore. Spherical render only.")

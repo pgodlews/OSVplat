@@ -14,7 +14,19 @@ wrong, where, how to fix it, and how to know it is fixed.
 | A4 | Fixed on `claude/audit-fixes-a` (Stop after, import panel, bundle link); checked in a browser against prep and train services. |
 | A5 | Fixed on `claude/audit-fixes-a`. Not checked with `docker compose config` (no Docker on the machine that made the change). |
 | A6 | Fixed on `claude/audit-fixes-a`. |
-| everything else | Open. |
+| A7–A10 | Fixed (`app/jobrows.py`; one 90 % threshold passed from 88 to 85; `extra_args` reduced to flag names; `exclusive()` clears its hold on a failed probe). |
+| B1–B4, B8–B12 | Fixed. B1: comments only; the SfM estimate seed is *not* refit (no fisheye-sfm-4 history to fit from here). |
+| B5 | Presets fixed. "currently 0.1.4-rc6" left alone: **owner's call** (`:latest` is the last signed release). |
+| B6 | Open, **owner's call**: re-measure on LichtFeld 0.5.4 or label the tables with the build they were measured on. |
+| B7 | Fixed: `app/osv.py`; the import failure is printed at startup and answered with a 400. |
+| B13 | Camera serial blanked in debug bundles; the GPS reference in `alignment.json` is documented, not removed (**owner's call**). |
+| B14 | `publish_image.sh` fixed. `numpy` unpinned in `venv_gs`: **owner's call**. `30_run_sfm.py` vs pycolmap 4.2.1's `panorama.py`: needs a CUDA host. |
+| C1 | Fixed: `app/uploads.py`; the result tar is hashed while written and streamed. A damaged-ETag result upload now backs off between retries, as the other three already did. |
+| C2 | uuid map cached, `VramSampler` removed (peak from `ResourceSampler`). The 2 s `/api/status` cache was **not** done: a stale `held`/`foreign` flag for little gain. |
+| C3, C4, C6 | Fixed. C6 adds no key term: nothing read `frames/telemetry.csv`. |
+| C5, C7 | Open, **owner's call** (both touch what a cached stage holds or keys). |
+| C8 | Log stream ends with its stage; redundant prune pattern and per-frame constant fixed. Dockerfile dedup skipped (layer sharing would need measuring). |
+| D | Done, except `scripts/detect_camera.py` and `QUEUE_MASK_PY`: **owner's call** whether they stay. |
 
 ## How to work through this file
 

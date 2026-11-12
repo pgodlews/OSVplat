@@ -44,6 +44,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import avata_motion
+from io_pool import io_threads
 
 # Nominal video frame rates. The camera's frame clock (3-1-2) runs up to ~150 ppm
 # off nominal, but ffmpeg picks frames by container timestamps, which are exact.
@@ -220,7 +221,8 @@ def main():
         print(f"decode: {len(f0)} instants x 2 lenses in {secs:.1f}s", flush=True)
 
     t = time.time()
-    with ProcessPoolExecutor(16) as ex:
+    # SPLAT_THREADS: the container's CPU allowance, shared between jobs (queue/app/resources.py).
+    with ProcessPoolExecutor(io_threads(16)) as ex:
         s0 = np.array(list(ex.map(score, f0, chunksize=8)))
         s1 = np.array(list(ex.map(score, f1, chunksize=8)))
     rig = np.minimum(s0, s1)

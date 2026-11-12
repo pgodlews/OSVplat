@@ -42,7 +42,17 @@ def _nvidia_smi(query: str, extra: list[str] | None = None) -> Optional[list[lis
     return rows
 
 
+_uuid_index: Optional[dict[str, int]] = None
+
+
 def _uuid_to_index() -> Optional[dict[str, int]]:
+    """{uuid: index}, probed once: a card does not change under us, and this
+    was a second nvidia-smi on every compute_procs() call (every sample of
+    every running stage). Dropped when a later query fails, so a driver
+    reset is re-read."""
+    global _uuid_index
+    if _uuid_index is not None:
+        return _uuid_index
     rows = _nvidia_smi("gpu=index,uuid")
     if rows is None:
         return None
@@ -53,6 +63,7 @@ def _uuid_to_index() -> Optional[dict[str, int]]:
                 out[r[1]] = int(r[0])
             except ValueError:
                 continue
+    _uuid_index = out or None
     return out
 
 
@@ -66,6 +77,8 @@ def compute_procs() -> Optional[dict[int, list[dict]]]:
         return None
     apps = _nvidia_smi("compute-apps=gpu_uuid,pid,process_name,used_memory")
     if apps is None:
+        global _uuid_index
+        _uuid_index = None
         return None
     out: dict[int, list[dict]] = {g: [] for g in idx.values()}
     for r in apps:

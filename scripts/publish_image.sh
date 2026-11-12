@@ -245,7 +245,7 @@ publicly_readable "$PROBE_PUBLIC" || die "the privacy probe cannot read public $
 ! publicly_readable "$STAGING" || die "$STAGING is PUBLIC; the staging package must be private (make it private or delete it)"
 declare -A DIGEST
 write_bake push "$STAGING"
-echo "==> building $TARGETS in one bake for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:$VERSION[-target]"
+echo "==> building $TARGETS in one bake for CUDA_ARCH=$CUDA_ARCH, once, into private staging $STAGING:${VERSION}[-target]"
 "${BAKE[@]}" --metadata-file "$WORK/meta.json"
 for t in $TARGETS; do
   sfx=$(suffix "$t")

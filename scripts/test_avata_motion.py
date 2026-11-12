@@ -176,5 +176,48 @@ class Selection(unittest.TestCase):
                     self.assertTrue(os.path.samefile(selected, original))
 
 
+class DetectCamera(unittest.TestCase):
+    """osv_meta.detect_camera: the header from the start of the telemetry, cached."""
+
+    def clip(self, root, padding):
+        raw = field(1, field(1, field(1, b"dvtm_AVATA360.proto"))) + field(3, b"x" * padding)
+        mdat = struct.pack(">I4s", len(raw) + 8, b"mdat") + raw
+        src = root / "flight.OSV"
+        src.write_bytes(struct.pack(">I4s", len(mdat) + 8, b"camd") + mdat)
+        return src
+
+    def test_reads_a_prefix_once(self):
+        import osv_meta
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            src = self.clip(Path(td), 4 << 20)
+            limits = []
+            real = osv_meta.find_camd
+
+            def spy(path, limit=None):
+                limits.append(limit)
+                return real(path, limit)
+            osv_meta._detect_cached.cache_clear()
+            with patch.object(osv_meta, "DETECT_PREFIX", 4096), \
+                    patch.object(osv_meta, "find_camd", spy):
+                a = osv_meta.detect_camera(src)
+                b = osv_meta.detect_camera(src)
+            self.assertEqual(a["camera"], "avata360")
+            self.assertEqual(a, b)
+            self.assertEqual(limits, [4096])          # one read, of the prefix only
+            a["camera"] = "changed"                   # callers get a copy
+            self.assertEqual(osv_meta.detect_camera(src)["camera"], "avata360")
+
+    def test_falls_back_to_the_whole_stream(self):
+        import osv_meta
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            src = self.clip(Path(td), 10)
+            osv_meta._detect_cached.cache_clear()
+            # A prefix too short to hold the mdat header: the full read decides.
+            with patch.object(osv_meta, "DETECT_PREFIX", 4):
+                self.assertEqual(osv_meta.detect_camera(src)["camera"], "avata360")
+
+
 if __name__ == "__main__":
     unittest.main()

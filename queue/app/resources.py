@@ -113,8 +113,8 @@ def thread_env(threads: int) -> dict[str, str]:
             "OPENBLAS_NUM_THREADS": n}
 
 
-def memory_limit_bytes(root: Path = _CGROUP) -> Optional[int]:
-    """The cgroup memory limit, else MemTotal; None if neither is readable."""
+def cgroup_memory_limit(root: Path = _CGROUP) -> Optional[int]:
+    """The cgroup memory limit (v2 or v1), or None when unlimited or unknown."""
     raw = _read(root / "memory.max") or _read(root / "memory" / "memory.limit_in_bytes")
     if raw and raw != "max":
         try:
@@ -124,6 +124,14 @@ def memory_limit_bytes(root: Path = _CGROUP) -> Optional[int]:
                 return v
         except ValueError:
             pass
+    return None
+
+
+def memory_limit_bytes(root: Path = _CGROUP) -> Optional[int]:
+    """The cgroup memory limit, else MemTotal; None if neither is readable."""
+    v = cgroup_memory_limit(root)
+    if v is not None:
+        return v
     for line in (_read(Path("/proc/meminfo")) or "").splitlines():
         if line.startswith("MemTotal:"):
             return int(line.split()[1]) * 1024

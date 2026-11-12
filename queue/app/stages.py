@@ -24,7 +24,7 @@ from .config import (CACHE_ROOT, FISHEYE_FRAMES, FISHEYE_MASKS, FISHEYE_SFM,
                      FISHEYE_TRAIN, GS_PY, HWACCEL, LFS_BIN, OSV_META, PERSON_MASKS,
                      MASK_PY, MODELS_ROOT, RUN_SFM, SELECT_SHARP, SCRIPTS,
                      SFM_PY, SPLAT_ROOT)
-from .jobs import JobConfig
+from .jobs import LFS_DEFAULT_ITER, JobConfig
 from .probe import ffprobe
 from .mask_backends import MASK_BACKENDS, weights_dir
 
@@ -441,10 +441,12 @@ def mask_finalize(ctx: Ctx) -> dict:
         if (ctx.dir("mask") / "summary.json").is_file() else {}
     cov = summary.get("coverage_solid_angle_mean", 0.0)
     empty = summary.get("frames_without_detection") or []
+    # Name what was asked for: with prompts ["boat"], "found nobody" misleads.
+    what = " or ".join(ctx.cfg.mask.prompts)
     if cov <= 0.0:
         raise RuntimeError(
-            "person masking found nobody in any frame; training would be "
-            "identical to an unmasked run. Check the overlay images")
+            f"masking found no {what} in any frame; training would be "
+            f"identical to an unmasked run. Check the overlay images")
     n_colmap = len(list((ctx.dir("mask") / "masks_colmap").glob("*.png"))) \
         if (ctx.dir("mask") / "masks_colmap").is_dir() else 0
     if ctx.cfg.mask.use_for_sfm and n_colmap != n_panos:
@@ -455,7 +457,7 @@ def mask_finalize(ctx: Ctx) -> dict:
     summary["masks"] = n
     summary["colmap_masks"] = n_colmap
     summary["warnings"] = (
-        [f"{len(empty)} frame(s) had no person detected: "
+        [f"{len(empty)} frame(s) had no {what} detected: "
          f"{', '.join(empty[:6])}"] if empty else [])
     return summary
 
@@ -585,7 +587,7 @@ def sfm_finalize(ctx: Ctx) -> dict:
     summary["warnings"] = _sfm_warnings(summary, n_panos)
     # A fragment is a failure, not a warning: 2 of 100 frames used to pass,
     # get cached, and train for an hour on a sliver of the scene. The fisheye
-    # path refuses under 90% (85_fisheye_dataset.py); a stitched clip whose
+    # path refuses under 90% (88_fisheye_sfm.py MIN_REGISTERED); a stitched clip whose
     # later half fails to register still yields a usable partial scene, hence
     # the lower floor here.
     if summary["registration_pct"] < MIN_STITCHED_REGISTRATION_PCT:
@@ -628,7 +630,8 @@ SFM_PATTERNS = [
 # COLMAP runs three phases back to back and counts through each one, but the
 # counters look nothing alike and only the first two carry their own total.
 SFM_PANOS = re.compile(r"START .*\b(?:panos|frames)=(\d+)")
-# 88_fisheye_sfm.py announces each of its two rig passes.
+# 88_fisheye_sfm.py announces its rig pass(es): one today ("PASS 1/1"); the
+# parsing below still handles more, as earlier builds ran two.
 SFM_PASS = re.compile(r"FISHEYE PASS (\d+)/(\d+)")
 SFM_EXTRACT = re.compile(r"Processed file \[(\d+)/(\d+)\]")
 SFM_MATCH = re.compile(r"Processing image \[(\d+)/(\d+)\]")
@@ -658,9 +661,9 @@ def sfm_parse(line: str, prev: dict) -> dict:
 
     m = SFM_PASS.search(line)
     if m:
-        # Each pass counts through all three phases again. Let the phase start
-        # over and have the pass number carry the forward motion instead, or the
-        # second pass reads as a bar stuck at "mapping".
+        # A pass counts through all three phases. With more than one, let the
+        # phase start over and have the pass number carry the forward motion,
+        # or a second pass would read as a bar stuck at "mapping".
         out.update(sfm_pass=int(m.group(1)), sfm_passes=int(m.group(2)),
                    phase=None, done=0, total=0)
         return out
@@ -764,7 +767,6 @@ def _lichtfeld_argv(ctx: Ctx, dataset: str, images: str, gut: bool,
     # of emitting both: exactly one budget flag ever reaches the trainer, and
     # its internal schedule - and therefore metrics.csv - always tracks the
     # real target.
-    LFS_DEFAULT_ITER = 30000
     if t.steps_scaler != 1.0:
         scaler = t.steps_scaler
     elif t.iter != LFS_DEFAULT_ITER:
@@ -865,7 +867,6 @@ TRAIN_PROGRESS = re.compile(
 # change cannot silently drop PSNR too.
 TRAIN_EVAL = re.compile(
     r"PSNR:\s*([\d.]+)(?:.*?SSIM:\s*([\d.]+))?", re.IGNORECASE)
-TRAIN_DONE = re.compile(r"completed in\s+([\d.]+)\s*(\w+)", re.IGNORECASE)
 
 
 # Nothing is reported between launch and iteration 0, and at full resolution
@@ -1032,7 +1033,7 @@ def train_finalize(ctx: Ctx) -> dict:
     # peak only from derived erased it the first time a later job reused the
     # run, permanently, and the reusing job recorded no VRAM metric either.
     # This is the one number there is no a-priori model for, so losing it costs
-    # the very history VramSampler exists to accumulate.
+    # the very history the train stage's peak measurement exists to accumulate.
     peak = ctx.derived.get("peak_vram_mib") or read_done(out).get("peak_vram_mib")
     if peak:
         info["peak_vram_mib"] = peak
@@ -1042,10 +1043,10 @@ def train_finalize(ctx: Ctx) -> dict:
 # ------------------------------------------------------------------ export
 
 def export_argv(ctx: Ctx) -> Optional[list[str]]:
-    """No-op for now: training already emits --export formats in place.
+    """No-op: training already writes every --export format (ply, sog, spz).
 
-    Kept as a stage so extra conversions (spz, rad, decimated html) can be added
-    without disturbing the cache chain above it.
+    Kept as a stage so further conversions (a decimated or html export) can be
+    added without disturbing the cache chain above it.
     """
     return None
 
@@ -1053,7 +1054,7 @@ def export_argv(ctx: Ctx) -> Optional[list[str]]:
 def export_finalize(ctx: Ctx) -> dict:
     src, dst = ctx.dir("train"), ctx.dir("export")
     dst.mkdir(parents=True, exist_ok=True)
-    want = {p.name: p for pat in ("*.ply", "*.sog", "*.spz", "*.html")
+    want = {p.name: p for pat in (f"*.{e}" for e in ARTIFACT_EXTS)
             for p in sorted(src.glob(pat))}
     if not want:
         # This finalizer re-runs on every cache hit (see _cache_ok), so raising
@@ -1134,7 +1135,8 @@ def fisheye_frames_finalize(ctx: Ctx) -> dict:
             f"fisheye frame extraction wrote {n0} and {n1} candidates for the "
             f"two lenses; a rig frame needs both")
     src = SPLAT_ROOT / ctx.cfg.input.file
-    proc = subprocess.run([str(SFM_PY), str(OSV_META), str(src), str(out)],
+    proc = subprocess.run([str(SFM_PY), str(OSV_META), str(src), str(out),
+                           "--calibration-only"],
                           capture_output=True, text=True, timeout=900)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -1510,7 +1512,7 @@ def space_estimate(ctx: Ctx, stage: str) -> Optional[float]:
         return ESTIMATE_MARGIN * (ply * EXPORTS_PER_PLY + gens * gen + TRAIN_FIXED_BYTES)
     if stage == "export":
         src = ctx.dir("train")
-        size = sum(p.stat().st_size for pat in ("*.ply", "*.sog", "*.spz", "*.html")
+        size = sum(p.stat().st_size for pat in (f"*.{e}" for e in ARTIFACT_EXTS)
                    for p in src.glob(pat) if p.is_file())
         return ESTIMATE_MARGIN * size if size else None
     return None

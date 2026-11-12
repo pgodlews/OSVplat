@@ -33,6 +33,7 @@ import os
 import platform
 import queue as _queue
 import re
+import shlex
 import socket
 import statistics
 import subprocess
@@ -121,10 +122,7 @@ def _cpu() -> dict:
     flags_line = next((l for l in info.splitlines() if l.startswith("flags")), "")
     flags = set(flags_line.split(":", 1)[1].split()) if ":" in flags_line else set()
     logical = os.cpu_count()
-    try:
-        affinity = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        affinity = logical
+    affinity = resources.affinity_cpus()
     # A container limited with --cpus sees every host core in /proc and in its
     # affinity mask; only the cgroup quota says how much it may actually use.
     # resources.py reads cgroup v1 as well as v2: a RunPod host on v1 was
@@ -158,13 +156,9 @@ def _memory() -> dict:
             total = int(l.split()[1]) * 1024
     if total is None and (_sysctl("hw.memsize") or "").isdigit():
         total = int(_sysctl("hw.memsize"))
-    limit = None
-    raw = (_read("/sys/fs/cgroup/memory.max") or "").strip()
-    if raw and raw != "max":
-        try:
-            limit = int(raw)
-        except ValueError:
-            pass
+    # v1 as well as v2: resources.py reads both, and a v1 host recorded no
+    # limit here while the stages were sized to one.
+    limit = resources.cgroup_memory_limit()
     shm = None
     try:
         st = os.statvfs("/dev/shm")
@@ -403,6 +397,9 @@ class ResourceSampler(threading.Thread):
         # Whole-device GPU memory split by owner, summed: this stage's process
         # tree against every other process (another job, another tenant).
         self.gpu_mem_other_peak: Optional[int] = None
+        # This stage's own peak, the queue's peak_vram_mib for a training run
+        # (worker.run_stage), from the same samples: it had a sampler of its own.
+        self.gpu_mem_own_peak: Optional[int] = None
         # With a job: one line per sample in its samples.jsonl.gz.
         self.job_id = job_id
         self.stage = stage
@@ -513,6 +510,8 @@ class ResourceSampler(threading.Thread):
         other = max(0, self._gpu_now["mem_mib"] - own)
         self._gpu_now["own_mib"] = own
         self._gpu_now["other_mib"] = other
+        if own:
+            self.gpu_mem_own_peak = max(own, self.gpu_mem_own_peak or 0)
         self.gpu_mem_other_peak = other if self.gpu_mem_other_peak is None else max(
             self.gpu_mem_other_peak, other)
 
@@ -701,14 +700,34 @@ def _scalars(d: Optional[dict]) -> dict:
             if not k.startswith("_") and isinstance(v, (int, float, bool))}
 
 
-def _config(cfg: dict) -> dict:
-    """The job config minus what names things: the clip file and job name."""
+def _extra_flags(extra_args) -> list[str]:
+    """The flag names of train.extra_args, never their values: a value can be
+    a path (--eval-mask "masks:/home/...") or anything else typed there."""
+    try:
+        toks = shlex.split(extra_args or "")
+    except ValueError:
+        return []
+    return sorted({t.split("=", 1)[0] for t in toks if t.startswith("-")})
+
+
+def _config(cfg: dict, redact=None) -> dict:
+    """The job config minus what names things: the clip file, the job name,
+    and the values in train.extra_args. Mask prompts are user text too; they
+    stay (they are what the mask stage did) but go through the redactor."""
     cfg = json.loads(json.dumps(cfg))
     cfg.pop("name", None)
     inp = cfg.get("input") or {}
     f = inp.pop("file", None)
     if f:
         inp["file_ext"] = Path(f).suffix.lower()
+    train = cfg.get("train")
+    if isinstance(train, dict) and "extra_args" in train:
+        train["extra_args"] = _extra_flags(train.pop("extra_args"))
+    mask = cfg.get("mask")
+    if redact is not None and isinstance(mask, dict):
+        for k in ("prompts", "attached"):
+            if isinstance(mask.get(k), list):
+                mask[k] = [redact(str(x)) for x in mask[k]]
     return cfg
 
 
@@ -944,7 +963,7 @@ def build(job_id: int) -> Optional[dict]:
             # Errors quote paths and clip names ("input samples/x.OSV is gone").
             "error": _redactor(job_id)((row["error"] or "")[:500]) or None,
             "input_bytes": input_bytes,
-            "config": _config(cfg),
+            "config": _config(cfg, _redactor(job_id)),
         },
         "plan": plan,
         "stages": stages,

@@ -38,15 +38,14 @@ import tarfile
 import threading
 import time
 import urllib.parse
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from . import db, telemetry
-from .config import (OUTPUT_UPLOAD, OUTPUT_UPLOAD_ERROR, RUNS_ROOT, TLS_INSECURE,
-                     ssl_context)
+from . import db, telemetry, uploads
+from .config import OUTPUT_UPLOAD, OUTPUT_UPLOAD_ERROR, TLS_INSECURE, ssl_context
 from .stages import ARTIFACT_EXTS
+from .uploads import safe_url
 
 _lock = threading.Lock()          # one upload at a time; they share the uplink
 
@@ -69,12 +68,6 @@ def _set_status(job_id: int, **st) -> dict:
     tmp.write_text(json.dumps(st, indent=1))
     os.replace(tmp, p)
     return st
-
-
-def safe_url(url: str) -> str:
-    """scheme://host/path without the query: the signature is the credential."""
-    u = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, "", ""))
 
 
 # ------------------------------------------------------------- preflight
@@ -188,11 +181,32 @@ def export_files(job_id: int) -> list[Path]:
             and p.is_file()]
 
 
+class _Hashing:
+    """The archive file, hashed as it is written: no second pass over GBs."""
+
+    def __init__(self, f):
+        self.f, self.sha, self.md5 = f, hashlib.sha256(), hashlib.md5()
+
+    def write(self, b) -> int:
+        self.sha.update(b)
+        self.md5.update(b)
+        return self.f.write(b)
+
+
 def build_archive(job_id: int, files: list[Path], out: Path) -> dict:
     """Pack files as job<id>/<name> (links followed); return size and digests."""
     prefix = f"job{job_id:05d}"
     tmp = out.with_suffix(f".{uuid.uuid4().hex[:6]}.tmp")
-    with tarfile.open(tmp, "w", dereference=True) as tar:
+    with tmp.open("wb") as raw:
+        h = _Hashing(raw)
+        _pack(job_id, files, prefix, h)
+    os.replace(tmp, out)
+    return {"bytes": out.stat().st_size, "sha256": h.sha.hexdigest(),
+            "md5": h.md5.hexdigest()}
+
+
+def _pack(job_id: int, files: list[Path], prefix: str, fileobj) -> None:
+    with tarfile.open(fileobj=fileobj, mode="w|", dereference=True) as tar:
         for p in files:
             tar.add(p, arcname=f"{prefix}/{p.name}", recursive=False)
         # Read whole first: a tar member cut short would break the result
@@ -206,61 +220,22 @@ def build_archive(job_id: int, files: list[Path], out: Path) -> dict:
             info = tarfile.TarInfo(f"{prefix}/telemetry.json")
             info.size, info.mtime, info.mode = len(tel), int(time.time()), 0o644
             tar.addfile(info, io.BytesIO(tel))
-    os.replace(tmp, out)
-    sha, md5 = hashlib.sha256(), hashlib.md5()
-    with out.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            sha.update(chunk)
-            md5.update(chunk)
-    return {"bytes": out.stat().st_size, "sha256": sha.hexdigest(),
-            "md5": md5.hexdigest()}
 
 
-def request(target: dict, job_id: int, name: str, data: bytes) -> urllib.request.Request:
-    """telemetry.upload_request with the tar content type. No other headers:
-    a presigned PUT signs only `host`, and AWS refuses unsigned extras (a
-    Content-Type is the one it tolerates)."""
-    t = dict(target)
-    t["headers"] = {"Content-Type": "application/x-tar", **(target.get("headers") or {})}
-    return telemetry.upload_request(t, job_id, name, data)
-
-
-def etag_problem(etag: Optional[str], md5_hex: str) -> Optional[str]:
-    """A damaged upload, judged by the ETag S3 returned, or None.
-
-    Only a plain 32-hex ETag is an MD5: multipart uploads ("...-3") and
-    SSE-KMS objects have other ETags, and some servers send none. Those are
-    not checked rather than failed; sha256 in upload.json still is.
-    """
-    e = (etag or "").strip().strip('"').lower()
-    if len(e) == 32 and all(c in "0123456789abcdef" for c in e) and e != md5_hex:
-        return f"stored object's ETag {e} is not the archive's MD5 {md5_hex}: damaged in transit"
-    return None
-
-
-def _single_object_owner(target: dict, dest: str) -> Optional[int]:
-    """The job that already uploaded to this same fixed object, if any.
-
-    Compared by `dest` (the URL without its signature): a new URL for another
-    object is fine, the same object again is not.
-    """
-    if "{job}" in target["url"] or "{job}" in (target.get("key") or ""):
-        return None
-    for d in sorted(RUNS_ROOT.glob("job*")):
-        st = status(int(d.name[3:])) if d.name[3:].isdigit() else None
-        if st and st.get("state") == "done" and st.get("url") == dest:
-            return int(d.name[3:])
-    return None
+def _uploaded_to(job_id: int) -> Optional[str]:
+    """Where this job's result went, if it went (compared without signature)."""
+    st = status(job_id)
+    return st.get("url") if st and st.get("state") == "done" else None
 
 
 def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dict:
     """Pack and upload one job's export. Returns the status it recorded."""
     target = target or OUTPUT_UPLOAD
-    dest = safe_url(target["url"].replace("{job}", f"job{job_id:05d}")
-                    .replace("{file}", f"job{job_id:05d}.tar"))
+    name = f"job{job_id:05d}.tar"
+    dest = uploads.destination(target, job_id, name)
     with _lock:
-        owner = _single_object_owner(target, dest)
-        if owner is not None and owner != job_id:
+        owner = uploads.owner_of(target, dest, job_id, _uploaded_to)
+        if owner is not None:
             st = _set_status(job_id, state="refused", url=dest,
                              error=f"OUTPUT_UPLOAD_URL names one object and job "
                                    f"{owner} already uploaded to it; use a {{job}} "
@@ -273,35 +248,16 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
                              error="no export files to upload")
             print(f"job {job_id}: output upload FAILED: no export files")
             return st
-        name = f"job{job_id:05d}.tar"
         arc = telemetry.run_dir(job_id) / name
         arc.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
         _set_status(job_id, state="uploading", url=dest, started=round(started, 1))
         meta = build_archive(job_id, files, arc)
-        data = arc.read_bytes()
         pack_s = round(time.time() - started, 1)
-        err = None
-        tries = transfer_s = 0
-        for attempt in range(attempts):
-            tries += 1
-            try:
-                req = request(target, job_id, name, data)
-                # The last attempt's own time, for telemetry's MB/s.
-                t0 = time.monotonic()
-                with urllib.request.urlopen(req, timeout=600, context=ssl_context()) as r:
-                    r.read()
-                    etag = r.headers.get("ETag")
-                transfer_s = round(time.monotonic() - t0, 2)
-                err = etag_problem(etag, meta["md5"])
-                if err is None:
-                    break
-            except Exception as exc:                          # noqa: BLE001
-                # HTTPError's text can echo the URL; keep only code and reason.
-                err = (f"HTTP {exc.code} {exc.reason}" if hasattr(exc, "code")
-                       else f"{type(exc).__name__}: {exc}")
-                if attempt < attempts - 1:
-                    time.sleep(2 ** (attempt + 1))
+        # Streamed from disk: a 6M-splat result is GBs, and was read whole.
+        res = uploads.send(target, job_id, name, arc, meta["md5"], timeout=600,
+                           attempts=attempts, context=ssl_context())
+        err, tries, transfer_s = res["error"], res["attempts"], res["transfer_s"]
         st = _set_status(
             job_id, state="failed" if err else "done", url=dest, file=name,
             files=[p.name for p in files], bytes=meta["bytes"],

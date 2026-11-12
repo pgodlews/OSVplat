@@ -37,15 +37,14 @@ import subprocess
 import tarfile
 import threading
 import time
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Optional
 
 from pydantic import ValidationError
 
-from . import db, outputs, retention, telemetry
-from .config import (CACHE_ROOT, HANDOFF_ROOT, HANDOFF_UPLOAD, HANDOFF_UPLOAD_ERROR,
+from . import db, outputs, retention, telemetry, uploads
+from .config import (_flag, CACHE_ROOT, HANDOFF_ROOT, HANDOFF_UPLOAD, HANDOFF_UPLOAD_ERROR,
                      IMAGE_VARIANT, RUNS_ROOT, SPLAT_ROOT, ssl_context)
 from .jobs import (FISHEYE_PIPELINE, FISHEYE_SFM, IMU_SELECT, REDUNDANT_POINTS, UPRIGHT,
                    JobConfig)
@@ -70,7 +69,7 @@ FETCH_RECORD = RUNS_ROOT / "handoff_fetch.json"
 # every file: kept, it doubles the train side's input on disk (a 5.45 GB tar
 # next to the 5.47 GB it unpacked to, 2026-09-29). QUEUE_HANDOFF_KEEP=1, or
 # keep=true on the import, keeps it to import again.
-KEEP_BUNDLES = os.environ.get("QUEUE_HANDOFF_KEEP", "0").strip().lower() in ("1", "true", "yes", "on")
+KEEP_BUNDLES = _flag("QUEUE_HANDOFF_KEEP", "0")
 
 _lock = threading.Lock()          # one upload at a time; they share the uplink
 # One build at a time, and never behind an upload: the worker writes the bundle
@@ -403,26 +402,9 @@ def _write(job_id: int, row, cfg: JobConfig, keys: dict, stages: dict,
 
 # ------------------------------------------------------------------ upload
 
-def _owner(dest: str, job_id: int) -> Optional[int]:
-    """Another job whose bundle already went to this same fixed object."""
-    for d in sorted(RUNS_ROOT.glob("job*")):
-        if not d.name[3:].isdigit() or int(d.name[3:]) == job_id:
-            continue
-        st = status(int(d.name[3:]))
-        if st and (st.get("upload") or {}).get("state") == "done" \
-                and (st.get("upload") or {}).get("url") == dest:
-            return int(d.name[3:])
-    return None
-
-
-def _request(target: dict, job_id: int, name: str, f, size: int) -> urllib.request.Request:
-    """A streaming PUT (bundles run to GBs), or outputs' builder for a POST."""
-    if (target.get("method") or "PUT").upper() == "POST":
-        return outputs.request(target, job_id, name, f.read())
-    url = target["url"].replace("{job}", f"job{job_id:05d}").replace("{file}", name)
-    headers = {"Content-Type": "application/x-tar", **(target.get("headers") or {}),
-               "Content-Length": str(size)}
-    return urllib.request.Request(url, data=f, headers=headers, method="PUT")
+def _uploaded_to(job_id: int) -> Optional[str]:
+    up = (status(job_id) or {}).get("upload") or {}
+    return up.get("url") if up.get("state") == "done" else None
 
 
 def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dict:
@@ -433,11 +415,9 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
     if not target or st.get("role") != "prep" or not bundle_path(job_id).is_file():
         return st
     name = bundle_name(job_id)
-    dest = outputs.safe_url(target["url"].replace("{job}", f"job{job_id:05d}")
-                            .replace("{file}", name))
+    dest = uploads.destination(target, job_id, name)
     with _lock:
-        fixed = "{job}" not in target["url"] and "{job}" not in (target.get("key") or "")
-        owner = _owner(dest, job_id) if fixed else None
+        owner = uploads.owner_of(target, dest, job_id, _uploaded_to)
         if owner is not None:
             st["upload"] = {"state": "refused", "url": dest,
                             "error": f"HANDOFF_UPLOAD_URL names one object and job "
@@ -446,28 +426,11 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
             print(f"job {job_id}: handoff upload refused: {st['upload']['error']}")
             return _set_status(job_id, **st)
         path = bundle_path(job_id)
-        size = path.stat().st_size
-        err, tries, transfer_s = None, 0, None
-        for attempt in range(attempts):
-            tries += 1
-            try:
-                with path.open("rb") as f:
-                    req = _request(target, job_id, name, f, size)
-                    t0 = time.monotonic()
-                    with urllib.request.urlopen(req, timeout=3600, context=ssl_context()) as r:
-                        r.read()
-                        etag = r.headers.get("ETag")
-                transfer_s = round(time.monotonic() - t0, 2)
-                err = outputs.etag_problem(etag, st.get("md5", ""))
-                if err is None:
-                    break
-            except Exception as exc:                          # noqa: BLE001
-                err = (f"HTTP {exc.code} {exc.reason}" if hasattr(exc, "code")
-                       else f"{type(exc).__name__}: {exc}")
-            if attempt < attempts - 1:
-                time.sleep(2 ** (attempt + 1))
-        st["upload"] = {"state": "failed" if err else "done", "url": dest, "bytes": size,
-                        "attempts": tries, "transfer_s": None if err else transfer_s,
+        res = uploads.send(target, job_id, name, path, st.get("md5", ""), timeout=3600,
+                           attempts=attempts, context=ssl_context())
+        err, size = res["error"], res["bytes"]
+        st["upload"] = {"state": res["state"], "url": dest, "bytes": size,
+                        "attempts": res["attempts"], "transfer_s": res["transfer_s"],
                         "error": err, "ended": round(time.time(), 1)}
         print(f"job {job_id}: handoff bundle upload to {dest} "
               + (f"FAILED: {err} (kept at {path})" if err

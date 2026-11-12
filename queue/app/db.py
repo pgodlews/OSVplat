@@ -26,13 +26,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     ended       REAL,
     hidden      INTEGER NOT NULL DEFAULT 0,  -- cleared from the view, not gone
     plan        TEXT                         -- estimate.estimate() at submit time
+    -- Added by init() to databases made before them:
+    --   review_state TEXT, review_note TEXT  -- mask review (pending|approved|rejected)
+    --   handoff TEXT                         -- the bundle an imported job came from
+    --   resume TEXT                          -- the restore point a job resumes from
 );
 CREATE TABLE IF NOT EXISTS stages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     stage       TEXT NOT NULL,
     cache_key   TEXT NOT NULL,
-    state       TEXT NOT NULL,           -- pending|cached|imported|running|done|failed|skipped
+    state       TEXT NOT NULL,           -- pending|waiting|cached|imported|running|done|failed|cancelled|skipped
     path        TEXT,
     log_path    TEXT,
     progress    TEXT,                    -- JSON blob, stage-specific
@@ -288,12 +292,25 @@ def job_stages(job_id: int) -> list[sqlite3.Row]:
         "SELECT * FROM stages WHERE job_id=? ORDER BY id", (job_id,)).fetchall()
 
 
+def _in_chunks(ids: list[int], size: int = 500):
+    """SQLite caps bound parameters (999 in older builds)."""
+    for i in range(0, len(ids), size):
+        yield ids[i:i + size]
+
+
+def stages_for(job_ids: list[int]) -> dict[int, list[sqlite3.Row]]:
+    """job_stages for many jobs in one query: the job list asks for a page of
+    200 every four seconds, and a query per row was 400 of them."""
+    out: dict[int, list[sqlite3.Row]] = {j: [] for j in job_ids}
+    for chunk in _in_chunks(list(job_ids)):
+        for r in conn().execute(
+                f"SELECT * FROM stages WHERE job_id IN ({','.join('?' * len(chunk))}) "
+                f"ORDER BY id", chunk):
+            out[r["job_id"]].append(r)
+    return out
+
+
 # --------------------------------------------------------------------- cache
-
-def cache_get(cache_key: str) -> Optional[sqlite3.Row]:
-    return conn().execute("SELECT * FROM cache WHERE cache_key=?",
-                          (cache_key,)).fetchone()
-
 
 def cache_put(cache_key: str, stage: str, path: str, nbytes: int = 0) -> None:
     now = time.time()
@@ -326,7 +343,14 @@ def put_metric(job_id: int, name: str, value: Any) -> None:
 
 
 def job_metrics(job_id: int) -> dict[str, Any]:
-    rows = conn().execute("SELECT name,value,text FROM metrics WHERE job_id=?",
-                          (job_id,)).fetchall()
-    return {r["name"]: (r["value"] if r["value"] is not None else r["text"])
-            for r in rows}
+    return metrics_for([job_id])[job_id]
+
+
+def metrics_for(job_ids: list[int]) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {j: {} for j in job_ids}
+    for chunk in _in_chunks(list(job_ids)):
+        for r in conn().execute(
+                f"SELECT job_id,name,value,text FROM metrics WHERE job_id IN "
+                f"({','.join('?' * len(chunk))})", chunk):
+            out[r["job_id"]][r["name"]] = r["value"] if r["value"] is not None else r["text"]
+    return out

@@ -25,7 +25,6 @@ import subprocess
 import threading
 import time
 import uuid
-from typing import Optional
 
 from . import telemetry, worker
 from .config import (BENCHMARK, BENCHMARK_DISK_GB, GS_PY, LOG_ROOT, QUEUE_ROOT,

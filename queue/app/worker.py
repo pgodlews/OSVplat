@@ -2,7 +2,7 @@
 
 A job holds a single GPU for its whole lifetime. That is coarser than the
 resource model in the design doc (frames/select do not really need a GPU) but it
-keeps the scheduler honest and still gives two concurrent jobs on this box.
+keeps the scheduler honest, and still runs one job per GPU side by side.
 30_run_sfm.py hardcodes gpu_index='0', so the GPU is selected by setting
 CUDA_VISIBLE_DEVICES, which remaps the chosen device to index 0.
 """
@@ -194,7 +194,12 @@ def exclusive() -> Iterator[Optional[list[int]]]:
             got = None
         else:
             _exclusive.set()
-            got = gpu.free_gpus(own_pids=own_pids(), held=[])
+            try:
+                got = gpu.free_gpus(own_pids=own_pids(), held=[])
+            except BaseException:
+                # Set and never cleared, the dispatcher would start nothing again.
+                _exclusive.clear()
+                raise
     if got is None:
         yield None
         return
@@ -310,37 +315,6 @@ def _iter_lines(stream):
         yield buf.decode("utf-8", "replace")
 
 
-class VramSampler(threading.Thread):
-    """Track peak GPU memory used by our own process tree during a stage.
-
-    There is no reliable a-priori VRAM model for LichtFeld here -- run_lub sat at
-    ~4.7 GB with 1.5M splats at width 3840, which is nothing like gsplat's
-    24 GB blowup at 3M. So measure it, accumulate history, and let the pre-check
-    be built from data rather than from a guessed formula.
-    """
-
-    def __init__(self, gpu_index: int, pid_getter):
-        super().__init__(daemon=True, name="vram")
-        self.gpu = gpu_index
-        self._pids = pid_getter
-        self.peak = 0
-        self._halt = threading.Event()   # not _stop: Thread.join() calls _stop()
-
-    def run(self) -> None:
-        while not self._halt.wait(10.0):
-            try:
-                pids = set(self._pids())
-                procs = gpu.compute_procs() or {}
-                for p in procs.get(self.gpu, []):
-                    if p["pid"] in pids:
-                        self.peak = max(self.peak, p["mib"])
-            except Exception:                                  # noqa: BLE001
-                pass
-
-    def stop(self) -> None:
-        self._halt.set()
-
-
 def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
               cache_dir: Path | None = None, note: str = "") -> dict:
     """Run one stage subprocess, streaming its output to log_path (after the
@@ -392,14 +366,10 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
         # lets reconcile() actually kill the orphan rather than just noting it.
         if cache_dir is not None:
             restamp_lock(cache_dir, proc.pid)
-        sampler = None
         watchdog = None
-        resources = telemetry.start_sampler(ctx.gpu, proc.pid,
-                                            job_id=ctx.job_id, stage=stage)
+        res_sampler = telemetry.start_sampler(ctx.gpu, proc.pid,
+                                              job_id=ctx.job_id, stage=stage)
         if stage == "train":
-            sampler = VramSampler(
-                ctx.gpu, lambda: [proc.pid] + _child_pids(proc.pid))
-            sampler.start()
             watchdog = threading.Thread(
                 target=_stall_watchdog, args=(proc, state), daemon=True,
                 name=f"watchdog{ctx.job_id}")
@@ -439,13 +409,16 @@ def run_stage(ctx: Ctx, stage: str, argv: list[str], log_path: Path,
             if maker is not None:
                 maker.close(completed=proc.poll() == 0 and not state["stalled"]
                             and ctx.job_id not in _cancel)
-            telemetry.finish_sampler(ctx.job_id, stage, resources,
+            telemetry.finish_sampler(ctx.job_id, stage, res_sampler,
                                      time.time() - state["started"])
-            if sampler:
-                sampler.stop()
-                if sampler.peak:
-                    progress["peak_vram_mib"] = sampler.peak
-                    ctx.derived["peak_vram_mib"] = sampler.peak
+            # Peak GPU memory of this process tree, measured: there is no
+            # a-priori VRAM model for LichtFeld (1.5M splats at width 3840 sat
+            # at ~4.7 GB, nothing like gsplat's 24 GB at 3M), so the history
+            # this accumulates is the model.
+            peak = getattr(res_sampler, "gpu_mem_own_peak", None)
+            if stage == "train" and peak:
+                progress["peak_vram_mib"] = peak
+                ctx.derived["peak_vram_mib"] = peak
             with _lock:
                 _procs.pop(ctx.job_id, None)
                 _trainers.pop(ctx.job_id, None)

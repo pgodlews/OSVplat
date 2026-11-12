@@ -14,9 +14,11 @@ calibration is found by content rather than by field number, because the two
 schemas put it in different places (config 2-6 on the Osmo, 2-5 on the Avata).
 Full field reference: docs/osmo360-telemetry.md, docs/avata360-telemetry.md.
 
-usage: osv_meta.py <file.OSV|.LRF> [out_dir]  -> calibration.json, telemetry.csv
+usage: osv_meta.py <file.OSV|.LRF> [out_dir] [--calibration-only]
+       -> calibration.json, and telemetry.csv unless --calibration-only
 """
 import csv
+import functools
 import json
 import os
 import struct
@@ -120,14 +122,19 @@ def _track_samples(f, trak):
     return fmt, out
 
 
-def find_camd(path):
-    """The camd MP4 as bytes (starting at its ftyp), wherever the camera put it."""
+def find_camd(path, limit=None):
+    """The camd MP4 as bytes (starting at its ftyp), wherever the camera put it.
+
+    limit: return no more than this many bytes of it, for a caller that wants
+    only the first records (detect_camera): the whole thing is every IMU
+    sample of the clip.
+    """
     sz = os.path.getsize(path)
     with open(path, 'rb') as f:
         moov = None
         for pos, n, t, hl in _boxes(f, 0, sz):
             if t == b'camd':                          # Osmo 360: trailing box
-                f.seek(pos + hl); return f.read(n - hl)
+                f.seek(pos + hl); return f.read(min(n - hl, limit) if limit else n - hl)
             if t == b'moov':
                 moov = (pos + hl, pos + n)
         if moov:                                       # Avata 360: a camd track
@@ -135,10 +142,12 @@ def find_camd(path):
                 if t != b'trak': continue
                 fmt, samples = _track_samples(f, (pos + hl, pos + n))
                 if fmt == b'camd' and samples:
-                    parts = []
+                    parts, got = [], 0
                     for off, size in samples:
-                        f.seek(off); parts.append(f.read(size))
-                    return b''.join(parts)
+                        f.seek(off); parts.append(f.read(size)); got += size
+                        if limit and got >= limit:
+                            break
+                    return b''.join(parts)[:limit] if limit else b''.join(parts)
     raise SystemExit('no camd box or camd track in %s' % path)
 
 
@@ -225,7 +234,40 @@ def find_calibration(cfg):
     return best
 
 
+# detect_camera reads this much of the telemetry first: the header record is
+# the first one, and the queue asks for every clip on every input listing.
+DETECT_PREFIX = 8 << 20
+
+
+def _header_record(path):
+    """The camd stream's header record (field 1), or None. Raises when the file
+    has no camd at all."""
+    for limit in (DETECT_PREFIX, None):
+        try:
+            raw = camd_payload(find_camd(str(path), limit))
+        except SystemExit:
+            if limit is None:
+                raise
+            continue                  # the mdat starts past the prefix: read it all
+        for fn, body in records(raw):
+            if fn == 1:
+                return body
+    return None
+
+
 def detect_camera(path):
+    """Which camera made a file; cached by path, size and mtime (a copy is returned).
+    See _detect_camera for the fields."""
+    st = os.stat(path)
+    return dict(_detect_cached(str(path), st.st_size, st.st_mtime_ns))
+
+
+@functools.lru_cache(maxsize=256)
+def _detect_cached(path, size, mtime_ns):
+    return _detect_camera(path)
+
+
+def _detect_camera(path):
     """Fast probe: detect whether a file is an Osmo 360, Avata 360, or generic video.
 
     Returns dict:
@@ -253,16 +295,11 @@ def detect_camera(path):
         "has_gps": False,
     }
     try:
-        raw = camd_payload(find_camd(str(path)))
+        hdr = _header_record(path)
     except (SystemExit, Exception):
         return res
 
     res["is_fisheye"] = True
-    hdr = None
-    for fn, body in records(raw):
-        if fn == 1:
-            hdr = body
-            break
     if not hdr:
         return res
 
@@ -317,7 +354,7 @@ def detect_camera(path):
     return res
 
 
-def main(path, outdir):
+def main(path, outdir, telemetry=True):
     raw = camd_payload(find_camd(path))
     hdr = cfg = None; rows = []
     for fn, body in records(raw):
@@ -367,6 +404,12 @@ def main(path, outdir):
     cal = dict(device=info, lenses=lenses)
     os.makedirs(outdir, exist_ok=True)
     json.dump(cal, open(os.path.join(outdir, 'calibration.json'), 'w'), indent=1)
+    if not telemetry:
+        # The queue's frames stage reads only the calibration. The CSV holds a
+        # row per record, with GPS latitude and longitude on an Avata clip:
+        # nothing to leave in a cache directory nobody reads it from.
+        print(f'{os.path.basename(path)}: calibration only; device: {info}')
+        return cal
 
     csvf = open(os.path.join(outdir, 'telemetry.csv'), 'w', newline='')
     w = csv.writer(csvf)
@@ -414,5 +457,8 @@ def main(path, outdir):
 
 
 if __name__ == '__main__':
-    out = sys.argv[2] if len(sys.argv) > 2 else '.'
-    main(sys.argv[1], out)
+    flags = {a for a in sys.argv[1:] if a.startswith('--')}
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if not args or flags - {'--calibration-only'}:
+        sys.exit(__doc__.strip().splitlines()[-2].strip())
+    main(args[0], args[1] if len(args) > 1 else '.', telemetry='--calibration-only' not in flags)

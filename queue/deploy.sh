@@ -49,15 +49,14 @@ rsync -az --delete --exclude '__pycache__' --exclude '*.pyc' \
 rsync -az "$REPO/queue/requirements.txt" "$DEST$APP/"
 # The unit suites are run from $APP by the documented remote commands, so they
 # have to be there; test_api.py is stdlib-only and runs from anywhere.
-rsync -az "$REPO/queue/test_stages.py" "$REPO/queue/test_worker.py" \
-  "$REPO/queue/test_api.py" "$REPO/queue/test_regressions.py" \
-  "$REPO/queue/test_distance.py" "$REPO/queue/test_telemetry.py" \
-  "$REPO/queue/test_remote.py" "$REPO/queue/test_benchmark.py" \
-  "$REPO/queue/test_hoststats.py" "$DEST$APP/"
+# Every suite, as the Dockerfile copies them: a list here fell behind.
+rsync -az "$REPO"/queue/test_*.py "$DEST$APP/"
 # summarize_sweep.py reads the queue over HTTP and is meant to be run on the
 # target, where it can pick the token out of .queue_env; it was never shipped there.
 rsync -az "$REPO/queue/summarize_sweep.py" "$DEST$APP/"
-rsync -az "$REPO/scripts/" "$DEST$ROOT/scripts/"
+# --delete: the queue runs these copies (config.py), so a script removed from
+# the repo must not keep running from here.
+rsync -az --delete --exclude '__pycache__' --exclude '*.pyc' "$REPO/scripts/" "$DEST$ROOT/scripts/"
 
 echo "==> ensuring access token"
 TOKEN=$(on "set -e
