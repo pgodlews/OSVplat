@@ -50,6 +50,21 @@ UI is reachable only from the workstation itself.
 - **No `pkill -f`.** Cancellation kills the process group by PID
   (docs/troubleshooting.md #1 — `pkill -f` can kill the shell that runs it).
 
+## Other settings
+
+Environment variables not covered in their own section here or in
+docs/docker.md, docs/cloud.md and docs/job-telemetry.md:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEUE_STALL_TIMEOUT` | 900 s | A training run that reports no iteration for this long is killed and the job fails ("stalled"). |
+| `QUEUE_FIRST_PROGRESS_GRACE` | 1800 s | The same, until the first iteration: the dataset load at full 8K resolution takes minutes. |
+| `QUEUE_MAX_CONCURRENT` | number of GPUs | Training jobs in flight until `POST /api/concurrency` (or the UI's selector) stores another value. |
+| `QUEUE_MODELS_DIR` | `$SPLAT_ROOT/models` | Where gated mask-model weights live, one directory per backend (`app/mask_backends.py`). |
+| `QUEUE_MASK_PY` | `venv_gs` python | Interpreter the mask stage runs under. |
+| `QUEUE_LFS_PYTHON` | `python3` | The python the trainer's `lichtfeld` module was built for; restore points are made under it. |
+| `QUEUE_PREEMPT_POLL_S` | 5 s | How often `QUEUE_PREEMPT_WATCH` polls the cloud's metadata service (docs/cloud.md, "Spot GPUs"). `QUEUE_PREEMPT_AWS_URL` and `QUEUE_PREEMPT_GCP_URL` move that service, for tests only. |
+
 ## Layout on disk
 
 ```
@@ -74,6 +89,7 @@ the failure mode is a full disk 80 minutes into a 95-minute run.
 | `QUEUE_CACHE_BUDGET_GB` | 0 (none) | Ceiling the cache is evicted down to. |
 | `QUEUE_LOG_KEEP_DAYS` | 30 | Stage logs older than this are pruned at startup. |
 | `QUEUE_RENDER_KEEP_DAYS` | 30 | Comparison sheets older than this are pruned at startup. |
+| `QUEUE_RUN_KEEP_DAYS` | 30 | For jobs that ended (done, failed, cancelled) longer ago than this, the large files in `runs/job<id>/` are deleted: debug, handoff, restore and result tars. The JSON records, `telemetry.json` and `logs.tar.gz` stay. At startup and before each stage. 0 keeps everything. |
 | `QUEUE_NEED_SAFETY` | 1.25 | Margin on the largest entry a stage has produced before, used as its space requirement. 0 falls back to the flat floor. |
 
 The floor alone was not enough: an 8K frames dump is tens of GB and a training
@@ -116,6 +132,15 @@ history if that is larger. A clip that does not probe leaves the prep stages
 to the flat floor. A `QUEUE_MIN_FREE_GB` set by hand still holds for every
 stage, and the estimates are then not used.
 
+Before any cache entry, eviction removes what failed or cancelled builds left
+behind: a stage directory with no valid `.done`, no live lock, no unfinished
+job counting on its key, and untouched for 10 minutes (the failure's debug
+bundle reads it first), plus handoff import staging dirs older than 6 hours.
+These are in no cache entry, so before 2026-11 nothing ever removed them: a
+failed 8K frames dump or a failed training's `project.licht` stayed until the
+same key was rebuilt. `GET /api/cache` reports them as `orphans` and
+`orphan_bytes`; `POST /api/cache/gc` always removes all of them.
+
 Eviction is least-recently-used, with train entries last, and conservative:
 a finished job's train directory holds the only copy of its snapshots and its
 resume point, and is hours of GPU to rebuild, where the other stages come back
@@ -142,7 +167,10 @@ in the stage's log (`cache: evicted ...` under the command line), in the job API
 Keys chain: `frames → select → sfm → train → export`. Each key hashes its own
 params plus the upstream key, so changing a training flag reuses frames/select/sfm
 and every variant trains on byte-identical geometry. A stage is reused when its
-cache dir contains a `.done` marker that parses.
+cache dir contains a `.done` marker that parses. A field the job's options do
+not read is hashed at its default: a disabled mask's settings, and the
+`select` field its mode ignores (`target_panos` in window mode, `window` in
+target mode), so two jobs that make the same output share one entry.
 
 **Sharing an *unfinished* stage is the normal case, not an error.** The four
 variants of a sweep reach the same uncached `sfm` key within milliseconds of each
@@ -398,20 +426,24 @@ POST   /api/jobs/clear          hide finished jobs from the view. Metrics, stage
                                 records and cache are all kept — the estimator
                                 fits its it/s constant from that history.
                                 ?purge=true deletes the hidden ones for real.
-GET    /api/status              pause state, per-GPU status
+GET    /api/jobs/{id}/thumb.jpg?w=480|1600   the clip's opening frame (at trim_start)
+GET    /api/jobs/{id}/restore/download   the restore point kept for a job (checkpoints.py)
+GET    /api/status              pause state, per-GPU status, image_variant, prep_backend
 POST   /api/pause               {paused: bool}
-GET    /api/cache               cache entries, sizes, free space, retention settings
+POST   /api/concurrency         {max_concurrent: n}: training jobs in flight, stored
+GET    /api/cache               cache entries, sizes, free space, retention settings,
+                                orphans / orphan_bytes (left by failed builds)
 POST   /api/cache/gc[?dry_run&budget_gb]
-                                evict least-recently-used entries, train
-                                entries last. Never touches
+                                remove every orphan, then evict least-recently-used
+                                entries, train entries last. Never touches
                                 a cache a queued or running job needs, or one
                                 whose dir is locked by a live process.
 ```
 
 ## Tests
 
-Ten suites, installed by `deploy.sh`. Only the API suite needs a running
-service and reads `QUEUE_TOKEN` from the service's own env file:
+Every `queue/test_*.py` is installed by `deploy.sh`. Only the API suite needs a
+running service and reads `QUEUE_TOKEN` from the service's own env file:
 
 ```bash
 set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_api.py
@@ -426,6 +458,10 @@ set -a; . ~/splat/queue_app/.queue_env; set +a; python3 ~/splat/queue_app/test_a
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_remote.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_benchmark.py
 ~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_hoststats.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_debugdump.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_handoff.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_checkpoint.py
+~/splat/queue_app/venv/bin/python ~/splat/queue_app/test_prep_backend.py
 ~/splat/venv/bin/python ~/splat/scripts/test_fisheye.py
 ```
 

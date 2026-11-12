@@ -109,7 +109,7 @@ request carries `X-OSVplat-Signature: sha256=<HMAC-SHA256 of the body>`.
 
 | Field | Content |
 |---|---|
-| `job` | id, state, sweep id, created/started/ended, first 500 chars of the error (redacted like the logs), input size in bytes, the job config **without** the job name and clip file name (the extension and content hash stay) |
+| `job` | id, state, sweep id, created/started/ended, first 500 chars of the error (redacted like the logs), input size in bytes, the job config **without** the job name and clip file name (the extension and content hash stay); `train.extra_args` is reduced to the sorted flag names, never their values, which can be paths; `mask.prompts` and `mask.attached` go through the same redaction as the logs |
 | `plan` | the per-stage estimate frozen at submit time, with its assumptions (panoramas, iterations, it/s) |
 | `stages[]` | stage, state (done, cached, imported, skipped, failed…), cache key, start/end, `wall_s`, `planned_s`, the numeric results the stage reported (`info`), and `resources`. An `imported` stage ran on another machine ([Split pipeline](#split-pipeline)) |
 | `stages[].info` of a `.OSV` sfm stage with `sfm.upright` | `upright_requested`, `upright`, `metric` (flags); `upright_residual_deg`, `upright_scale`, and with GPS `gps_rms_m`, `gps_yaw_correction_deg`, `gravity_vs_gps_deg`. No coordinates: the GPS reference stays in the job's own `sfm/alignment.json` |

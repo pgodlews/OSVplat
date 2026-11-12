@@ -15,8 +15,6 @@ import io
 import json
 import os
 import shutil
-import signal
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -64,7 +62,7 @@ def verify_project_file(path):
 from app import checkpoints, config, db, handoff, preempt, stages, telemetry, worker  # noqa: E402
 checkpoints.RETRY_S = 0.0
 from app.jobs import TRAINER, JobConfig, key_of                                     # noqa: E402
-from app.stages import ORDER, STAGES, Ctx                                           # noqa: E402
+from app.stages import STAGES, Ctx                                           # noqa: E402
 
 db.init()
 CACHE = config.CACHE_ROOT
@@ -106,19 +104,6 @@ snapshot(total)
 ''')
 
 
-class _NoVram:
-    peak = None
-
-    def __init__(self, *a, **k):
-        pass
-
-    def start(self):
-        pass
-
-    def stop(self):
-        pass
-
-
 def _ctx(cfg_d: dict, job_id=None) -> Ctx:
     cfg = JobConfig.model_validate(cfg_d)
     jid = job_id or db.create_job(cfg.name, cfg.model_dump())
@@ -134,8 +119,7 @@ def _run_fake_trainer(ctx: Ctx, total: int, snaps: str, env: dict = None,
     env = {**PACED, **(env or {})}
     argv = [sys.executable, str(FAKE_TRAINER), str(ctx.dir("train")), str(total), snaps]
     th = threading.Thread(target=during, args=(ctx,)) if during else None
-    with patch.object(worker, "VramSampler", _NoVram), \
-            patch.dict(os.environ, env or {}):
+    with patch.dict(os.environ, env or {}):
         if th:
             th.start()
         out = worker.run_stage(ctx, "train", argv, Path(TMP) / f"train{ctx.job_id}.log")
@@ -477,6 +461,9 @@ class Resume(unittest.TestCase):
         self.assertEqual((r["from_step"], r["effective_iters"]), (1000, 3000))
         self.assertTrue(Path(r["licht"]).is_file())
         self.assertEqual(json.loads(row["config"])["train"]["checkpoint_every"], 1000)
+        # Queued with its stage rows, so nothing it resumes from is evictable.
+        from app import retention
+        self.assertEqual({k for k in cfg.keys().values()} - retention.protected_keys(), set())
 
     def test_worker_resumes_with_the_restore_point(self):
         cfg = JobConfig.model_validate(MP4)

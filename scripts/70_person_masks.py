@@ -202,6 +202,8 @@ def main() -> int:
 
     dirs, lat = equirect_directions(ew, eh)
     solid_angle_w = np.cos(lat)[:, None]
+    # The sphere's whole weight at this working size: the same for every frame.
+    solid_angle_total = float((np.ones((eh, ew)) * solid_angle_w).sum())
 
     def build_views(specs):
         """Both directions of the mapping for each tangent view.
@@ -410,8 +412,7 @@ def main() -> int:
             publish_colmap(src.name, dst)
             if data is not None:
                 inv = (data < 128).astype(np.uint8)
-                stats.append(float((inv * solid_angle_w).sum()
-                                   / (np.ones_like(inv) * solid_angle_w).sum()))
+                stats.append(float((inv * solid_angle_w).sum() / solid_angle_total))
             continue
         if kind == "unreadable":
             print(f"  skipping unreadable {src.name}", file=sys.stderr)
@@ -423,8 +424,7 @@ def main() -> int:
         if kernel is not None and people.any():
             people = cv2.dilate(people, kernel, iterations=1)
 
-        cov_sr = float((people * solid_angle_w).sum()
-                       / (np.ones_like(people) * solid_angle_w).sum())
+        cov_sr = float((people * solid_angle_w).sum() / solid_angle_total)
         stats.append(cov_sr)
         if n_det == 0:
             empty.append(src.name)
@@ -462,7 +462,7 @@ def main() -> int:
     # here is a detector miss, not an empty scene -- and that frame will train
     # the person straight back in.
     if empty:
-        print(f"WARNING: {len(empty)} frame(s) had no person detected: "
+        print(f"WARNING: {len(empty)} frame(s) had no {' or '.join(prompts)} detected: "
               f"{', '.join(empty[:6])}{' ...' if len(empty) > 6 else ''}",
               file=sys.stderr)
     if args.sheet:

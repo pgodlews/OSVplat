@@ -20,7 +20,7 @@ APP="$SPLAT_ROOT/queue_app"
 mkdir -p "$APP/app" "$SPLAT_ROOT/scripts" "$SPLAT_ROOT/samples"
 rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' "$REPO/queue/app/" "$APP/app/"
 rsync -a "$REPO/queue/requirements.txt" "$APP/"
-rsync -a "$REPO/scripts/" "$SPLAT_ROOT/scripts/"
+rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' "$REPO/scripts/" "$SPLAT_ROOT/scripts/"
 
 cd "$APP"
 [ -x venv/bin/python ] || "$SPLAT_ROOT/venv/bin/python" -m venv venv

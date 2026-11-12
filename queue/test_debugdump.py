@@ -119,6 +119,18 @@ class Bundle(unittest.TestCase):
         self.assertNotIn("c3588589", out)
         self.assertIn("RTX 5090", out)
 
+    def test_camera_serial_is_blanked_in_calibration(self):
+        jid = failed_job({})
+        frames = Path(TMP.name) / "cache" / "frames" / f"f{jid}"
+        frames.mkdir(parents=True)
+        (frames / "calibration.json").write_text(json.dumps(
+            {"device": {"model": "Osmo360", "serial": "3XSN12345678"}, "lenses": []}))
+        db.upsert_stage(jid, "frames", "kf", "done", path=str(frames))
+        got = members(Path(debugdump.build(jid, "artifacts", reuse=False)["path"]))
+        cal = json.loads(got["frames/calibration.json"])
+        self.assertEqual(cal["device"], {"model": "Osmo360", "serial": "<redacted>"})
+        self.assertNotIn(b"3XSN12345678", b"".join(got.values()))
+
     def test_artifacts_level_keeps_what_training_exported(self):
         files = {"splat_50000.spz": b"s" * 100, "splat_50000.ply": b"p" * 300,
                  "project.licht": b"l" * 50, "metrics.csv": b"iteration,psnr\n30000,26.9\n"}

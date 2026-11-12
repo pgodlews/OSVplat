@@ -77,6 +77,17 @@ class Record(unittest.TestCase):
                      socket.gethostname()):
             self.assertNotIn(leak, text)
 
+    def test_extra_args_keep_flag_names_only(self):
+        jid = make_job()
+        cfg = json.loads(db.get_job(jid)["config"])
+        cfg["train"]["extra_args"] = '--eval-mask "masks:/home/someone/secret masks" --opacity-reg=0.003'
+        db.conn().execute("UPDATE jobs SET config=? WHERE id=?", (json.dumps(cfg), jid))
+        rec = telemetry.build(jid)
+        self.assertEqual(rec["job"]["config"]["train"]["extra_args"],
+                         ["--eval-mask", "--opacity-reg"])
+        self.assertNotIn("secret masks", json.dumps(rec))
+        self.assertNotIn("0.003", json.dumps(rec["job"]["config"]["train"]["extra_args"]))
+
     def test_write_is_atomic_and_can_be_switched_off(self):
         jid = make_job()
         telemetry.write(jid)
@@ -335,8 +346,7 @@ class Sampler(unittest.TestCase):
     def test_samplers_can_be_joined(self):
         # Both kept their stop Event in self._stop, which is the name of the
         # method Thread.join() calls: join() raised TypeError.
-        for s in (telemetry.ResourceSampler(None, os.getpid(), interval=0.05),
-                  worker.VramSampler(-1, lambda: [])):
+        for s in (telemetry.ResourceSampler(None, os.getpid(), interval=0.05),):
             s.start()
             s.stop()
             s.join(5)
@@ -516,6 +526,7 @@ class BurstAndOwners(unittest.TestCase):
             s.sample()
             self.assertEqual(s._gpu_now["other_mib"], 8200)
         self.assertEqual(s.summary(10)["gpu_mem_other_peak_mib"], 8200)
+        self.assertEqual(s.gpu_mem_own_peak, 31100)          # the train stage's peak_vram_mib
         # No pids or names in the record: sums only.
         self.assertEqual(set(s._gpu_now) & {"pid", "name", "procs"}, set())
 

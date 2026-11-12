@@ -109,10 +109,11 @@ cp /media/$USER/SD/DCIM/DJI_001/CAM_*.OSV ~/splat/samples/
      the whole chain works on your machine. Not meant to be looked at.
    - **Draft**: 15k iterations, 1M splats. A 2.5-minute Osmo clip took 35
      minutes on an RTX 3090: a quick look at whether the clip reconstructs.
-   - **Standard**: 30k iterations, 3M splats; the settings every measurement
-     in the docs used.
-   - **Max**: Standard with full-resolution training and SH degree 3 (more
-     view-dependent colour), for a final result. Slower than Standard.
+   - **Standard**: 30k iterations, 3M splats, SH degree 3; the settings every
+     measurement in the docs used.
+   - **High**: Standard with a 4.5M splat cap, for scenes with fine detail.
+   - **Max**: Standard with full-resolution training (width 7680), for a
+     final result. Slower than Standard.
 
    Trim start/end to skip the take-off, landing or the walk back to the car.
 4. Person masking is on by default for Osmo 360 clips (the operator is always

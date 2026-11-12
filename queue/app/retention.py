@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 
 from . import db, telemetry
-from .config import CACHE_ROOT, LOG_ROOT, QUEUE_ROOT, RENDER_ROOT
-from .stages import lock_holder_alive, read_lock
+from .config import CACHE_ROOT, LOG_ROOT, QUEUE_ROOT, RENDER_ROOT, RUNS_ROOT
+from .stages import ORDER, dir_bytes, is_cached, lock_holder_alive, read_lock
 
 GB = 1_000_000_000
 
@@ -40,6 +40,23 @@ ESTIMATED_SLACK_BYTES = float(os.environ.get("QUEUE_ESTIMATED_SLACK_GB", 3)) * G
 CACHE_BUDGET_BYTES = float(os.environ.get("QUEUE_CACHE_BUDGET_GB", 0)) * GB
 LOG_KEEP_DAYS = float(os.environ.get("QUEUE_LOG_KEEP_DAYS", 30))
 RENDER_KEEP_DAYS = float(os.environ.get("QUEUE_RENDER_KEEP_DAYS", 30))
+# Large files in QUEUE_ROOT/runs/job<id>/ of jobs that ended this long ago:
+# debug bundles (up to QUEUE_DEBUG_MAX_GB), handoff bundles, restore points, a
+# result tar kept after a failed upload. The JSON records stay. 0 keeps them.
+RUN_KEEP_DAYS = float(os.environ.get("QUEUE_RUN_KEEP_DAYS", 30))
+RUN_PRUNE_PATTERNS = ("*.tar", "*.part", "*.tmp", ".restore-*.licht")
+FINISHED_STATES = ("done", "failed", "cancelled")
+
+# A stage directory with no valid .done and no live lock is what a failed,
+# cancelled or invalidated build left behind. Only the cache table was ever
+# evicted, and these are in no table, so a failed 8K frames dump or a failed
+# training's project.licht stayed until the same key happened to be rebuilt.
+# Left alone for a while after it was last touched: the failure's debug
+# bundle (QUEUE_DEBUG=artifacts) reads the failed stage's directory.
+ORPHAN_MIN_AGE_S = 600
+# handoff.import_bundle's staging dirs: removed by the import itself unless the
+# service died mid-way. An import of a large bundle runs for minutes.
+STAGING_MIN_AGE_S = 6 * 3600
 
 
 def free_bytes(path: Path = QUEUE_ROOT) -> int:
@@ -92,13 +109,69 @@ def eviction_order(rows: list) -> list:
     return sorted(oldest_first, key=lambda r: r["stage"] in EVICT_LAST)
 
 
+def orphans(now: float | None = None, protected: set[str] | None = None) -> list[dict]:
+    """Stage directories nothing will read again, oldest first.
+
+    No parsable .done, no live lock, not a key a live job counts on, and not
+    touched for ORPHAN_MIN_AGE_S; plus import staging dirs left by a crash.
+    """
+    now = time.time() if now is None else now
+    protected = protected_keys() if protected is None else protected
+    out = []
+    for stage in ORDER:
+        sd = CACHE_ROOT / stage
+        if not sd.is_dir():
+            continue
+        for d in sd.iterdir():
+            try:
+                if not d.is_dir() or d.is_symlink() or d.name in protected:
+                    continue
+                if is_cached(d) or lock_holder_alive(read_lock(d)):
+                    continue
+                mtime = d.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime >= ORPHAN_MIN_AGE_S:
+                out.append({"key": d.name, "stage": stage, "path": d, "mtime": mtime})
+    for d in CACHE_ROOT.glob(".handoff-*"):
+        try:
+            if d.is_dir() and not d.is_symlink() \
+                    and now - d.stat().st_mtime >= STAGING_MIN_AGE_S:
+                out.append({"key": d.name, "stage": "handoff-staging", "path": d,
+                            "mtime": d.stat().st_mtime})
+        except OSError:
+            continue
+    return sorted(out, key=lambda o: o["mtime"])
+
+
+_orphan_stat: tuple[float, dict] = (0.0, {})
+ORPHAN_STAT_TTL = 60.0
+
+
+def orphan_status() -> dict:
+    """Count and size of the orphans, for /api/cache. Sizing walks every file
+    in them, so it is cached for a minute: the UI asks every 20 s."""
+    global _orphan_stat
+    at, val = _orphan_stat
+    if at and time.monotonic() - at < ORPHAN_STAT_TTL:
+        return val
+    found = orphans()
+    val = {"orphans": len(found), "orphan_bytes": sum(dir_bytes(o["path"]) for o in found)}
+    _orphan_stat = (time.monotonic(), val)
+    return val
+
+
 def gc_cache(target_free: float = 0.0, budget: float | None = None,
-             dry_run: bool = False) -> dict:
-    """Evict cache entries, least recently used first, train entries last.
+             dry_run: bool = False, all_orphans: bool = False) -> dict:
+    """Evict orphans, then cache entries, least recently used first, train
+    entries last.
 
     Stops as soon as both conditions hold: total cache bytes within `budget`
-    and free disk at or above `target_free`.
+    and free disk at or above `target_free`. Orphans (see orphans()) go
+    before any valid entry; with all_orphans, every one of them goes whether
+    or not the space is needed (the API's GC button).
     """
+    global _orphan_stat
     # None means "no ceiling" and 0 means "evict everything evictable", so the
     # two cannot be collapsed into a falsy check.
     if budget is None:
@@ -110,6 +183,31 @@ def gc_cache(target_free: float = 0.0, budget: float | None = None,
     # entry used to be listed. Count what the listed entries would free instead
     # (their recorded size: an upper bound, since select/ hardlinks frames/).
     would_free = 0
+
+    for o in orphans(protected=protected):
+        over_budget = budget is not None and total > budget
+        short_of_free = free_bytes() + would_free < target_free
+        if not (all_orphans or over_budget or short_of_free):
+            break
+        d = o["path"]
+        size = dir_bytes(d)
+        rec = {"key": o["key"], "stage": o["stage"], "bytes": size, "orphan": True}
+        if dry_run:
+            evicted.append(rec)
+            would_free += size
+            continue
+        before = free_bytes()
+        try:
+            shutil.rmtree(d)
+        except OSError:
+            skipped += 1
+            continue
+        # A row can survive a crash between rmtree and this in older builds.
+        db.conn().execute("DELETE FROM cache WHERE cache_key=?", (o["key"],))
+        freed += max(0, free_bytes() - before)
+        evicted.append(rec)
+    if evicted and not dry_run:
+        _orphan_stat = (0.0, {})
 
     for row in eviction_order(db.list_cache()):
         over_budget = budget is not None and total > budget
@@ -173,12 +271,47 @@ def prune_logs() -> dict:
     return _prune_dir(LOG_ROOT, LOG_KEEP_DAYS, ("*.log",))
 
 
+def prune_runs(now: float | None = None) -> dict:
+    """Delete the large files of jobs that ended more than RUN_KEEP_DAYS ago.
+
+    Only jobs in a finished state, and only files older than the cutoff
+    themselves; telemetry.json, logs.tar.gz and the *.json status records
+    stay, so the job page and its history still read. A run dir with no job
+    row is left alone: it is not this database's to judge.
+    """
+    if RUN_KEEP_DAYS <= 0 or not RUNS_ROOT.is_dir():
+        return {"removed": 0, "bytes": 0}
+    now = time.time() if now is None else now
+    cutoff = now - RUN_KEEP_DAYS * 86400
+    ended = {int(r["id"]): r["ended"] for r in db.conn().execute(
+        f"SELECT id, ended FROM jobs WHERE state IN "
+        f"({','.join('?' * len(FINISHED_STATES))})", FINISHED_STATES)}
+    removed, freed = 0, 0
+    for d in RUNS_ROOT.glob("job*"):
+        if not d.is_dir() or not d.name[3:].isdigit():
+            continue
+        t = ended.get(int(d.name[3:]))
+        if not t or t >= cutoff:
+            continue
+        for pat in RUN_PRUNE_PATTERNS:
+            for p in d.glob(pat):
+                try:
+                    st = p.stat()
+                    if not p.is_file() or st.st_mtime >= cutoff:
+                        continue
+                    p.unlink()
+                except OSError:
+                    continue
+                removed += 1
+                freed += st.st_size
+    return {"removed": removed, "bytes": freed}
+
+
 def prune_renders() -> dict:
     # glob is not recursive, so the thumbs subdirectory needs naming: they are
     # small and regenerate on demand, but a sweep over trim values would
     # otherwise leave one per variant forever.
-    return _prune_dir(RENDER_ROOT, RENDER_KEEP_DAYS,
-                      ("cmp_*.jpg", "*.jpg", "thumbs/*.jpg"))
+    return _prune_dir(RENDER_ROOT, RENDER_KEEP_DAYS, ("*.jpg", "thumbs/*.jpg"))
 
 
 # Margin on the largest entry a stage has ever produced. The next frames dump
@@ -291,6 +424,7 @@ def ensure_space(stage: str, estimate: float | None = None,
             record_evictions(job_id, stage, made)
     prune_logs()
     prune_renders()
+    prune_runs()
     have = free_bytes()
     if have < want:
         raise RuntimeError(
@@ -309,4 +443,6 @@ def status() -> dict:
             "estimated_slack": ESTIMATED_SLACK_BYTES,
             "cache_budget": CACHE_BUDGET_BYTES or None,
             "log_keep_days": LOG_KEEP_DAYS,
-            "render_keep_days": RENDER_KEEP_DAYS}
+            "render_keep_days": RENDER_KEEP_DAYS,
+            "run_keep_days": RUN_KEEP_DAYS,
+            **orphan_status()}

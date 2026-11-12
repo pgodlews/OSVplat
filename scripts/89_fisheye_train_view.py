@@ -25,6 +25,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from io_pool import io_threads  # noqa: E402
+
 
 def main():
     if "--" not in sys.argv:
@@ -70,7 +73,7 @@ def main():
                 return stem
             ok = cv2.imwrite(str(masks / f"{stem}.png"), np.where(pm >= 128, circle, 0).astype(np.uint8))
             return None if ok else stem
-        with ThreadPoolExecutor(8) as ex:
+        with ThreadPoolExecutor(io_threads(8)) as ex:
             bad = [s for s in ex.map(one, stems) if s]
         if bad:
             raise SystemExit(f"could not combine {len(bad)} training masks, e.g. {bad[:3]}")

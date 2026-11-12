@@ -165,6 +165,15 @@ class Dispatcher(unittest.TestCase):
             worker._held.pop(jid, None)
         self.assertEqual(started, [jid])
 
+    def test_a_failed_probe_does_not_keep_the_hold(self):
+        def boom(**_):
+            raise RuntimeError("nvidia-smi exploded")
+        with patch.object(worker.gpu, "free_gpus", boom):
+            with self.assertRaises(RuntimeError):
+                with worker.exclusive():
+                    pass
+        self.assertFalse(worker.exclusive_held())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

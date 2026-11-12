@@ -8,6 +8,14 @@ from pathlib import Path
 SPLAT_ROOT = Path(os.environ.get("SPLAT_ROOT", Path.home() / "splat")).expanduser()
 QUEUE_ROOT = Path(os.environ.get("QUEUE_ROOT", SPLAT_ROOT / "queue")).expanduser()
 
+
+def _flag(name: str, default: str) -> bool:
+    """An on/off setting. Accepts the spellings someone types into .queue_env
+    or .env (1, true, yes, on) rather than reading "true" as off and saying
+    nothing."""
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 CACHE_ROOT = QUEUE_ROOT / "cache"
 RUNS_ROOT = QUEUE_ROOT / "runs"
 LOG_ROOT = QUEUE_ROOT / "logs"
@@ -61,9 +69,6 @@ PREP_BACKEND = (os.environ.get("QUEUE_PREP_BACKEND", "").strip().lower()
 if PREP_BACKEND not in ("cuda", "apple"):
     raise SystemExit(f"QUEUE_PREP_BACKEND={PREP_BACKEND!r}: expected cuda or apple")
 
-# GPUs the queue is allowed to schedule on. A GPU carrying a foreign compute
-# process is skipped at runtime regardless of this list (see gpu.py).
-
 # Stall watchdog for the training stage. LichtFeld prints progress every 100
 # iterations, so even a slow 0.3 it/s run reports every ~5 min; going quiet for
 # STALL_TIMEOUT means it is wedged, not working. Job 41 (--max-width 7680) sat
@@ -84,6 +89,8 @@ def _all_gpus() -> list[int]:
         return []
 
 
+# GPUs the queue is allowed to schedule on. A GPU carrying a foreign compute
+# process is skipped at runtime regardless of this list (see gpu.py).
 # "all" (the default) = every GPU nvidia-smi lists at startup; "0" or "0,1" =
 # those only; "" = none, which the tests use to run without a GPU.
 _gpus = os.environ.get("QUEUE_GPUS", "all").strip()
@@ -96,7 +103,7 @@ GPUS = _all_gpus() if _gpus == "all" else [int(x) for x in _gpus.split(",") if x
 DEFAULT_MAX_CONCURRENT = int(os.environ.get("QUEUE_MAX_CONCURRENT", len(GPUS)))
 
 # Start paused so deploying the service can never disturb a hand-launched run.
-START_PAUSED = os.environ.get("QUEUE_START_PAUSED", "1") == "1"
+START_PAUSED = _flag("QUEUE_START_PAUSED", "1")
 
 # Prometheus exposition at /metrics. Off unless asked for: it names input clips
 # and job labels, and a route that exists is a route that can be probed. When
@@ -104,15 +111,7 @@ START_PAUSED = os.environ.get("QUEUE_START_PAUSED", "1") == "1"
 # handler. deploy.sh takes METRICS=1; setting QUEUE_METRICS=1 in .queue_env
 # overrides the deployed default, because systemd reads that file after the
 # unit's own Environment= lines. Either way it stays behind the queue token.
-# `== "1"` is the convention elsewhere in this file, and it is fine for flags
-# only ever set by deploy.sh. This one is documented as hand-editable in
-# .queue_env, so it accepts the spellings someone would actually type there
-# rather than reading QUEUE_METRICS=true as "off" and saying nothing.
-METRICS_ENABLED = os.environ.get("QUEUE_METRICS", "0").strip().lower() in (
-    "1", "true", "yes", "on")
-
-def _flag(name: str, default: str) -> bool:
-    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+METRICS_ENABLED = _flag("QUEUE_METRICS", "0")
 
 
 def _json_env(name: str) -> dict:

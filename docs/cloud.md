@@ -285,7 +285,9 @@ sequenceDiagram
 with `IMAGE=ghcr.io/pgodlews/osvplat:<ver>-prep`, or `docker run`), or
 `queue/run_mac.sh` on an Apple silicon Mac
 ([how-it-works.md](how-it-works.md#prep-on-apple-silicon)), and queue
-the clip with `run_until`:
+the clip with `run_until`. In the web UI that is **Stop after** in the job
+form, which on a prep install starts at `sfm` and offers no full run; from a
+script:
 
 ```bash
 curl -sS -X POST -H "x-queue-token: $QUEUE_TOKEN" -H 'content-type: application/json' \
@@ -319,7 +321,10 @@ docker run -d --gpus all -p 2222:22 \
 ```
 
 Once it has downloaded (`GET /api/handoff/bundles` lists what is in
-`QUEUE_ROOT/handoffs/`), import it and resume the queue:
+`QUEUE_ROOT/handoffs/`), import it and resume the queue. The train image's
+web UI shows those bundles in place of the job form, each with an **Import**
+button. It sends no `sha256`; the import still checks every file against the
+manifest, and `HANDOFF_SHA256` checks the download itself. From a script:
 
 ```bash
 curl -sS -X POST -H "x-queue-token: $QUEUE_TOKEN" -H 'content-type: application/json' \
@@ -496,8 +501,13 @@ completion checks, and its 6M-splat export was deleted with the instance).
   what makes it useful, and it only ever goes where the operator points
   `DEBUG_UPLOAD_URL`. It is stripped of secrets: the queue token, every
   secret-named environment variable (`*TOKEN*`, `*KEY*`, `*_URL`,
-  `*UPLOAD*`, ...), presigned URL signatures anywhere in the text, and GPU
-  serial numbers and UUIDs.
+  `*UPLOAD*`, ...), presigned URL signatures anywhere in the text, GPU
+  serial numbers and UUIDs, and the camera's serial number in
+  `calibration.json`.
+- What it **does** carry at level `artifacts` and above: for a job run with
+  `sfm.upright` on a clip with GPS, `sfm/alignment.json` holds the GPS
+  reference point (latitude, longitude, altitude) the model was put in metres
+  around, which is where the clip was recorded.
 - `repro.sh` holds the job's config as a ready `POST /api/jobs` and the failed
   stage's exact command line: start the same image with the same clip, and
   every cached stage is rebuilt identically.

@@ -75,8 +75,8 @@ def stage_fraction(stage: str, prog: Optional[dict], plan: dict) -> Optional[flo
         lo, hi = span
         within = _clamp(done / total) if done is not None and total else 0.0
         frac = lo + (hi - lo) * within
-        # The fisheye rig reconstructs twice; each pass runs the three phases
-        # again, so the pass decides which share of the bar this one is.
+        # The fisheye rig announces its passes (one today); each pass runs the
+        # three phases, so the pass decides which share of the bar this one is.
         passes, at = prog.get("sfm_passes"), prog.get("sfm_pass")
         if passes and at:
             return _clamp(((at - 1) + frac) / passes)

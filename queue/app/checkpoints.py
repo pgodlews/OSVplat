@@ -34,19 +34,17 @@ import io
 import json
 import os
 import re
-import shutil
 import subprocess
 import tarfile
 import threading
 import time
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from . import db, outputs, telemetry
-from .config import (CACHE_ROOT, CHECKPOINT_UPLOAD, CHECKPOINT_UPLOAD_ERROR, LFS_BIN,
-                     LFS_PYTHON, RESTORE_POINT, RESUME_ROOT, RUNS_ROOT, ssl_context)
+from . import db, outputs, telemetry, uploads
+from .config import (_flag, CACHE_ROOT, CHECKPOINT_UPLOAD, CHECKPOINT_UPLOAD_ERROR, LFS_BIN,
+                     LFS_PYTHON, RESTORE_POINT, RESUME_ROOT, ssl_context)
 from .jobs import TRAINER, JobConfig
 from .stages import ORDER, is_cached
 
@@ -55,7 +53,7 @@ META = "restore.json"
 LICHT = "restore.licht"
 # Also keep restore points locally without uploading them (a host whose disk
 # survives an interruption, like a stopped Vast instance).
-LOCAL = os.environ.get("QUEUE_RESTORE_POINTS", "0").strip().lower() in ("1", "true", "yes", "on")
+LOCAL = _flag("QUEUE_RESTORE_POINTS", "0")
 MAX_RECORDS = 50                  # restore points listed in checkpoints.json
 RETRY_S = 2.0                     # upload retries back off 2 s, then 4 s
 
@@ -127,7 +125,7 @@ def startup_check() -> None:
         print(f"ERROR: {p}. Training jobs are refused until it is fixed.")
     if CHECKPOINT_UPLOAD:
         exp = outputs.expires_at(CHECKPOINT_UPLOAD)
-        print(f"restore points: {outputs.safe_url(CHECKPOINT_UPLOAD['url'])}, "
+        print(f"restore points: {uploads.safe_url(CHECKPOINT_UPLOAD['url'])}, "
               + ("no expiry in the URL" if exp is None
                  else f"expires in {(exp - time.time()) / 3600:.1f} h"))
     elif LOCAL:
@@ -251,17 +249,9 @@ def make(ctx, generation: int, iteration: int, gpu_env: dict) -> tuple[Path, dic
     return tar, rec
 
 
-def _single_object_owner(target: dict, dest: str, job_id: int) -> Optional[int]:
-    if "{job}" in target["url"] or "{job}" in (target.get("key") or ""):
-        return None
-    for d in sorted(RUNS_ROOT.glob("job*")):
-        jid = d.name[3:]
-        if not jid.isdigit() or int(jid) == job_id:
-            continue
-        st = status(int(jid)) or {}
-        if st.get("url") == dest and st.get("uploaded"):
-            return int(jid)
-    return None
+def _uploaded_to(job_id: int) -> Optional[str]:
+    st = status(job_id) or {}
+    return st.get("url") if st.get("uploaded") else None
 
 
 def upload(job_id: int, tar: Path, rec: dict, target: Optional[dict] = None,
@@ -269,45 +259,17 @@ def upload(job_id: int, tar: Path, rec: dict, target: Optional[dict] = None,
     """Send one restore point. Returns what happened (the record's "upload")."""
     target = target or CHECKPOINT_UPLOAD
     name = restore_name(job_id)
-    dest = outputs.safe_url(target["url"].replace("{job}", f"job{job_id:05d}")
-                            .replace("{file}", name))
-    owner = _single_object_owner(target, dest, job_id)
+    dest = uploads.destination(target, job_id, name)
+    owner = uploads.owner_of(target, dest, job_id, _uploaded_to)
     if owner is not None:
         return {"state": "refused", "error": f"CHECKPOINT_UPLOAD_URL names one object and "
                                              f"job {owner} already uploaded to it; use a "
                                              f"{{job}} placeholder or a URL per job"}
-    size = tar.stat().st_size
-    err, tries, transfer_s = None, 0, None
-    for attempt in range(attempts):
-        tries += 1
-        try:
-            with tar.open("rb") as f:
-                if (target.get("method") or "PUT").upper() == "POST":
-                    req = outputs.request(target, job_id, name, f.read())
-                else:
-                    url = target["url"].replace("{job}", f"job{job_id:05d}").replace("{file}", name)
-                    req = urllib.request.Request(
-                        url, data=f, method="PUT",
-                        headers={"Content-Type": "application/x-tar",
-                                 **(target.get("headers") or {}),
-                                 "Content-Length": str(size)})
-                t0 = time.monotonic()
-                with urllib.request.urlopen(req, timeout=3600, context=ssl_context()) as r:
-                    r.read()
-                    etag = r.headers.get("ETag")
-            transfer_s = round(time.monotonic() - t0, 2)
-            err = outputs.etag_problem(etag, rec["md5"])
-            if err is None:
-                break
-        except Exception as exc:                              # noqa: BLE001
-            err = (f"HTTP {exc.code} {exc.reason}" if hasattr(exc, "code")
-                   else f"{type(exc).__name__}: {exc}")
-        if attempt < attempts - 1:
-            time.sleep(RETRY_S * 2 ** attempt)
-    out = {"state": "failed" if err else "done", "url": dest, "bytes": size,
-           "attempts": tries, "transfer_s": None if err else transfer_s,
-           "error": err, "ended": round(time.time(), 1)}
-    return out
+    res = uploads.send(target, job_id, name, tar, rec["md5"], timeout=3600,
+                       attempts=attempts, retry_s=RETRY_S, context=ssl_context())
+    return {"state": res["state"], "url": dest, "bytes": res["bytes"],
+            "attempts": res["attempts"], "transfer_s": res["transfer_s"],
+            "error": res["error"], "ended": round(time.time(), 1)}
 
 
 class Maker:
@@ -328,8 +290,7 @@ class Maker:
         self._thread: Optional[threading.Thread] = None
         _update(ctx.job_id, lambda st: st.update(
             every=ctx.cfg.train.checkpoint_every, local=LOCAL,
-            url=outputs.safe_url(self.target["url"].replace("{job}", f"job{ctx.job_id:05d}")
-                                 .replace("{file}", restore_name(ctx.job_id)))
+            url=uploads.destination(self.target, ctx.job_id, restore_name(ctx.job_id))
             if self.target else None))
 
     def request(self, generation: int, iteration: int) -> None:
@@ -550,6 +511,10 @@ def import_restore(name: str, sha256: Optional[str] = None, bundle: Optional[str
             if job_name:
                 d["name"] = job_name
             jid = db.create_job(d["name"], d, priority=priority, resume=resume)
+            # Rows now, not when the worker reaches each stage: until then the
+            # entries it resumes from are protected from eviction by nothing.
+            from . import jobrows
+            jobrows.stage_rows(jid, cfg)
     except Exception:
         licht.unlink(missing_ok=True)
         raise

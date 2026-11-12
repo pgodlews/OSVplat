@@ -44,17 +44,15 @@ import subprocess
 import tarfile
 import threading
 import time
-import urllib.parse
-import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import db, gpu, outputs, telemetry
+from . import db, gpu, outputs, telemetry, uploads
 from .config import (DEBUG_LEVEL, DEBUG_LEVELS, DEBUG_MAX_BYTES, DEBUG_UPLOAD,
                      DEBUG_UPLOAD_ERROR, LOG_ROOT, QUEUE_ROOT, QUEUE_TOKEN,
-                     RUNS_ROOT, SPLAT_ROOT, ssl_context)
+                     SPLAT_ROOT, ssl_context)
 
 _lock = threading.Lock()          # one build or upload at a time
 
@@ -260,6 +258,23 @@ def _repro(job: dict, stages: list[dict], secrets: list[str]) -> str:
     return scrub("\n".join(lines) + "\n", secrets)
 
 
+def _json_item(prio: int, name: str, path: Path) -> Item:
+    """A stage's JSON record. calibration.json and calibration_refined.json
+    (osv_meta.py, 84_refined_calib.py) carry the camera's serial number under
+    device.serial, which says nothing about why a job failed: it goes in
+    blanked, like a GPU serial."""
+    if path.name.startswith("calibration"):
+        try:
+            doc = json.loads(path.read_text())
+            if isinstance(doc, dict) and isinstance(doc.get("device"), dict) \
+                    and "serial" in doc["device"]:
+                doc["device"]["serial"] = "<redacted>"
+                return Item(prio, name, data=json.dumps(doc, indent=1).encode())
+        except (OSError, ValueError):
+            pass
+    return Item(prio, name, path=path)
+
+
 def _collect(job_id: int, level: str) -> list[Item]:
     secrets = _secret_values()
     job, stages, keys = _job_info(job_id)
@@ -356,14 +371,14 @@ def _collect(job_id: int, level: str) -> list[Item]:
     sfm = dirs.get("sfm")
     if sfm and sfm.is_dir():
         for p in sorted(sfm.glob("*.json")):
-            items.append(Item(13, f"sfm/{p.name}", path=p))
+            items.append(_json_item(13, f"sfm/{p.name}", p))
         for p in sorted(sfm.rglob("sparse/**/*.bin")):
             items.append(Item(20, f"sfm/{p.relative_to(sfm)}", path=p))
     for stage in ("mask", "select", "frames"):
         d = dirs.get(stage)
         if d and d.is_dir():
             for p in sorted(d.glob("*.json")):
-                items.append(Item(14, f"{stage}/{p.name}", path=p))
+                items.append(_json_item(14, f"{stage}/{p.name}", p))
 
     if rank(level) < rank("heavy"):
         return items
@@ -478,26 +493,9 @@ def _write(job_id: int, level: str, items: list[Item], started: float) -> dict:
 
 # ----------------------------------------------------------------- upload
 
-def _owner(dest: str, job_id: int) -> Optional[int]:
-    """Another job that already uploaded its bundle to this same object."""
-    for d in sorted(RUNS_ROOT.glob("job*")):
-        if not d.name[3:].isdigit() or int(d.name[3:]) == job_id:
-            continue
-        st = status(int(d.name[3:]))
-        if st and (st.get("upload") or {}).get("state") == "done" \
-                and (st.get("upload") or {}).get("url") == dest:
-            return int(d.name[3:])
-    return None
-
-
-def _request(target: dict, job_id: int, name: str, f, size: int) -> urllib.request.Request:
-    """A streaming PUT (bundles run to GBs), or outputs' builder for a POST."""
-    if (target.get("method") or "PUT").upper() == "POST":
-        return outputs.request(target, job_id, name, f.read())
-    url = target["url"].replace("{job}", f"job{job_id:05d}").replace("{file}", name)
-    headers = {"Content-Type": "application/x-tar", **(target.get("headers") or {}),
-               "Content-Length": str(size)}
-    return urllib.request.Request(url, data=f, headers=headers, method="PUT")
+def _uploaded_to(job_id: int) -> Optional[str]:
+    up = (status(job_id) or {}).get("upload") or {}
+    return up.get("url") if up.get("state") == "done" else None
 
 
 def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dict:
@@ -506,11 +504,9 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
     if not target or st.get("state") not in ("built", "upload_failed", "uploaded"):
         return st
     name = f"job{job_id:05d}-debug.tar"
-    dest = outputs.safe_url(target["url"].replace("{job}", f"job{job_id:05d}")
-                            .replace("{file}", name))
+    dest = uploads.destination(target, job_id, name)
     with _lock:
-        fixed = "{job}" not in target["url"] and "{job}" not in (target.get("key") or "")
-        owner = _owner(dest, job_id) if fixed else None
+        owner = uploads.owner_of(target, dest, job_id, _uploaded_to)
         if owner is not None:
             st["upload"] = {"state": "refused", "url": dest,
                             "error": f"DEBUG_UPLOAD_URL names one object and job {owner}'s "
@@ -518,28 +514,12 @@ def upload(job_id: int, target: Optional[dict] = None, attempts: int = 3) -> dic
             st["state"] = "refused"
             print(f"job {job_id}: debug upload refused: {st['upload']['error']}")
             return _set_status(job_id, **st)
-        path, size = bundle_path(job_id), bundle_path(job_id).stat().st_size
-        err, tries, transfer_s = None, 0, None
-        for attempt in range(attempts):
-            tries += 1
-            try:
-                with path.open("rb") as f:
-                    req = _request(target, job_id, name, f, size)
-                    t0 = time.monotonic()
-                    with urllib.request.urlopen(req, timeout=1800, context=ssl_context()) as r:
-                        r.read()
-                        etag = r.headers.get("ETag")
-                transfer_s = round(time.monotonic() - t0, 2)
-                err = outputs.etag_problem(etag, st.get("md5", ""))
-                if err is None:
-                    break
-            except Exception as exc:                          # noqa: BLE001
-                err = (f"HTTP {exc.code} {exc.reason}" if hasattr(exc, "code")
-                       else f"{type(exc).__name__}: {exc}")
-            if attempt < attempts - 1:
-                time.sleep(2 ** (attempt + 1))
-        st["upload"] = {"state": "failed" if err else "done", "url": dest,
-                        "attempts": tries, "transfer_s": None if err else transfer_s,
+        path = bundle_path(job_id)
+        res = uploads.send(target, job_id, name, path, st.get("md5", ""), timeout=1800,
+                           attempts=attempts, context=ssl_context())
+        err, size = res["error"], res["bytes"]
+        st["upload"] = {"state": res["state"], "url": dest,
+                        "attempts": res["attempts"], "transfer_s": res["transfer_s"],
                         "error": err, "ended": round(time.time(), 1)}
         st["state"] = "upload_failed" if err else "uploaded"
         print(f"job {job_id}: debug bundle upload to {dest} "

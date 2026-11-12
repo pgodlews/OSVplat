@@ -352,7 +352,8 @@ CUDA-only), so a Mac's output is meant to reach a CUDA box as a
 ported: `30_run_sfm.py` refuses to run without CUDA.
 
 `queue/run_mac.sh` starts the queue there. It is a prep install: a job must set
-`run_until`, and `"sfm"` writes the bundle. The queue schedules on the Mac's one
+`run_until` (**Stop after** in the web UI, which starts at `sfm` there), and
+`"sfm"` writes the bundle. The queue schedules on the Mac's one
 GPU without `nvidia-smi`, so it has no guard against other programs using that
 GPU, and runs one job at a time. Each job records the toolchain that preps it
 (`prep_backend`, set by the host that creates the job), and a Mac's jobs carry

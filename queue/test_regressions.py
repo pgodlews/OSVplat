@@ -121,6 +121,30 @@ class ReviewRegressions(unittest.TestCase):
         with patch.object(worker, "paused", return_value=True):
             self.assertIsNone(main.api_jobs(limit=1, offset=2)[0]["eta"]["starts_in"])
 
+    def test_job_page_matches_the_per_row_build(self):
+        import time as _t
+        for i, state in enumerate(("done", "failed", "done")):
+            jid = db.create_job(f"j{i}", self.cfg.model_dump())
+            db.set_job_state(jid, state, started=_t.time() - 100, ended=_t.time() - 10)
+            db.upsert_stage(jid, "frames", "kf", "done", started=1.0, ended=3.0)
+            db.upsert_stage(jid, "train", f"kt{i}", state, progress='{"step": 5}')
+            db.put_metric(jid, "psnr", 20.0 + i)
+            db.put_metric(jid, "note", "text")
+        with patch.object(worker, "schedulable_capacity", return_value=1):
+            page = main.api_jobs(limit=10, offset=0)
+        one_by_one = [main._job_dict(r) for r in db.list_jobs(limit=10, offset=0)]
+        self.assertEqual(page, one_by_one)
+        self.assertEqual(page[0]["metrics"]["note"], "text")
+
+    def test_estimate_stops_at_run_until(self):
+        cfg = self.cfg.model_copy(deep=True)
+        cfg.run_until = "sfm"
+        est = estimate.estimate(cfg, 60.0)
+        self.assertEqual((est["train"], est["export"]), (0.0, 0.0))
+        self.assertGreater(est["sfm"], 0)
+        self.assertEqual(est["total"], round(sum(est[s] for s in
+                                                ("frames", "select", "mask", "sfm")), 1))
+
     def test_history_limit_is_per_pipeline(self):
         for ext, seconds, count in [("mp4", 2000, 1), ("OSV", 3000, 20)]:
             cfg = self.cfg.model_copy(deep=True)
@@ -150,6 +174,117 @@ class CacheGcPreview(unittest.TestCase):
                                      dry_run=True)
         # 15 GiB short, 10 GiB entries: two deletions suffice, not all five.
         self.assertEqual(out["n_evicted"], 2, out)
+
+
+class OrphansAndRuns(unittest.TestCase):
+    """Disk that failed builds and finished jobs leave outside the cache table."""
+
+    def setUp(self):
+        from app import retention
+        self.r = retention
+        db.init()
+        db.conn().execute("DELETE FROM cache")
+        db.conn().execute("DELETE FROM jobs")
+        self.made = []
+
+    def stage_dir(self, stage, key, done=False, lock=None, age=3600):
+        import json as _json
+        import time as _t
+        d = self.r.CACHE_ROOT / stage / key
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "payload.bin").write_bytes(b"x" * 4096)
+        if done:
+            (d / ".done").write_text("{}")
+        if lock is not None:
+            (d / ".lock").write_text(_json.dumps(lock))
+        t = _t.time() - age
+        os.utime(d, (t, t))
+        self.made.append(d)
+        return d
+
+    def tearDown(self):
+        import shutil
+        for d in self.made:
+            shutil.rmtree(d, ignore_errors=True)
+        self.r._orphan_stat = (0.0, {})
+
+    def test_orphans_go_before_valid_entries(self):
+        valid = self.stage_dir("frames", "orphtest_valid", done=True)
+        db.cache_put("orphtest_valid", "frames", str(valid), 4096)
+        orphan = self.stage_dir("train", "orphtest_failed")
+        live = self.stage_dir("sfm", "orphtest_live", lock={"pid": os.getpid()})
+        fresh = self.stage_dir("mask", "orphtest_fresh", age=10)
+        protected = self.stage_dir("select", "orphtest_protected")
+        base = 100 * 2**30
+        # The disk gets freer once the orphan is gone, and only then.
+        free = lambda: base + (0 if orphan.exists() else 4096)
+        with patch.object(self.r, "free_bytes", free), \
+                patch.object(self.r, "protected_keys", lambda: {"orphtest_protected"}):
+            keys = {o["key"] for o in self.r.orphans()}
+            self.assertEqual(keys & {"orphtest_valid", "orphtest_failed", "orphtest_live",
+                                     "orphtest_fresh", "orphtest_protected"},
+                             {"orphtest_failed"})
+            # 1 byte short: the orphan alone is evicted, the valid entry stays.
+            out = self.r.gc_cache(target_free=base + 1, budget=None)
+        self.assertFalse(orphan.exists())
+        for d in (valid, live, fresh, protected):
+            self.assertTrue(d.exists(), d)
+        self.assertTrue(any(e.get("orphan") and e["key"] == "orphtest_failed"
+                            for e in out["evicted"]), out)
+
+    def test_dry_run_lists_orphans_without_deleting(self):
+        orphan = self.stage_dir("frames", "orphtest_dry")
+        with patch.object(self.r, "free_bytes", lambda: 0), \
+                patch.object(self.r, "protected_keys", lambda: set()):
+            out = self.r.gc_cache(target_free=1, budget=None, dry_run=True)
+        self.assertTrue(orphan.exists())
+        self.assertIn("orphtest_dry", [e["key"] for e in out["evicted"]])
+
+    def test_old_run_tars_are_pruned_records_kept(self):
+        import time as _t
+        from app import telemetry
+        old = db.create_job("old", self.cfg_dump())
+        db.set_job_state(old, "failed", ended=_t.time() - 40 * 86400)
+        recent = db.create_job("recent", self.cfg_dump())
+        db.set_job_state(recent, "failed", ended=_t.time() - 86400)
+        queued = db.create_job("queued", self.cfg_dump())
+        paths = {}
+        for jid in (old, recent, queued):
+            d = telemetry.run_dir(jid)
+            d.mkdir(parents=True, exist_ok=True)
+            tar, rec = d / "debug.tar", d / "debug.json"
+            tar.write_bytes(b"t" * 1000)
+            rec.write_text("{}")
+            t = _t.time() - 40 * 86400
+            os.utime(tar, (t, t))
+            paths[jid] = (tar, rec)
+        out = self.r.prune_runs()
+        self.assertFalse(paths[old][0].exists())
+        self.assertTrue(paths[old][1].exists())
+        self.assertTrue(paths[recent][0].exists())
+        self.assertTrue(paths[queued][0].exists())
+        self.assertGreaterEqual(out["removed"], 1)
+
+    @staticmethod
+    def cfg_dump():
+        return JobConfig.model_validate({"name": "r", "input": {"file": "clip.mp4"}}).model_dump()
+
+
+class GpuProbeCache(unittest.TestCase):
+    def test_uuid_map_is_read_once_and_dropped_on_failure(self):
+        g = worker.gpu
+        asked = []
+        apps = [[["GPU-a", "42", "LichtFeld", "100"]], None, [["GPU-a", "42", "x", "1"]]]
+
+        def smi(q, extra=None):
+            asked.append(q.split("=")[0])
+            return [["0", "GPU-a"]] if q == "gpu=index,uuid" else apps.pop(0)
+        with patch.object(g, "_uuid_index", None), patch.object(g, "_nvidia_smi", smi):
+            self.assertEqual(g.compute_procs()[0][0]["pid"], 42)
+            self.assertIsNone(g.compute_procs())          # the apps query fails
+            self.assertEqual(g.compute_procs()[0][0]["pid"], 42)
+        # Read for the first call, kept for the second, re-read after the failure.
+        self.assertEqual(asked.count("gpu"), 2, asked)
 
 
 class SubmitValidation(unittest.TestCase):

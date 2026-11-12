@@ -27,7 +27,7 @@ os.environ.pop("OUTPUT_UPLOAD_URL", None)
 os.environ.pop("QUEUE_CPUS", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app import config, db, gpu, outputs, resources, worker   # noqa: E402
+from app import config, db, gpu, outputs, resources, uploads   # noqa: E402
 
 
 def cgroup(tmp: Path, **files) -> Path:
@@ -299,17 +299,18 @@ class Upload(unittest.TestCase):
     def test_damaged_upload_fails(self):
         jid = make_done_job({"splat.ply": b"x" * 10})
         _Sink.corrupt = True
-        st = outputs.upload(jid, {"method": "PUT", "url": f"{self.base}/{{job}}.tar"})
+        with patch.object(time, "sleep"):                         # backs off between tries
+            st = outputs.upload(jid, {"method": "PUT", "url": f"{self.base}/{{job}}.tar"})
         self.assertEqual(st["state"], "failed")
         self.assertIn("damaged", st["error"])
         self.assertEqual(len(_Sink.got), 3)                       # retried
 
     def test_etag_rules(self):
         md5 = hashlib.md5(b"a").hexdigest()
-        self.assertIsNone(outputs.etag_problem(f'"{md5}"', md5))
-        self.assertIsNone(outputs.etag_problem(None, md5))                    # no ETag
-        self.assertIsNone(outputs.etag_problem('"9b2cf535f27731c974343645a3985328-3"', md5))  # multipart
-        self.assertIn("damaged", outputs.etag_problem('"%s"' % ("0" * 32), md5))
+        self.assertIsNone(uploads.etag_problem(f'"{md5}"', md5))
+        self.assertIsNone(uploads.etag_problem(None, md5))                    # no ETag
+        self.assertIsNone(uploads.etag_problem('"9b2cf535f27731c974343645a3985328-3"', md5))  # multipart
+        self.assertIn("damaged", uploads.etag_problem('"%s"' % ("0" * 32), md5))
 
     def test_rejected_upload_fails_loudly_and_keeps_archive(self):
         jid = make_done_job({"splat.ply": b"x" * 10})

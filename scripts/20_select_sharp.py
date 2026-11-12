@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Keep the sharpest frame (Laplacian variance on a 1/4-scale grayscale decode) out of every W consecutive candidates.
-usage: 20_select_sharp.py [W=5] [src=run1/erp10] [dst=run1/panos]   -> hardlinks dst/pano_NNNN.jpg"""
+usage: 20_select_sharp.py W SRC DST   -> hardlinks DST/pano_NNNN.jpg"""
 import cv2, os, sys, glob, time, numpy as np
 from concurrent.futures import ProcessPoolExecutor
-W = int(sys.argv[1]) if len(sys.argv) > 1 else 5
-src = sys.argv[2] if len(sys.argv) > 2 else 'run1/erp10'
-dst = sys.argv[3] if len(sys.argv) > 3 else 'run1/panos'
+from io_pool import io_threads
+if len(sys.argv) != 4: sys.exit(__doc__.strip().splitlines()[-1])
+W, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 files = sorted(glob.glob(src + '/*.jpg'))
 if not files: sys.exit(f'no candidate JPEGs in {src}')
 def score(f):
@@ -17,7 +17,8 @@ def score(f):
     if img is None: return -1.0
     return float(cv2.Laplacian(img, cv2.CV_64F).var())
 t = time.time()
-with ProcessPoolExecutor(16) as ex: scores = list(ex.map(score, files, chunksize=8))
+# SPLAT_THREADS: the container's CPU allowance (queue/app/resources.py).
+with ProcessPoolExecutor(io_threads(16)) as ex: scores = list(ex.map(score, files, chunksize=8))
 os.makedirs(dst, exist_ok=True)
 sel = []
 for i in range(0, len(files), W):

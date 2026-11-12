@@ -13,14 +13,20 @@ that projection -- so rather than teach it fisheye:
      (81 masks, no valid circle). The round trip is exact by construction, so
      masks land on the right fisheye pixels even where the stored lens model is
      not quite right -- and the circle is left to the SfM, which is the stage
-     that knows which radius each pass can trust.
+     that knows which radius it can trust.
 
 usage (venv_gs):
   87_fisheye_masks.py --images SELECT/images --calib FRAMES/calibration.json --out MASK_DIR \
                       --masker-python PY [-- <70_person_masks.py options>]
-Writes MASK_DIR/{erp,masks,masks_colmap,overlay,review_sheet.jpg,summary.json,fisheye_masks/lens{0,1}}.
+Writes MASK_DIR/{masks,masks_colmap,overlay,review_sheet.jpg,summary.json,fisheye_masks/lens{0,1}}.
+The panoramas stitched for the detector (MASK_DIR/erp) are deleted once the
+masks are back on the fisheyes: nothing reads them again (the overlays and the
+contact sheet are 70_person_masks.py's own), and they were most of the stage's
+size on disk. They still count toward its peak (queue/app/stages.py,
+PREP_BYTES_PER_PX).
 """
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -59,6 +65,9 @@ def main():
     run([sys.executable, HERE / "81_fisheye_stitch.py", "masks", "--calib", a.calib,
          "--images", a.images, "--erp-masks", out / "masks", "--out", out / "fisheye_masks",
          "--fscale", "1.0", "--valid-radius", "0"], "masks back to fisheye")
+    # Only on success: a failure leaves erp/ for the debug bundle and the
+    # retry, which empties the stage directory before it starts anyway.
+    shutil.rmtree(out / "erp", ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ has them, go into the SfM masks here; training masks are combined later by
 89_fisheye_train_view.py under the train stage's own key.
 
 usage (venv): 88_fisheye_sfm.py --images SELECT/images --calib FRAMES/calibration.json \
-              --out SFM_DIR [--person-masks MASK/fisheye_masks] [--overlap 10] [--max-deg 88]
+              --out SFM_DIR [--person-masks MASK/fisheye_masks] [--overlap 15] [--max-deg 88]
               [--upright CLIP.OSV --selection SELECT/selection.json [--start S]]
 Writes SFM_DIR/summary.json and prints it as the final line; with --upright
 also SFM_DIR/alignment.json (the transform, and the GPS reference when there is one).
@@ -42,10 +42,14 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from io_pool import io_threads  # noqa: E402
 from osmo_fisheye import lenses, theta_d  # noqa: E402
 import upright as upright_mod  # noqa: E402
 
 PY = sys.executable
+# Share of rig frames the model must register. One value for both checks:
+# here, before refining and levelling a model that would be refused anyway,
+# and in 85_fisheye_dataset.py, which used to refuse 85-90 % only after them.
 MIN_REGISTERED = 0.9
 
 
@@ -111,7 +115,7 @@ def build_masks(images, out, L, radii, person=None):
                 return n
             cv2.imwrite(str(d / f"{n}.png"), np.where(pm >= 128, circle, 0).astype(np.uint8))
             return None
-        with ThreadPoolExecutor(8) as ex:
+        with ThreadPoolExecutor(io_threads(8)) as ex:
             bad = [n for n in ex.map(one, names) if n]
         if bad:
             raise SystemExit(f"lens{i}: {len(bad)} person masks missing or the wrong size, e.g. {bad[:3]}")
@@ -124,7 +128,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--person-masks", default="")
     ap.add_argument("--overlap", type=int, default=15)
-    ap.add_argument("--min-registered", type=float, default=0.85)
+    ap.add_argument("--min-registered", type=float, default=MIN_REGISTERED)
     ap.add_argument("--max-deg", type=float, default=88.0)
     ap.add_argument("--upright", default="", metavar="CLIP",
                     help="the .OSV the frames came from: level the model with its orientation "
@@ -196,7 +200,8 @@ def main():
     # the train stage when the job masks them.
     build_masks(images, out / "valid_masks", L, radii, None)
     run([PY, HERE / "85_fisheye_dataset.py", "fisheye", model, images, out / "valid_masks",
-         out / "dataset", "--holdout-every", "0"], "dataset build")
+         out / "dataset", "--holdout-every", "0",
+         "--min-registered", a.min_registered], "dataset build")
 
     # 32_pick_model walks images, and a rig registers two per frame: count
     # frames, and measure the path along one lens so it does not zig-zag.

@@ -22,31 +22,21 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import (benchmark, checkpoints, db, debugdump, estimate, gpu, handoff, metrics,
-               outputs, preempt, progress, resources, retention, telemetry, worker)
+from . import (benchmark, checkpoints, db, debugdump, estimate, gpu, handoff, jobrows,
+               metrics, outputs, preempt, progress, resources, retention, telemetry,
+               worker)
 from .config import (BENCHMARK_AT_START, CACHE_ROOT, GPUS, GS_PY, HANDOFF_ROOT,
                      IMAGE_VARIANT, METRICS_ENABLED, MODELS_ROOT, PREP_BACKEND, QUEUE_TOKEN,
                      RENDER_COMPARE, RENDER_ROOT, SPLAT_ROOT, TOKEN_COOKIE)
 from .jobs import FISHEYE_EXTS, IMU_SELECT_DEFAULT, UPRIGHT_DEFAULT, JobConfig, quick_hash
 from . import mask_backends
-from .stages import ARTIFACT_EXTS, ORDER, images_dir, is_cached
+from .stages import ARTIFACT_EXTS, images_dir, is_cached
 from .probe import ffprobe
 
-import sys
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+from . import osv
 
-try:
-    from scripts.osv_meta import detect_camera
-except ImportError:
-    try:
-        from osv_meta import detect_camera
-    except ImportError:
-        detect_camera = None
+# A module global, so tests can patch it; None when scripts/ could not be read.
+detect_camera = osv.detect_camera
 
 app = FastAPI(title="splat queue")
 STATIC = Path(__file__).parent / "static"
@@ -121,6 +111,9 @@ async def _require_token(request: Request, call_next):
 @app.on_event("startup")
 def _startup() -> None:
     db.init()
+    if osv.ERROR:
+        print(f"ERROR: {osv.ERROR}. Clips are not recognised as Osmo or Avata "
+              f"(no masking default), and distance selection is refused")
     print("auth: token required" if QUEUE_TOKEN else
           "auth: NO TOKEN SET -- serving loopback clients only")
     # What the stages will be sized to (resources.py); telemetry has already
@@ -147,8 +140,10 @@ def _startup() -> None:
     if n:
         print(f"reconciled {n} job(s) left running by a previous process")
     logs, rends = retention.prune_logs(), retention.prune_renders()
-    if logs["removed"] or rends["removed"]:
-        print(f"pruned {logs['removed']} log(s) and {rends['removed']} render(s)")
+    runs = retention.prune_runs()
+    if logs["removed"] or rends["removed"] or runs["removed"]:
+        print(f"pruned {logs['removed']} log(s), {rends['removed']} render(s) and "
+              f"{runs['removed']} old run file(s), {runs['bytes']/retention.GB:.1f} GB")
     print(f"disk: {retention.free_bytes()/retention.GB:.1f} GB free, "
           f"cache holds {retention.cache_total()/retention.GB:.1f} GB")
     # Before the dispatcher starts: the benchmark holds the machine, so no job
@@ -175,8 +170,6 @@ STITCHED_EXTS = (".mp4", ".mov", ".mkv")
 # DJI .OSV (Osmo 360, Avata 360) is raw dual fisheye too, but it carries the
 # camera's lens calibration, so it runs the fisheye rig pipeline instead of
 # being refused (jobs.FISHEYE_EXTS, docs/how-it-works.md, "Fisheye rig").
-FISHEYE_NOTE = ("raw DJI dual fisheye — reconstructed as a calibrated two-lens "
-                "rig, no stitch")
 # The rest still cannot be used: Insta360's containers have no decoded
 # calibration, and a low-res proxy is not something to reconstruct from.
 RAW_EXTS = (".insv", ".insp", ".lrv")
@@ -311,9 +304,8 @@ def _prepare(cfg_in: dict) -> JobConfig:
         cfg.sfm.upright = UPRIGHT_DEFAULT
 
     if cfg.select.mode == "distance":
-        from avata_motion import load
         try:
-            motion = load(src)
+            motion = osv.need_avata_motion().load(src)
             if cfg.frames.fps > motion["fps"]:
                 raise ValueError("Distance selection candidate fps must not exceed the source fps")
         except ValueError as exc:
@@ -405,14 +397,7 @@ def _refuse_for_image(cfg: Optional[JobConfig] = None) -> None:
                                 "not be delivered; fix HANDOFF_UPLOAD_URL and restart")
 
 
-def _stage_rows(jid: int, cfg: JobConfig) -> None:
-    """A row per stage: cached, pending, or skipped past run_until."""
-    last = ORDER.index(cfg.run_until) if cfg.run_until else len(ORDER)
-    for stage, key in cfg.keys().items():
-        d = CACHE_ROOT / stage / key
-        state = ("skipped" if ORDER.index(stage) > last
-                 else "cached" if is_cached(d) else "pending")
-        db.upsert_stage(jid, stage, key, state, path=str(d))
+_stage_rows = jobrows.stage_rows
 
 
 @app.post("/api/jobs")
@@ -543,7 +528,17 @@ def api_sweep(req: SweepReq) -> dict:
     return {"sweep_id": sweep_id, "jobs": created}
 
 
-def _job_dict(row, now: Optional[float] = None) -> dict:
+def _job_dicts(rows, now: Optional[float] = None) -> list[dict]:
+    """_job_dict for many rows, with their stages and metrics read in two
+    queries rather than two per row."""
+    ids = [r["id"] for r in rows]
+    stages, metrics_ = db.stages_for(ids), db.metrics_for(ids)
+    return [_job_dict(r, now=now, stage_rows=stages[r["id"]], metrics=metrics_[r["id"]])
+            for r in rows]
+
+
+def _job_dict(row, now: Optional[float] = None, stage_rows=None,
+              metrics: Optional[dict] = None) -> dict:
     cfg = json.loads(row["config"])
     now = now or time.time()
     try:
@@ -551,7 +546,7 @@ def _job_dict(row, now: Optional[float] = None) -> dict:
     except (ValueError, TypeError):
         plan = {}
     stages = []
-    for st in db.job_stages(row["id"]):
+    for st in (db.job_stages(row["id"]) if stage_rows is None else stage_rows):
         prog = json.loads(st["progress"]) if st["progress"] else None
         # `seconds` stays what it always was -- the duration of a FINISHED
         # stage. A stage in flight reports elapsed separately, so a caller that
@@ -576,7 +571,7 @@ def _job_dict(row, now: Optional[float] = None) -> dict:
         "gpu": row["gpu"], "error": row["error"], "sweep_id": row["sweep_id"],
         "created": row["created"], "started": row["started"],
         "ended": row["ended"], "config": cfg, "stages": stages,
-        "metrics": db.job_metrics(row["id"]),
+        "metrics": db.job_metrics(row["id"]) if metrics is None else metrics,
         "review_state": row["review_state"],
         "review_note": row["review_note"],
         "plan": plan or None,
@@ -590,12 +585,13 @@ def api_jobs(limit: int = Query(200, ge=1, le=1000),
     # One clock reading for the whole page, so the rows agree with each other
     # and with the queue-wide drain time computed from them.
     now = time.time()
-    active = [_job_dict(r, now=now) for r in db.active_jobs()]
+    active = _job_dicts(db.active_jobs(), now=now)
     progress.queue_eta(active, worker.schedulable_capacity(), now=now,
                        paused=worker.paused())
     by_id = {j["id"]: j for j in active}
-    return [by_id[r["id"]] if r["id"] in by_id else _job_dict(r, now=now)
-            for r in db.list_jobs(limit=limit, offset=offset)]
+    page = db.list_jobs(limit=limit, offset=offset)
+    rest = {j["id"]: j for j in _job_dicts([r for r in page if r["id"] not in by_id], now=now)}
+    return [by_id.get(r["id"]) or rest[r["id"]] for r in page]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -886,8 +882,13 @@ async def api_log(job_id: int, stage: str = Query("train"),
                 if line:
                     yield f"data: {line.rstrip()}\n\n"
                 else:
-                    row = db.get_job(job_id)
-                    if row and row["state"] not in ("running", "queued"):
+                    # Ends with the stage it follows, not with the job: a
+                    # finished frames log used to be polled for the hours the
+                    # rest of the job took.
+                    st_row = db.conn().execute(
+                        "SELECT state FROM stages WHERE job_id=? AND stage=?",
+                        (job_id, stage)).fetchone()
+                    if not st_row or st_row["state"] not in ("running", "waiting"):
                         yield "event: end\ndata: done\n\n"
                         return
                     await asyncio.sleep(1.0)
@@ -1081,7 +1082,7 @@ def api_status() -> dict:
         "SELECT state, COUNT(*) n FROM jobs GROUP BY state").fetchall()}
     # Only running and queued rows can affect when the queue drains, and there
     # are rarely more than a handful of those -- unlike the full job page.
-    active = [_job_dict(r, now=now) for r in db.active_jobs()]
+    active = _job_dicts(db.active_jobs(), now=now)
     return {**st, "counts": counts, "schedulable_gpus": GPUS,
             "mask_backends": mask_backends.availability(MODELS_ROOT),
             "visible_jobs": db.count_jobs(),
@@ -1090,6 +1091,7 @@ def api_status() -> dict:
                 paused=st["paused"]),
             "metrics": METRICS_ENABLED,
             "image_variant": IMAGE_VARIANT,
+            "prep_backend": PREP_BACKEND,
             "cuda_error": resources.CUDA_ERROR,
             "cpu_error": resources.CPU_ERROR,
             "splat_root": str(SPLAT_ROOT)}
@@ -1113,7 +1115,7 @@ def api_metrics():
               X-Queue-Token: {values: [<token>]}
     """
     now = time.time()
-    active = [_job_dict(r, now=now) for r in db.active_jobs()]
+    active = _job_dicts(db.active_jobs(), now=now)
     progress.queue_eta(active, worker.schedulable_capacity(), now=now,
                        paused=worker.paused())
     return PlainTextResponse(metrics.render(active, now=now),
@@ -1302,12 +1304,15 @@ def api_cache_gc(dry_run: bool = Query(False),
     Skips anything a queued or running job depends on, and anything whose
     directory is locked by a live process. `dry_run` lists what would go.
     """
+    # Orphans (what failed or cancelled builds left) always go: nothing reads
+    # them again, and they are in no cache entry the button would otherwise reach.
     if budget_gb is None:
         # No explicit ceiling: reclaim only as far as the free-space floor, so
         # the obvious button is not also the one that wipes the cache.
         return retention.gc_cache(target_free=retention.MIN_FREE_BYTES,
-                                  dry_run=dry_run)
-    return retention.gc_cache(budget=budget_gb * retention.GB, dry_run=dry_run)
+                                  dry_run=dry_run, all_orphans=True)
+    return retention.gc_cache(budget=budget_gb * retention.GB, dry_run=dry_run,
+                              all_orphans=True)
 
 
 # ----------------------------------------------------------------- compare

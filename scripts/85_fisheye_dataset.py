@@ -2,15 +2,16 @@
 """LichtFeld dataset from a fisheye rig model or a stitched equirect model, holding out the same instants.
 
   * Every Nth instant (frame_NNNN / pano_NNNN with NNNN % N == 0) is
-    deregistered, so neither arm of the A/B trains on those moments and
-    86_fisheye_eval.py can render both at them. LichtFeld's own --eval split is
+    deregistered, so neither arm of an A/B trains on those moments and an
+    evaluation can render both at them (the A/B evaluation scripts are not part
+    of this repository). LichtFeld's own --eval split is
     not used: it holds out by position in its own image order, which is not
     capture order (docs/troubleshooting.md #23), so two arms would not hold out the same moments.
   * Fisheye only: "lens0/frame_0001.jpg" is flattened to "lens0_frame_0001.jpg".
     LichtFeld matches masks by file stem across the whole dataset and refuses a
     stem that appears twice -- and a rig names both lenses of an instant alike.
 
-A model that registers under 90% of the instants is refused -- COLMAP's
+A model that registers under --min-registered (90 %) of the instants is refused -- COLMAP's
 sparse/0 can be a fragment while the real model sits in sparse/1.
 
 The written images.bin is read back with a minimal parser (what LichtFeld sees,
@@ -82,9 +83,11 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--holdout-every", type=int, default=8,
                     help="hold out every Nth instant; 0 holds out nothing (the queue uses LichtFeld's own --eval)")
+    ap.add_argument("--min-registered", type=float, default=0.9,
+                    help="share of the instants the model must register (88_fisheye_sfm.py passes its own)")
     ap.add_argument("--holdout-instants", default="",
                     help="comma-separated instants to hold out instead of every Nth, so two arms whose "
-                         "selections differ can hold out only the moments both kept (94_fisheye_ab_eval.py)")
+                         "selections differ can hold out only the moments both kept")
     a = ap.parse_args()
     listed = {int(x) for x in a.holdout_instants.split(",") if x.strip()}
 
@@ -101,7 +104,7 @@ def main():
     # 2-frame fragment). Refuse anything that misses a tenth of the instants.
     reg_instants = {instant(rec.images[i].name) for i in reg}
     avail = {instant(p.name) for p in (Path(a.images) / ("lens0" if a.kind == "fisheye" else "")).glob("*.jpg")}
-    if len(reg_instants) < 0.9 * len(avail):
+    if len(reg_instants) < a.min_registered * len(avail):
         siblings = [(p.name, pycolmap.Reconstruction(str(p)).num_reg_images())
                     for p in sorted(Path(a.model).parent.iterdir()) if (p / "images.bin").exists()]
         raise SystemExit(f"{a.model} registers {len(reg_instants)} of {len(avail)} instants: a fragment. "

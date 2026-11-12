@@ -103,6 +103,14 @@ dropped = [{"image_id": int(k),
 keep = np.array([k not in set(drop_ids) for k in order])
 centres = centres[keep]
 kept_ids = [k for k, ok in zip(order, keep) if ok]
+# Frames, not images. A rig registers several images per instant: the
+# perspective renders 12 pinhole views per panorama, the fisheye rig two
+# lenses. The queue divides this by the number of selected panoramas, and an
+# image count made a 2-of-100 fragment of a perspective run read as 24 %
+# while a full one read as 1200 %, so its registration floor never fired.
+# Without a rig every image is its own frame and the two counts agree.
+n_frames_raw = len({rec.images[k].frame_id for k in order})
+n_frames = len({rec.images[k].frame_id for k in kept_ids})
 
 # ---------------------------------------------------------------- diagnostic
 # Parallax available to the trainer. baseline/median depth below ~0.5 means the
@@ -120,8 +128,10 @@ baseline = float(np.linalg.norm(bbox))
 summary = {
     "models": [{"name": m[2], "images": m[0], "points": m[1]} for m in models],
     "chosen": name,
-    "num_reg_frames": len(kept_ids),
-    "num_reg_frames_raw": n_img,
+    "num_reg_frames": n_frames,
+    "num_reg_frames_raw": n_frames_raw,
+    "num_reg_images": len(kept_ids),
+    "num_reg_images_raw": n_img,
     "num_points3D": n_pts,
     "mean_reproj": mean_reproj,
     "dropped_cameras": dropped,

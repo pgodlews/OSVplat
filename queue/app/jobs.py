@@ -223,6 +223,10 @@ MANAGED_TRAIN_FLAGS = {
 MIN_CHECKPOINT_EVERY = 500
 
 
+# LichtFeld's own iteration count, which steps_scaler scales from.
+LFS_DEFAULT_ITER = 30000
+
+
 class TrainCfg(Cfg):
     trainer: Literal["lichtfeld"] = "lichtfeld"
     strategy: Literal["mrnf", "mcmc", "igs+"] = "mrnf"
@@ -230,7 +234,7 @@ class TrainCfg(Cfg):
     # Training budget. steps_scaler scales iterations AND every schedule
     # (fill_pacing_iter, sh_degree_interval, refine_every, eval_steps, ...).
     # iter is the unscaled base; see the guard in _check_budget.
-    iter: int = Field(default=30000, ge=100)
+    iter: int = Field(default=LFS_DEFAULT_ITER, ge=100)
     steps_scaler: float = Field(default=1.0, gt=0, le=10)
 
     max_cap: int = Field(default=3_000_000, ge=10_000)
@@ -286,7 +290,7 @@ class TrainCfg(Cfg):
         # LichtFeld applies steps_scaler AFTER the CLI assignment, so passing
         # both --iter and --steps-scaler double-scales: --iter 15000
         # --steps-scaler 0.5 yields 7500 iterations. Refuse it.
-        if self.steps_scaler != 1.0 and self.iter != 30000:
+        if self.steps_scaler != 1.0 and self.iter != LFS_DEFAULT_ITER:
             raise ValueError(
                 "set either steps_scaler (scales iterations and all schedules "
                 "together) or a bare iter, not both: LichtFeld applies "
@@ -401,6 +405,12 @@ UPRIGHT = "upright-1"
 # before the option existed. Bump it after changing what the option does in
 # 82_fisheye_sfm.py.
 REDUNDANT_POINTS = "redundant-points-1"
+# Joins the sfm key -- and so train and export -- of stitched jobs with a
+# perspective_* sfm.render only. 1: 32_pick_model.py counts rig frames instead
+# of the 12 pinhole images per panorama, so sfm_finalize's registration floor
+# applies to these runs at all; entries cached before it never passed that
+# check. Spherical and fisheye keys do not carry it and keep theirs.
+STITCHED_SFM = "stitched-sfm-1"
 # Joins every train key -- and so export -- and nothing upstream of it: a new
 # trainer build retrains from the frames, masks and SfM already cached, where a
 # config_version bump would redo all of them. Moves with LFS_REF in
@@ -448,7 +458,7 @@ class JobConfig(Cfg):
     @model_validator(mode="after")
     def _check_pipeline(self):
         # sfm.render and sfm.mapper choose between the STITCHED reconstructions.
-        # A raw .OSV has exactly one: the two-pass incremental rig. Refuse a
+        # A raw .OSV has exactly one: the incremental rig. Refuse a
         # config that asks for something else rather than run the rig under a
         # config -- and a cache key -- that claims otherwise. The defaults are
         # what every client sends, so they pass.
@@ -522,6 +532,16 @@ class JobConfig(Cfg):
         # window land in the stage record. select.imu is a term, and only while
         # on (IMU_SELECT), so every entry cached before the option keeps its key.
         sel = self.select.model_dump(exclude={"imu", "distance_m", "max_gap_s"})
+        # The field the mode does not read is hashed at its default, the way
+        # k_mask treats a disabled mask: window mode never reads target_panos,
+        # target mode never reads window (which the API sets to 3 for .OSV), so
+        # two jobs selecting the same frames share one entry. Window mode with
+        # the default target_panos -- every UI job -- keeps the key it had.
+        defaults = SelectCfg()
+        if self.select.mode == "window":
+            sel["target_panos"] = defaults.target_panos
+        elif self.select.mode == "target":
+            sel["window"] = defaults.window
         if self.select.mode == "distance":
             sel = {"mode": "distance", "distance_m": self.select.distance_m,
                    "max_gap_s": self.select.max_gap_s, "algorithm": "avata_velocity_v1"}
@@ -548,6 +568,8 @@ class JobConfig(Cfg):
                       self.sfm.model_dump(exclude={"upright", "skip_redundant_points"}),
                       self._sfm_mask_term(),
                       *((FISHEYE_SFM,) if self.is_fisheye else ()),
+                      *((STITCHED_SFM,) if not self.is_fisheye
+                        and self.sfm.render != "spherical" else ()),
                       *((UPRIGHT,) if self.sfm.upright else ()),
                       *((REDUNDANT_POINTS,) if self.sfm.skip_redundant_points else ()))
 

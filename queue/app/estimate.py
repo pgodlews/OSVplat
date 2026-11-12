@@ -11,7 +11,8 @@ import time
 from typing import Optional
 
 from . import db
-from .jobs import JobConfig
+from .jobs import FISHEYE_EXTS, JobConfig
+from .stages import ORDER
 
 # Seed constants (README runs 2-5).
 SEED = {
@@ -26,11 +27,14 @@ SEED = {
     "fisheye_select_per_cand": 0.008,
     "fisheye_mask_per_frame": 1.05,     # stitch 17 s + masker 78 s + warp 13 s
     # Fisheye rig SfM is superlinear in rig frames. Extraction and matching are
-    # per frame, but each global bundle adjustment covers the whole model and
-    # recurs at every ~10% of growth. Mapping is fitted over the queue's
-    # fisheye runs, 67-1404 frames, as 0.0794 * n^1.7 s: exact at 1404 frames
-    # (4 h 57 min), about 2x high at 330. Clips of equal length still differ by
-    # more than 3x. Assumes 82_fisheye_sfm.py's lifted direct-solver limit.
+    # per frame, but each global bundle adjustment covers the whole model.
+    # Mapping is fitted over the queue's fisheye runs, 67-1404 frames, as
+    # 0.0794 * n^1.7 s: exact at 1404 frames (4 h 57 min), about 2x high at
+    # 330. Clips of equal length still differ by more than 3x. Assumes
+    # 82_fisheye_sfm.py's lifted direct-solver limit. The fit predates
+    # FISHEYE_SFM 2-4 (global BA every 100 % of growth instead of 10 %, 2
+    # refinements instead of 5), which roughly halved mapping on clip 0005, so
+    # it now runs high; refit from fisheye-sfm-4 runs before changing it.
     "fisheye_sfm_extract_match_per_frame": 0.7,
     "fisheye_sfm_map_coeff": 0.0794,
     "fisheye_sfm_map_exponent": 1.7,
@@ -60,7 +64,7 @@ def _train_scaling(max_width: int, max_cap: int) -> float:
 
 
 def _is_fisheye_cfg(cfg: dict) -> bool:
-    return str((cfg.get("input") or {}).get("file", "")).lower().endswith(".osv")
+    return str((cfg.get("input") or {}).get("file", "")).lower().endswith(FISHEYE_EXTS)
 
 
 def _fitted_rate(fisheye: bool = False) -> Optional[float]:
@@ -72,17 +76,21 @@ def _fitted_rate(fisheye: bool = False) -> Optional[float]:
     time, badly underestimating full-size runs.
     """
     try:
+        # The same test as JobConfig.is_fisheye, in SQL, so the LIMIT counts
+        # only this pipeline's jobs.
+        ext = " OR ".join(["lower(COALESCE(json_extract(j.config, '$.input.file'), '')) LIKE ?"]
+                          * len(FISHEYE_EXTS))
         rows = db.conn().execute(
-            """SELECT j.config AS config,
+            f"""SELECT j.config AS config,
                       MAX(CASE WHEN m.name='train_seconds' THEN m.value END) AS secs,
                       MAX(CASE WHEN m.name='final_step'    THEN m.value END) AS steps
                FROM jobs j JOIN metrics m ON m.job_id = j.id
-               WHERE j.state='done'
-                 AND (lower(substr(COALESCE(json_extract(j.config, '$.input.file'), ''), -4)) = '.osv') = ?
+               WHERE j.state='done' AND ({ext}) = ?
                GROUP BY j.id
                HAVING secs > 0 AND steps >= ?
                ORDER BY j.id DESC LIMIT ?""",
-            (int(fisheye), MIN_FIT_ITERS, MAX_FIT_JOBS)).fetchall()
+            (*(f"%{e}" for e in FISHEYE_EXTS), int(fisheye), MIN_FIT_ITERS,
+             MAX_FIT_JOBS)).fetchall()
     except Exception:                                          # noqa: BLE001
         return None
 
@@ -175,9 +183,9 @@ def estimate(cfg: JobConfig, clip_seconds: float,
     if cfg.select.mode == "target":
         panos = cfg.select.target_panos
     elif cfg.select.mode == "distance":
-        from avata_motion import plan
+        from . import osv
         from .config import SPLAT_ROOT
-        path, groups = plan(SPLAT_ROOT / cfg.input.file, candidates, cfg.frames.fps,
+        path, groups = osv.need_avata_motion().plan(SPLAT_ROOT / cfg.input.file, candidates, cfg.frames.fps,
                             cfg.input.trim_start or 0., cfg.select.distance_m, cfg.select.max_gap_s)
         panos = len(groups)
     else:
@@ -205,8 +213,11 @@ def estimate(cfg: JobConfig, clip_seconds: float,
             "train": iters / max(0.01, rate),
             "export": c["export_s"],
         }
+    # A job that stops early does not run what comes after, and a plan that
+    # counted it held the next job's slot for a whole training run.
+    skipped = ORDER[ORDER.index(cfg.run_until) + 1:] if cfg.run_until else []
     for k in est:
-        if cached.get(k):
+        if cached.get(k) or k in skipped:
             est[k] = 0.0
     est = {k: round(v, 1) for k, v in est.items()}
     est["total"] = round(sum(est.values()), 1)
@@ -217,6 +228,7 @@ def estimate(cfg: JobConfig, clip_seconds: float,
         "rate_source": c.get("_fisheye_train_rate_source" if cfg.is_fisheye
                              else "_train_rate_source", "seed"),
         "pipeline": "fisheye_rig" if cfg.is_fisheye else "equirect",
+        "run_until": cfg.run_until,
     }
     if cfg.select.mode == "distance":
         est["_assumptions"].update(selection_mode="distance", distance_m=cfg.select.distance_m,
