@@ -85,7 +85,7 @@ Code comments refer to these by number (`docs/troubleshooting.md #18`).
   `sudo prime-select on-demand` and reboot. Found on a NUC with an RTX 3090
   over OcuLink.
 
-## LichtFeld options (pinned commit 09d33818, v0.5.4)
+## LichtFeld options (pinned commit fac5e497, v0.5.4.2)
 
 The queue refuses the two exclusions below at submit, so they only bite through
 `extra_args`. Measurements are in [how-it-works.md](how-it-works.md#trainer-options-measured).
@@ -101,8 +101,9 @@ The queue refuses the two exclusions below at submit, so they only bite through
 - Trained and exported on a fisheye rig at `e654717e`: `mrnf`, SH degree 1 and
   3, a 4.5M cap, `--background-improvements`, `--exposure-correction`,
   `--ppisp`. `mcmc`, `--enable-mip` and the bilateral grid were last checked
-  at `04e4607`. `09d33818` (v0.5.4) retunes MRNF's defaults and losses and
-  has not been trained through this list yet.
+  at `04e4607`. `09d33818` (v0.5.4) retunes MRNF's defaults and losses, and
+  `fac5e497` (v0.5.4.2) changes the masked loss and MRNF's growth at the
+  splat cap; neither has been trained through this list yet.
 - **`--background-improvements` is gone in v0.5.4** (upstream #2780), and the
   trainer rejects the flag. The queue refuses `train.background_improvements`
   at submit; stored configs, which all carry it as false, still load.

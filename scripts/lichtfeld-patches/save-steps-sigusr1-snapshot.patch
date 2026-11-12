@@ -1,4 +1,4 @@
-OSVplat patch for LichtFeld-Studio 09d33818 (v0.5.4; applied by scripts/setup_lichtfeld.sh).
+OSVplat patch for LichtFeld-Studio fac5e497 (v0.5.4.2; applied by scripts/setup_lichtfeld.sh).
 Intended for upstream; drop it once LichtFeld has all three.
 
 1. --save-steps: project (.licht) snapshot iterations as a comma list, like
@@ -20,13 +20,14 @@ Intended for upstream; drop it once LichtFeld has all three.
 
 Measured for OSVplat #10 on 3067e9e0: the resolved parameters with --save-steps
 equal those with a --config dump carrying save_steps; see the issue for timings.
-Rebased onto v0.5.4 unchanged apart from item 3.
+Rebased onto v0.5.4 unchanged apart from item 3, and onto v0.5.4.2 with only
+the context lines moving.
 
 diff --git a/src/app/application.cpp b/src/app/application.cpp
-index 4a3e36a7..32faeb4a 100644
+index 9cbebce7..43200b52 100644
 --- a/src/app/application.cpp
 +++ b/src/app/application.cpp
-@@ -932,6 +932,20 @@ namespace lfs::app {
+@@ -970,6 +970,20 @@ namespace lfs::app {
              return exit_code;
          }
  
@@ -47,7 +48,7 @@ index 4a3e36a7..32faeb4a 100644
          int runHeadless(std::unique_ptr<lfs::core::param::TrainingParameters> params) {
              if (params->dataset.data_path.empty() &&
                  !params->resume_checkpoint &&
-@@ -1034,9 +1048,8 @@ namespace lfs::app {
+@@ -1072,9 +1086,8 @@ namespace lfs::app {
  
                      core::Tensor::trim_memory_pool();
                      if (const auto result =
@@ -59,7 +60,7 @@ index 4a3e36a7..32faeb4a 100644
                          !result) {
                          LOG_ERROR(
                              "Training error: {}",
-@@ -1093,7 +1106,7 @@ namespace lfs::app {
+@@ -1131,7 +1144,7 @@ namespace lfs::app {
  
                      core::Tensor::trim_memory_pool();
  
@@ -68,7 +69,7 @@ index 4a3e36a7..32faeb4a 100644
                          LOG_ERROR("Training error: {}", lfs::format_for_developer(result.error()));
                          if (!params->python_scripts.empty()) {
                              core::teardown_gpu_before_exit();
-@@ -1140,7 +1153,7 @@ namespace lfs::app {
+@@ -1178,7 +1191,7 @@ namespace lfs::app {
  
                      core::Tensor::trim_memory_pool();
  
@@ -228,10 +229,10 @@ index 6eb0ebd6..2062c812 100644
      };
  
 diff --git a/src/core/argument_parser.cpp b/src/core/argument_parser.cpp
-index dcae0e97..55457404 100644
+index 2c4285e5..07cf63dd 100644
 --- a/src/core/argument_parser.cpp
 +++ b/src/core/argument_parser.cpp
-@@ -196,7 +196,8 @@ namespace {
+@@ -205,7 +205,8 @@ namespace {
  
      // Each --eval-steps value may hold several comma-separated iterations; the
      // result is sorted and free of duplicates.
@@ -241,7 +242,7 @@ index dcae0e97..55457404 100644
          std::vector<size_t> steps;
          for (const auto& value : values) {
              std::string_view rest = value;
-@@ -214,7 +215,7 @@ namespace {
+@@ -223,7 +224,7 @@ namespace {
                          .code = lfs::ErrorCode::InvalidArgument,
                          .domain = lfs::ErrorDomain::Core,
                          .user_message = std::format(
@@ -250,15 +251,15 @@ index dcae0e97..55457404 100644
                          .detection = LFS_SOURCE_SITE_CURRENT(),
                      });
                  steps.push_back(step);
-@@ -895,6 +896,7 @@ namespace {
-             ::args::ValueFlag<float> eval_mask_opacity(output_group, "opacity", lfs::core::args::optimization_cli_help("--eval-mask-opacity"), {"eval-mask-opacity"});
+@@ -934,6 +935,7 @@ namespace {
+             ::args::ValueFlag<std::string> eval_mask_report(output_group, "sets", std::string(EVAL_MASK_REPORT_HELP), {"eval-mask-report"});
              ::args::Flag no_download(output_group, "no_download", "Do not download optional model weights", {"no-download"});
              ::args::ValueFlagList<std::string> eval_steps(output_group, "eval_steps", "Evaluation iterations as a comma list, e.g. 1000,7000,30000 (replaces the default 7000,30000; the final iteration is always evaluated)", {"eval-steps"});
 +            ::args::ValueFlagList<std::string> save_steps(output_group, "save_steps", "Project (.licht) snapshot iterations as a comma list, e.g. 5000,10000 (replaces the default 7000,30000; scaled by --steps-scaler like --eval-steps)", {"save-steps"});
              ::args::Flag no_save_eval_images(output_group, "no_save_eval_images", "Disable saving of evaluation comparison images (GT vs rendered) during eval (default: enabled)", {"no-save-eval-images"});
              ::args::ValueFlagList<std::string> timelapse_images(output_group, "timelapse_images", "Image filenames to render timelapse images for", {"timelapse-images"});
              ::args::ValueFlag<int> timelapse_every(output_group, "timelapse_every", "Render timelapse image every N iterations (default: 50)", {"timelapse-every"});
-@@ -1454,6 +1456,13 @@ namespace {
+@@ -1494,6 +1496,13 @@ namespace {
                      return std::unexpected(std::string(steps.error().user_message()));
                  eval_steps_val = std::move(*steps);
              }
@@ -272,7 +273,7 @@ index dcae0e97..55457404 100644
  
              std::optional<std::string> eval_mask_val;
              if (cli_option_present({"--eval-mask"})) {
-@@ -1587,6 +1596,7 @@ namespace {
+@@ -1636,6 +1645,7 @@ namespace {
                                                                         : std::optional<float>(),
                                          no_edge_map_flag = bool(no_edge_map),
                                          eval_steps_val = std::move(eval_steps_val),
@@ -280,7 +281,7 @@ index dcae0e97..55457404 100644
                                          freeze_lr_scale_val = cli_option_present({"--freeze-lr-scale"}) ? std::optional<float>(::args::get(freeze_lr_scale)) : std::optional<float>(),
                                          exclude_export_flag = bool(exclude_export),
                                          save_project_at_iteration_val =
-@@ -1764,6 +1774,9 @@ namespace {
+@@ -1814,6 +1824,9 @@ namespace {
                  if (eval_steps_val && !eval_steps_val->empty()) {
                      opt.eval_steps = *eval_steps_val;
                  }
@@ -290,7 +291,7 @@ index dcae0e97..55457404 100644
                  setVal(freeze_lr_scale_val, params.freeze_lr_scale);
                  setFlag(exclude_export_flag, params.exclude_frozen_add_splats_from_export);
  
-@@ -1871,6 +1884,7 @@ namespace {
+@@ -1922,6 +1935,7 @@ namespace {
                  note_opt("screen_share_penalty", screen_share_penalty_val.has_value());
                  note_opt("use_edge_map", no_edge_map_flag);
                  note_opt("eval_steps", eval_steps_val && !eval_steps_val->empty());
@@ -299,10 +300,10 @@ index dcae0e97..55457404 100644
                  note_opt("invert_masks", invert_masks_flag);
                  note_opt("use_alpha_as_mask", no_alpha_as_mask_flag);
 diff --git a/src/training/trainer.cpp b/src/training/trainer.cpp
-index deee5fcc..685b4534 100644
+index 43037734..57823ffd 100644
 --- a/src/training/trainer.cpp
 +++ b/src/training/trainer.cpp
-@@ -3298,6 +3298,7 @@ namespace lfs::training {
+@@ -3292,6 +3292,7 @@ namespace lfs::training {
  
              initialized_ = true;
  
@@ -310,7 +311,7 @@ index deee5fcc..685b4534 100644
              return {};
          } catch (const std::exception& e) {
              return std::unexpected(std::format("Failed to initialize trainer: {}", e.what()));
-@@ -4423,6 +4424,13 @@ namespace lfs::training {
+@@ -4433,6 +4434,13 @@ namespace lfs::training {
              base_explicit_commit_uuid;
          prepared_project_autosave_sequence_ =
              autosave_sequence;

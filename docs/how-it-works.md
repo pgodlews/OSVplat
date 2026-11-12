@@ -488,8 +488,8 @@ rebuild months later does not silently produce a different trainer:
 
 | Component | Pin | Override |
 |---|---|---|
-| LichtFeld Studio | `09d33818` (v0.5.4), plus `scripts/lichtfeld-patches/` | `LFS_REF` |
-| vcpkg | `04a9d8e5` (2026.07.29) | `VCPKG_REF` |
+| LichtFeld Studio | `fac5e497` (v0.5.4.2), plus `scripts/lichtfeld-patches/` | `LFS_REF` |
+| vcpkg | `9eec002d` (2026.10.16) | `VCPKG_REF` |
 | gsplat (renders and evaluation only) | `28e794ca` (1.6.0), torch 2.9.1+cu130, numpy 2.5.3 | `GSPLAT_REF` (numpy: `NUMPY` in `setup_gsplat_venv.sh`) |
 | pycolmap-cuda12 | 4.2.1 | edit `setup_sfm_venv.sh` |
 | pycolmap on a Mac | pgodlews/colmap `0fea5683` (`metal-sift-lanxinger`, COLMAP 4.2.0-dev), torch 2.14.1 (MPS) | `COLMAP_REF` in `setup_mac.sh` |

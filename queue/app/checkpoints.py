@@ -134,7 +134,7 @@ def startup_check() -> None:
 
 # ------------------------------------------------------- trainer output
 
-# LichtFeld's snapshot lines (09d33818 with scripts/lichtfeld-patches/, which
+# LichtFeld's snapshot lines (fac5e497 with scripts/lichtfeld-patches/, which
 # restores the first and last; LichtFeld #3134 had removed them):
 #   Prepared .licht snapshot <uuid> for iteration 700 (547129741 checkpoint bytes)
 #   Background .licht append complete: <path> generation=2 snapshot=<uuid> rewritten=5 ...
