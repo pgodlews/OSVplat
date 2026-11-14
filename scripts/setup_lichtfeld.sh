@@ -107,7 +107,14 @@ x264_tgz=$VCPKG_ROOT/downloads/videolan-x264-$X264.tar.gz
 if [ ! -f "$x264_tgz" ]; then
   mkdir -p "$VCPKG_ROOT/downloads"
   x264_src=$(mktemp -d)
-  git clone -q --filter=blob:none https://code.videolan.org/videolan/x264.git "$x264_src"
+  # GitHub's mirror is the fallback: code.videolan.org refused every connection
+  # during the 0.2.0-rc6 build (2026-11-14). Same commit, same tree, so the
+  # same tarball; the SHA-512 check below is the gate either way.
+  for url in https://code.videolan.org/videolan/x264.git https://github.com/mirror/x264.git; do
+    rm -rf "$x264_src" && mkdir -p "$x264_src"
+    git clone -q --filter=blob:none "$url" "$x264_src" && git -C "$x264_src" cat-file -e "$X264^{commit}" && break
+    echo "x264: $url failed, trying the next source" >&2
+  done
   git -C "$x264_src" archive --format=tar --prefix="x264-$X264/" "$X264" | gzip -n > "$x264_tgz.part"
   rm -rf "$x264_src"
   [ "$(sha512sum < "$x264_tgz.part" | cut -d' ' -f1)" = "$X264_SHA512" ] \
