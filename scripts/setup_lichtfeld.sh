@@ -12,8 +12,8 @@
 # Moving LFS_REF means moving TRAINER in queue/app/jobs.py with it.
 set -x
 set -euo pipefail
-LFS_REF=${LFS_REF:-09d338189162b52d888fdbe2c88025e31d0dea05}    # v0.5.4
-VCPKG_REF=${VCPKG_REF:-04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4}    # 2026.07.29-440
+LFS_REF=${LFS_REF:-fac5e497aeabfa44b9d09e2b52f22a721aa3a28c}    # v0.5.4.2
+VCPKG_REF=${VCPKG_REF:-9eec002df1cd109f8f104cd966a763daf9751489}    # 2026.10.16; v0.5.4.2 pins ports (openssl 3.6.5, curl 8.23.0, ...) that 2026.07.29 does not carry
 SPLAT_ROOT=${SPLAT_ROOT:-$HOME/splat}
 # Compute capability of GPU 0 (8.6 for an RTX 3090, 8.9 for a 4090), or a list
 # for a build without a GPU: CUDA_ARCH="7.5;8.6;12.0". CMake wants it dotless.

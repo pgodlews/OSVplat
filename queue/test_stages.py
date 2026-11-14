@@ -949,7 +949,7 @@ with tempfile.TemporaryDirectory() as _d:
           and _bls[_bls.index("--steps-scaler") + 1] == "0.5")
 
     # The scaler is printed with %g (6 significant digits), so 10000 goes out
-    # as 0.333333. LichtFeld (09d33818, OptimizationParameters::scale_steps)
+    # as 0.333333. LichtFeld (fac5e497, OptimizationParameters::scale_steps)
     # computes lround(float(30000) * float(scaler)) in float32, which lands on
     # the requested count for every iter from 100 to 300000 (checked
     # exhaustively, 2026-11-12). train_finalize compares against

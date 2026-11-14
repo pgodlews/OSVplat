@@ -1,4 +1,4 @@
-OSVplat patch for LichtFeld-Studio 09d33818 (v0.5.4; applied by scripts/setup_lichtfeld.sh).
+OSVplat patch for LichtFeld-Studio fac5e497 (v0.5.4.2; applied by scripts/setup_lichtfeld.sh).
 Intended for upstream; drop it once LichtFeld has the flag.
 
 --opacity-reg: the opacity regularizer weight (opacity_reg), a Float binding
@@ -14,10 +14,10 @@ this build with the previous default, to tell that change apart from the rest
 of the v0.5.4 MRNF retune on OSVplat's own clips.
 
 diff --git a/src/core/argument_parser.cpp b/src/core/argument_parser.cpp
-index dcae0e97..cff00ddb 100644
+index e6c15ddd..2c4285e5 100644
 --- a/src/core/argument_parser.cpp
 +++ b/src/core/argument_parser.cpp
-@@ -63,6 +63,7 @@ namespace lfs::core::args {
+@@ -65,6 +65,7 @@ namespace lfs::core::args {
                                     "; values: ssim, ssim_cs"},
              OptimizationCliBinding{"--max-screen-share", "max_screen_share", Float},
              OptimizationCliBinding{"--screen-share-penalty", "screen_share_penalty", Float},
@@ -25,7 +25,7 @@ index dcae0e97..cff00ddb 100644
              OptimizationCliBinding{"--no-edge-map", "use_edge_map", Bool, true},
              OptimizationCliBinding{"--bg-mode", "bg_mode", Enum, false,
                                     "; values: solidcolor, modulation, image, random", "solid_color", "solidcolor"},
-@@ -769,6 +770,7 @@ namespace {
+@@ -815,6 +816,7 @@ namespace {
                      {"ssim_cs", lfs::core::param::DensifyErrorMap::SsimCs}});
              ::args::ValueFlag<float> max_screen_share(training_group, "max_screen_share", lfs::core::args::optimization_cli_help("--max-screen-share"), {"max-screen-share"});
              ::args::ValueFlag<float> screen_share_penalty(training_group, "screen_share_penalty", lfs::core::args::optimization_cli_help("--screen-share-penalty"), {"screen-share-penalty"});
@@ -33,7 +33,7 @@ index dcae0e97..cff00ddb 100644
              ::args::Flag no_edge_map(training_group, "no_edge_map", lfs::core::args::optimization_cli_help("--no-edge-map"), {"no-edge-map"});
              ::args::ValueFlag<std::string> bg_mode(training_group, "mode", lfs::core::args::optimization_cli_help("--bg-mode"), {"bg-mode"});
              ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
-@@ -1500,6 +1502,7 @@ namespace {
+@@ -1546,6 +1548,7 @@ namespace {
                                          morton_reorder_interval_val = cli_option_present({"--morton-reorder-interval"}) ? std::optional<int>(::args::get(morton_reorder_interval)) : std::optional<int>(),
                                          sh_degree_val = cli_option_present({"--sh-degree"}) ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
                                          min_opacity_val = cli_option_present({"--min-opacity"}) ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
@@ -41,27 +41,27 @@ index dcae0e97..cff00ddb 100644
                                          eval_mask_opacity_val = cli_option_present({"--eval-mask-opacity"}) ? std::optional<float>(::args::get(eval_mask_opacity)) : std::optional<float>(),
                                          cropbox_lr_scale_val = cli_option_present({"--cropbox-lr-scale"}) ? std::optional<float>(::args::get(cropbox_lr_scale)) : std::optional<float>(),
                                          cropbox_loss_weight_val = cli_option_present({"--cropbox-loss-weight"}) ? std::optional<float>(::args::get(cropbox_loss_weight)) : std::optional<float>(),
-@@ -1670,6 +1673,7 @@ namespace {
+@@ -1716,6 +1719,7 @@ namespace {
                  }
                  setVal(sh_degree_val, opt.sh_degree);
                  setVal(min_opacity_val, opt.min_opacity);
 +                setVal(opacity_reg_val, opt.opacity_reg);
                  setVal(cropbox_lr_scale_val, opt.cropbox_lr_scale);
                  setVal(cropbox_loss_weight_val, opt.cropbox_loss_weight);
-                 setVal(init_num_pts_val, opt.init_num_pts);
-@@ -1822,6 +1826,7 @@ namespace {
+                 setVal(cropbox_growth_inside_val, opt.cropbox_growth_inside);
+@@ -1868,6 +1872,7 @@ namespace {
                  note_opt("morton_reorder_interval", morton_reorder_interval_val.has_value());
                  note_opt("sh_degree", sh_degree_val.has_value());
                  note_opt("min_opacity", min_opacity_val.has_value());
 +                note_opt("opacity_reg", opacity_reg_val.has_value());
                  note_opt("cropbox_lr_scale", cropbox_lr_scale_val.has_value());
                  note_opt("cropbox_loss_weight", cropbox_loss_weight_val.has_value());
-                 note_opt("init_num_pts", init_num_pts_val.has_value());
+                 note_opt("cropbox_growth_inside", cropbox_growth_inside_val.has_value());
 diff --git a/tests/test_argument_parser.cpp b/tests/test_argument_parser.cpp
-index e9ed90a2..e86581f7 100644
+index 58354999..282b5599 100644
 --- a/tests/test_argument_parser.cpp
 +++ b/tests/test_argument_parser.cpp
-@@ -802,6 +802,31 @@ TEST(ArgumentParserTest, MrnfCapacityDefaultsResolveAfterCliOverrides) {
+@@ -884,6 +884,31 @@ TEST(ArgumentParserTest, MrnfCapacityDefaultsResolveAfterCliOverrides) {
      EXPECT_FLOAT_EQ((*parsed)->optimization.shs_lr, 0.005f);
  }
  

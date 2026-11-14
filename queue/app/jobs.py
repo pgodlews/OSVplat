@@ -415,7 +415,7 @@ STITCHED_SFM = "stitched-sfm-1"
 # trainer build retrains from the frames, masks and SfM already cached, where a
 # config_version bump would redo all of them. Moves with LFS_REF in
 # scripts/setup_lichtfeld.sh.
-TRAINER = "lichtfeld-09d33818"
+TRAINER = "lichtfeld-fac5e497"
 
 # What the API sets for .OSV input when a request leaves sfm.upright out. On:
 # it only moves and scales the model, and falls back on its own when the clip
