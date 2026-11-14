@@ -53,11 +53,13 @@ RUN /src/scripts/setup_gsplat_venv.sh && rm -rf /root/.cache/pip /opt/splat/gspl
 # LichtFeld's .so files and binary, detached debug info, and the checkout's
 # history (setup_lichtfeld.sh reads it only while building). 2.06 GB of the
 # 4.43 GB LichtFeld directory in 0.2.0-rc1: 1.61 GB of .a, 0.31 GB of .dwarf,
-# 0.14 GB of .git. A step of its own, last, so no cached layer above changes;
+# 0.14 GB of .git. Also the checkout's tests/ (18 MB in v0.5.4.2): its
+# synthetic .mp4 fixtures fail publish_image.sh's leak scan, which stopped
+# 0.2.0-rc7. A step of its own, last, so no cached layer above changes;
 # the ldd checks in the train and all stages still catch a library removed
 # that a binary needs.
 RUN cd /opt/splat/LichtFeld-Studio \
-    && rm -rf .git \
+    && rm -rf .git tests \
     && find build -name '*.a' -delete \
     && find build -name '*.dwarf' -delete
 
