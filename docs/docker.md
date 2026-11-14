@@ -44,7 +44,7 @@ mkdir -p samples data models
 ```
 
 Then either pull the prebuilt image, `ghcr.io/pgodlews/osvplat:latest`
-(currently 0.1.4-rc6; set `IMAGE` in `.env` to pin a version, or a digest as in
+(currently 0.2.0; set `IMAGE` in `.env` to pin a version, or a digest as in
 [Verifying the image](#verifying-the-image)):
 
 ```bash
