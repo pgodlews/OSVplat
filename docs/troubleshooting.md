@@ -103,7 +103,10 @@ The queue refuses the two exclusions below at submit, so they only bite through
   `--ppisp`. `mcmc`, `--enable-mip` and the bilateral grid were last checked
   at `04e4607`. `09d33818` (v0.5.4) retunes MRNF's defaults and losses, and
   `fac5e497` (v0.5.4.2) changes the masked loss and MRNF's growth at the
-  splat cap; neither has been trained through this list yet.
+  splat cap; neither has been trained through this list yet. Both train and
+  export with the queue's defaults (`mrnf`, SH 3, `--gut`,
+  `--no-exposure-correction`); v0.5.4.2 against v0.5.4 is measured in
+  [how-it-works.md](how-it-works.md#pinned-toolchain).
 - **`--background-improvements` is gone in v0.5.4** (upstream #2780), and the
   trainer rejects the flag. The queue refuses `train.background_improvements`
   at submit; stored configs, which all carry it as false, still load.

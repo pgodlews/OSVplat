@@ -499,3 +499,16 @@ snapshot in headless mode, and `--opacity-reg`) and restore two log lines the
 queue reads (see each patch's header). They change no default, so they do not
 move `TRAINER`. A patch that no longer applies to a new `LFS_REF`
 stops the build.
+
+**v0.5.4.2 against v0.5.4**, measured 2026-11-14: Osmo 360 clip 0031, one
+RTX 3090, the same SfM handoff bundle imported twice, default `train` (MRNF,
+30k steps, 3M cap, SH 3). Training took 81.6 min against 83.5, peak VRAM
+13.5 GB against 13.7. On the 146 validation images both runs held out, PSNR
+moved +0.04 dB, SSIM +0.003 (better on 107 of them) and LPIPS −0.002 (better
+on 123): no regression, as far as one run per side can show. The headline
+numbers fell (25.60 / 0.697 / 0.406 against 25.66 / 0.709 / 0.395) only
+because the split moved: v0.5.4.2 sorts images by name before holding out
+every 8th, where v0.5.4 took the model's own order (the two lenses
+interleaved, so every 4th front-lens frame). Held-out metrics across this
+pin are therefore not like-for-like, and `93_render_compare.py`, which always
+sorted by name, now picks the same held-out views as the trainer.

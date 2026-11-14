@@ -591,8 +591,9 @@ Caspar backend supports neither fisheye cameras nor rig refinement.
 
 `scripts/93_render_compare.py` renders several models from the same held-out poses into one
 contact sheet, with the source panorama as the last column. "Held-out" is now literal: poses
-come from the trainer's validation split (`--test-every`, image *i* is held out when
-`i % N == 0`, default 8), not from an even sample over every registered image — which
+come from the trainer's validation split (`--test-every`, image *i* of the images sorted by
+name is held out when `i % N == 0`, default 8; LichtFeld sorts them that way since v0.5.4.2),
+not from an even sample over every registered image — which
 returned a training view seven times in eight and hid the overfitting the sheet exists to
 show. `--test-every 0` samples all images and labels the tiles as training views; the queue
 passes 0 automatically when a selected job trained without `--eval`. The ground-truth column is
