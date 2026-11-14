@@ -56,8 +56,8 @@ keyboard.
 
 ## Requirements
 
-- A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (0.1.4 images
-  run on RTX 20xx and newer; the older 0.1.2/0.1.3 images need RTX 30xx or
+- A Linux workstation with an **NVIDIA GPU**, RTX 20xx or newer (images from
+  0.1.4 on run on RTX 20xx and newer; the older 0.1.2/0.1.3 images need RTX 30xx or
   newer, see [troubleshooting #31](docs/troubleshooting.md); developed on
   RTX 3090s; a Standard run peaked at 10 GB of VRAM), and ~20 GB of free disk
   per clip. Or a rented one: see [docs/cloud.md](docs/cloud.md).
@@ -79,11 +79,11 @@ cp /media/$USER/SD/DCIM/DJI_001/CAM_*.OSV samples/
 ```
 
 `docker compose pull` fetches the prebuilt image
-(`ghcr.io/pgodlews/osvplat:latest`, currently 0.1.4-rc6); the `--build` form
+(`ghcr.io/pgodlews/osvplat:latest`, currently 0.2.0); the `--build` form
 builds it here instead, about an hour, once. Details, settings, updating and
 verifying the signature: **[docs/docker.md](docs/docker.md)**.
 
-**On a rented GPU** (Vast.ai, RunPod): start `ghcr.io/pgodlews/osvplat:0.1.4-rc6`
+**On a rented GPU** (Vast.ai, RunPod): start `ghcr.io/pgodlews/osvplat:0.2.0`
 with your SSH key and two presigned URLs; `scripts/presign_s3.py` makes them.
 Steps, settings and what to watch out for: **[docs/cloud.md](docs/cloud.md)**.
 
